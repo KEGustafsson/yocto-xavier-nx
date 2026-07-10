@@ -11,6 +11,10 @@ SRC_URI = " \
 
 inherit systemd allarch
 
+# boat-can0.service calls /sbin/ip; make the dependency explicit so the package
+# is functional even when installed standalone (not only via packagegroup-boat).
+RDEPENDS:${PN} = "iproute2"
+
 SYSTEMD_SERVICE:${PN} = "boat-can0.service"
 
 do_install() {

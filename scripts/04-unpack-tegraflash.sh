@@ -22,7 +22,14 @@ done
 [[ -n "${TARBALL}" ]] || die "no tegraflash tarball in ${DEPLOY}; run scripts/03-build.sh"
 
 log "Using tarball: ${TARBALL}"
-rm -rf "${FLASH_DIR}"
+# FLASH_DIR is env-overridable; canonicalize and refuse dangerous targets before
+# the recursive delete so a typo/bad override can't wipe an important directory.
+FLASH_DIR="$(realpath -m -- "${FLASH_DIR}")"
+case "${FLASH_DIR}" in
+  ""|/|"${REPO_ROOT}"|"${WORKROOT}"|"${BUILD_DIR}"|"${LAYERS_DIR}"|"${HOME}")
+    die "refusing to remove unsafe FLASH_DIR: '${FLASH_DIR}'" ;;
+esac
+rm -rf -- "${FLASH_DIR}"
 mkdir -p "${FLASH_DIR}"
 log "Extracting into ${FLASH_DIR} ..."
 tar -C "${FLASH_DIR}" -xf "${TARBALL}"

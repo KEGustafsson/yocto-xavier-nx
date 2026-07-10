@@ -40,7 +40,7 @@ Creates `yocto/build/` and writes:
 - `conf/bblayers.conf` — all layers incl. `layers/meta-boat`.
 - `conf/local.conf` — with a managed block:
 
-  ```
+  ```bitbake
   MACHINE = "jetson-xavier-nx-devkit"
   LICENSE_FLAGS_ACCEPTED += "commercial"     # accept NVIDIA BSP licences
   INIT_MANAGER = "systemd"
@@ -62,7 +62,7 @@ IMAGE=core-image-base ./scripts/03-build.sh
 Under the hood: `source poky/oe-init-build-env yocto/build && bitbake core-image-base`.
 First run is long. Output lands in:
 
-```
+```text
 yocto/build/tmp/deploy/images/jetson-xavier-nx-devkit/
     core-image-base-jetson-xavier-nx-devkit.tegraflash.tar.gz   <- flashing bundle
     core-image-base-jetson-xavier-nx-devkit.ext4                 <- rootfs

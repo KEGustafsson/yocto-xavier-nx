@@ -35,7 +35,7 @@
 
 | Symptom | Fix |
 |---------|-----|
-| `can0` missing | CAN kernel modules absent. Ensure `boat-image` pulls `kernel-module-mttcan`/`kernel-module-can*`; check `dmesg | grep -i can`. |
+| `can0` missing | CAN kernel modules absent. Ensure `boat-image` pulls `kernel-module-mttcan`/`kernel-module-can*`; check `dmesg \| grep -i can`. |
 | `candump` silent | No transceiver / termination / bus power, or wrong bitrate. NMEA 2000 = 250 kbit/s; verify `/etc/default/boat-can0`. |
 | Interface won't come up | `ip -details link show can0`; check `boat-can0.service` status/logs. |
 

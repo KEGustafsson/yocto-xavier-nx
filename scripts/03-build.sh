@@ -27,9 +27,15 @@ bitbake "${TARGET}"
 
 DEPLOY="${BUILD_DIR}/tmp/deploy/images/${MACHINE}"
 log "Build finished. Artifacts in: ${DEPLOY}"
-if ls "${DEPLOY}/${TARGET}-${MACHINE}.tegraflash.tar.gz" >/dev/null 2>&1; then
-  log "Flashing tarball: ${DEPLOY}/${TARGET}-${MACHINE}.tegraflash.tar.gz"
+# Match the naming accepted by 04-unpack-tegraflash.sh (both .tar.gz and .tar.zst).
+TARBALL="$(ls -t \
+  "${DEPLOY}/${TARGET}-${MACHINE}.tegraflash.tar.gz" \
+  "${DEPLOY}/${TARGET}-${MACHINE}.tegraflash-tar.zst" \
+  "${DEPLOY}"/*.tegraflash.tar.gz "${DEPLOY}"/*.tegraflash-tar.zst \
+  2>/dev/null | head -n1 || true)"
+if [[ -n "${TARBALL}" ]]; then
+  log "Flashing tarball: ${TARBALL}"
 else
-  warn "No .tegraflash.tar.gz found - check that MACHINE is a Tegra machine."
+  warn "No .tegraflash tarball found - check that MACHINE (${MACHINE}) is a Tegra machine."
 fi
 log "Next: scripts/04-unpack-tegraflash.sh"
