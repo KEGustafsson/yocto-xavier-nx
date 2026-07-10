@@ -1,0 +1,49 @@
+# Optional: reproducible build via kas (https://kas.readthedocs.io).
+#
+#   pip3 install kas
+#   kas build kas/xavier-nx-nvme.yml           # build boat-image
+#   kas shell kas/xavier-nx-nvme.yml           # drop into a configured bitbake shell
+#
+# This mirrors what scripts/01..03 do, but pins layers and centralises config.
+# Replace the branch refs with commit hashes for a fully reproducible product.
+header:
+  version: 14
+
+machine: jetson-xavier-nx-devkit
+distro: poky
+target: boat-image
+
+repos:
+  meta-boat:
+    # this repository (the layer lives under layers/meta-boat)
+    layers:
+      layers/meta-boat:
+
+  poky:
+    url: https://git.yoctoproject.org/poky
+    branch: kirkstone
+    layers:
+      meta:
+      meta-poky:
+      meta-yocto-bsp:
+
+  meta-openembedded:
+    url: https://github.com/openembedded/meta-openembedded.git
+    branch: kirkstone
+    layers:
+      meta-oe:
+      meta-python:
+      meta-networking:
+      meta-filesystems:
+
+  meta-tegra:
+    url: https://github.com/OE4T/meta-tegra.git
+    branch: kirkstone
+
+local_conf_header:
+  nvme-boot: |
+    LICENSE_FLAGS_ACCEPTED += "commercial"
+    INIT_MANAGER = "systemd"
+    # Boot the rootfs from the first NVMe SSD:
+    TNSPEC_BOOTDEV = "nvme0n1p1"
+    ROOTFSPART_SIZE = "68719476736"

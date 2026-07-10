@@ -1,0 +1,7 @@
+# Yocto working tree (layers cloned + build output) — never commit
+/yocto/
+
+# Editor / OS cruft
+*.swp
+*~
+.DS_Store

@@ -1,0 +1,24 @@
+# Reference fragment for a manual build (scripts/02-configure-build.sh writes
+# this automatically). Append the relevant lines to your build/conf/local.conf.
+
+MACHINE = "jetson-xavier-nx-devkit"
+
+# NVIDIA BSP/firmware components are shipped under commercial/proprietary flags.
+LICENSE_FLAGS_ACCEPTED += "commercial"
+
+# systemd init - suitable for an always-on embedded computer.
+INIT_MANAGER = "systemd"
+
+# ---- Boot rootfs from external NVMe storage ----
+# Set the boot device to the first NVMe SSD's first partition.
+# meta-tegra then selects an external partition layout and generates the
+# initrd-flash / doexternal.sh helpers in the tegraflash tarball.
+TNSPEC_BOOTDEV = "nvme0n1p1"
+
+# Size (bytes) of the rootfs (APP) partition created on the SSD. 64 GiB shown.
+ROOTFSPART_SIZE = "68719476736"
+
+# ---- Optional but recommended ----
+# Keep downloads and shared state outside the build dir.
+# DL_DIR = "${TOPDIR}/../downloads"
+# SSTATE_DIR = "${TOPDIR}/../sstate-cache"
