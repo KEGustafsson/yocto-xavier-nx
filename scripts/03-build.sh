@@ -20,8 +20,22 @@ log "Building '${TARGET}' for MACHINE=${MACHINE} (branch ${YOCTO_BRANCH})"
 warn "First build downloads many GB of source and can take 2-6 h on a fast host."
 
 # oe-init-build-env re-uses the existing conf, then hand off to bitbake.
+# It isn't nounset-safe (e.g. it checks $BBSERVER with no default), so relax
+# -u just for this sourced script.
 # shellcheck disable=SC1091
+set +u
 source "${LAYERS_DIR}/poky/oe-init-build-env" "${BUILD_DIR}" >/dev/null
+set -u
+
+# Python 3.14 changed multiprocessing's default start method (fork ->
+# forkserver), which breaks kirkstone-era bitbake's hashserv worker (see
+# scripts/pyfix/sitecustomize.py). Force fork back via a sitecustomize hook.
+# bitbake scrubs os.environ down to a small whitelist on startup
+# (bb.utils.clean_environment), so PYTHONPATH must be explicitly
+# whitelisted via BB_ENV_PASSTHROUGH_ADDITIONS or it never reaches the
+# forked bitbake-server process.
+export PYTHONPATH="${HERE}/pyfix${PYTHONPATH:+:${PYTHONPATH}}"
+export BB_ENV_PASSTHROUGH_ADDITIONS="PYTHONPATH${BB_ENV_PASSTHROUGH_ADDITIONS:+ ${BB_ENV_PASSTHROUGH_ADDITIONS}}"
 
 bitbake "${TARGET}"
 

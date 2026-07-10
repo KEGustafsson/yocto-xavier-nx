@@ -5,3 +5,7 @@
 *.swp
 *~
 .DS_Store
+
+# Python bytecode cache (e.g. scripts/pyfix/sitecustomize.py)
+__pycache__/
+*.pyc

@@ -13,8 +13,10 @@ source "${HERE}/env.sh"
 # oe-init-build-env creates/uses BUILD_DIR and drops us in it. Run in a subshell
 # so we don't pollute the caller, but we only need the side effect (conf/*).
 log "Initialising build dir at ${BUILD_DIR} ..."
+# oe-init-build-env isn't nounset-safe (e.g. it checks $BBSERVER with no
+# default), so relax -u just for this sourced script.
 # shellcheck disable=SC1091
-( source "${LAYERS_DIR}/poky/oe-init-build-env" "${BUILD_DIR}" >/dev/null )
+( set +u; source "${LAYERS_DIR}/poky/oe-init-build-env" "${BUILD_DIR}" >/dev/null )
 
 CONF="${BUILD_DIR}/conf"
 mkdir -p "${CONF}"
