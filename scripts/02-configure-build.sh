@@ -73,6 +73,12 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
   # can't parse. Pin -native builds to C17 so gnulib falls back to the
   # older, always-safe __attribute__((warn_unused_result)) form.
   echo 'BUILD_CFLAGS:append = " -std=gnu17"'
+  # Some -native configure scripts (e.g. gmp) hand-roll their own compiler
+  # probes and ignore CFLAGS entirely, always invoking "$CC" directly - so
+  # also bake the same -std into CC itself (BUILD_CC), not just CFLAGS.
+  # gmp's probes use old K&R-style empty-parameter-list declarations that
+  # C23 (GCC's new default) rejects as a hard error.
+  echo 'BUILD_CC:append = " -std=gnu17"'
   if [[ -n "${BOOTDEV}" ]]; then
     echo ""
     echo "# --- Boot rootfs from external NVMe storage ---"
