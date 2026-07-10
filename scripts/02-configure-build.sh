@@ -68,6 +68,11 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
   # Build parallelism (auto-detected; tune if the host struggles).
   echo 'BB_NUMBER_THREADS ?= "${@oe.utils.cpu_count()}"'
   echo 'PARALLEL_MAKE ?= "-j ${@oe.utils.cpu_count()}"'
+  # kirkstone's bundled gnulib (m4-native, unzip-native, ...) emits C23's
+  # [[nodiscard]] attribute syntax in a spot new host GCCs (default: C23)
+  # can't parse. Pin -native builds to C17 so gnulib falls back to the
+  # older, always-safe __attribute__((warn_unused_result)) form.
+  echo 'BUILD_CFLAGS:append = " -std=gnu17"'
   if [[ -n "${BOOTDEV}" ]]; then
     echo ""
     echo "# --- Boot rootfs from external NVMe storage ---"
