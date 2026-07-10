@@ -79,6 +79,13 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
   # gmp's probes use old K&R-style empty-parameter-list declarations that
   # C23 (GCC's new default) rejects as a hard error.
   echo 'BUILD_CC:append = " -std=gnu17"'
+  # bitbake.conf defines BUILD_CXXFLAGS as a lazy reference to
+  # BUILD_CFLAGS ("${BUILD_CFLAGS}"), so the -std=gnu17 above leaks into
+  # C++ builds too - breaking cmake-native's bootstrap, which needs
+  # C++11/14/17 and silently loses it once a C dialect flag wins the
+  # "last -std wins" race. Decouple it back to BUILD_CFLAGS's original,
+  # un-appended definition (bitbake.conf: BUILD_CPPFLAGS + BUILD_OPTIMIZATION).
+  echo 'BUILD_CXXFLAGS = "${BUILD_CPPFLAGS} ${BUILD_OPTIMIZATION}"'
   if [[ -n "${BOOTDEV}" ]]; then
     echo ""
     echo "# --- Boot rootfs from external NVMe storage ---"
