@@ -68,24 +68,23 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
   # Build parallelism (auto-detected; tune if the host struggles).
   echo 'BB_NUMBER_THREADS ?= "${@oe.utils.cpu_count()}"'
   echo 'PARALLEL_MAKE ?= "-j ${@oe.utils.cpu_count()}"'
-  # kirkstone's bundled gnulib (m4-native, unzip-native, ...) emits C23's
-  # [[nodiscard]] attribute syntax in a spot new host GCCs (default: C23)
-  # can't parse. Pin -native builds to C17 so gnulib falls back to the
-  # older, always-safe __attribute__((warn_unused_result)) form.
-  echo 'BUILD_CFLAGS:append = " -std=gnu17"'
-  # Some -native configure scripts (e.g. gmp) hand-roll their own compiler
-  # probes and ignore CFLAGS entirely, always invoking "$CC" directly - so
-  # also bake the same -std into CC itself (BUILD_CC), not just CFLAGS.
-  # gmp's probes use old K&R-style empty-parameter-list declarations that
-  # C23 (GCC's new default) rejects as a hard error.
-  echo 'BUILD_CC:append = " -std=gnu17"'
-  # bitbake.conf defines BUILD_CXXFLAGS as a lazy reference to
-  # BUILD_CFLAGS ("${BUILD_CFLAGS}"), so the -std=gnu17 above leaks into
-  # C++ builds too - breaking cmake-native's bootstrap, which needs
-  # C++11/14/17 and silently loses it once a C dialect flag wins the
-  # "last -std wins" race. Decouple it back to BUILD_CFLAGS's original,
-  # un-appended definition (bitbake.conf: BUILD_CPPFLAGS + BUILD_OPTIMIZATION).
-  echo 'BUILD_CXXFLAGS = "${BUILD_CPPFLAGS} ${BUILD_OPTIMIZATION}"'
+  # This host's system GCC (15, defaulting to C23/C++23 with a matching
+  # newer libstdc++) is much newer than kirkstone was ever built/tested
+  # against: its C23 default breaks old gnulib (m4-native, unzip-native)
+  # and K&R-style probes (gmp-native), and LLVM 13 (bundled with rustc
+  # 1.59, needed for python3-cryptography's Rust extension) doesn't
+  # compile cleanly against a GCC/libstdc++ this new. Rather than patch
+  # every old -native recipe one at a time, point -native/-nativesdk
+  # builds at gcc-12/g++-12 (`sudo apt-get install gcc-12 g++-12`),
+  # matching the GCC generation kirkstone actually expects.
+  # Absolute paths: bitbake tasks run with a sanitized PATH (tmp/hosttools,
+  # a whitelist of symlinks) that doesn't include arbitrary host binaries
+  # like a bare "gcc-12", so a bare name here fails with "No such file or
+  # directory" even though it resolves fine in an interactive shell.
+  echo 'BUILD_CC = "${CCACHE}/usr/bin/gcc-12 ${BUILD_CC_ARCH}"'
+  echo 'BUILD_CXX = "${CCACHE}/usr/bin/g++-12 ${BUILD_CC_ARCH}"'
+  echo 'BUILD_CPP = "/usr/bin/gcc-12 ${BUILD_CC_ARCH} -E"'
+  echo 'BUILD_CCLD = "/usr/bin/gcc-12 ${BUILD_CC_ARCH}"'
   if [[ -n "${BOOTDEV}" ]]; then
     echo ""
     echo "# --- Boot rootfs from external NVMe storage ---"
