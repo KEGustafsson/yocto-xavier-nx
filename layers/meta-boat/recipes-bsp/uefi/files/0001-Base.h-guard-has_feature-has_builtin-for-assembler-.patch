@@ -1,0 +1,71 @@
+edk2-nvidia's DeviceTree.inf pseudo-module preprocesses .dts files with
+"cpp -x assembler-with-cpp -undef -imacros AutoGen.h ...". AutoGen.h
+transitively includes this header. In assembler-with-cpp mode, GCC's
+preprocessor treats "defined(__has_feature)" as true (it's recognized
+enough to satisfy defined()) but doesn't support actually *calling*
+__has_feature(...)/__has_builtin(...) as a function-like operator - so
+once let inside, GCC hits a hard parse error:
+
+  Base.h:63:23: error: missing binary operator before token '('
+    63 |     #if __has_builtin (__builtin_unreachable)
+
+Both branches removed here only exist for non-GNU compilers (nested
+under, or parallel to, "#ifdef __GNUC__"), and this project only ever
+builds EDK2 with GCC (aarch64-poky-linux-gcc), where __GNUC__ is
+always defined for real C compiles - so the __has_feature branches
+are dead code for us either way, in both normal and assembler-with-cpp
+preprocessing. The ANALYZER_NORETURN block hits the same parse error
+independent of assembler-with-cpp mode too, since its outer guard is a
+bare "#ifdef __has_feature" (no __GNUC__ exclusion), and
+"#if __has_feature (...)" isn't parseable there either.
+
+Dropping both branches doesn't change UNREACHABLE()/ANALYZER_NORETURN
+for GCC: __builtin_unreachable() still comes from the __GNUC__ branch,
+and ANALYZER_NORETURN still resolves to its pre-existing empty-macro
+default either way (GCC doesn't have the clang-only
+"analyzer_noreturn" attribute).
+
+Upstream-Status: Pending
+Signed-off-by: yocto-xavier-nx
+
+--- a/MdePkg/Include/Base.h	2026-07-11 11:57:35.819220163 +0300
++++ b/MdePkg/Include/Base.h	2026-07-11 11:58:11.857494948 +0300
+@@ -59,14 +59,6 @@
+ /// up to the compiler to remove any code past that point.
+ ///
+ #define UNREACHABLE()  __builtin_unreachable ()
+-  #elif defined (__has_feature)
+-    #if __has_builtin (__builtin_unreachable)
+-///
+-/// Signal compilers and analyzers that this call is not reachable.  It is
+-/// up to the compiler to remove any code past that point.
+-///
+-#define UNREACHABLE()  __builtin_unreachable ()
+-    #endif
+   #endif
+ 
+   #ifndef UNREACHABLE
+@@ -139,23 +131,11 @@
+ // for verification.
+ //
+ #ifndef ANALYZER_NORETURN
+-  #ifdef __has_feature
+-    #if __has_feature (attribute_analyzer_noreturn)
+-///
+-/// Signal analyzers that the function cannot return.
+-/// This excludes compilers.
+-///
+-#define ANALYZER_NORETURN  __attribute__((analyzer_noreturn))
+-    #endif
+-  #endif
+-
+-  #ifndef ANALYZER_NORETURN
+ ///
+ /// Signal the analyzer that the function cannot return.
+ /// This excludes compilers.
+ ///
+ #define ANALYZER_NORETURN
+-  #endif
+ #endif
+ 
+ ///
