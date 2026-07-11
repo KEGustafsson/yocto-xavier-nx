@@ -94,6 +94,24 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
     echo "# --- Boot rootfs from external NVMe storage ---"
     echo "TNSPEC_BOOTDEV = \"${BOOTDEV}\""
     echo "ROOTFSPART_SIZE = \"${ROOTFS_SIZE_BYTES}\""
+    # Keep TEGRA_EXTERNAL_DEVICE_SECTORS consistent with ROOTFSPART_SIZE
+    # (meta-tegra's default is a fixed ~58GiB sector count unrelated to
+    # our size) - used when sizing the actual NVMe/external partition.
+    echo "TEGRA_EXTERNAL_DEVICE_SECTORS = \"$((ROOTFS_SIZE_BYTES / 512))\""
+    # jetson-xavier-nx-devkit's default PARTITION_LAYOUT_TEMPLATE_DEFAULT
+    # (flash_l4t_t194_spi_sd_p3668.xml) still carries an internal "APP"
+    # partition sized from ROOTFSPART_SIZE, even though TNSPEC_BOOTDEV
+    # redirects the actual rootfs to NVMe - so tegraparser_v2 rejects the
+    # generated flash.xml.bin ("End sector for APP, expected at: X,
+    # actual: 0": the template expects an internal APP partition that
+    # never gets populated). meta-tegra already wires up the correct
+    # external/NVMe template for T194 by default
+    # (PARTITION_LAYOUT_EXTERNAL_DEFAULT = "flash_l4t_nvme.xml", see
+    # conf/machine/include/tegra194.inc) - it's the *internal* template
+    # that needs to switch to the QSPI-only variant, which has no APP
+    # partition at all (matching Orin Nano's -nvme.conf pattern, which
+    # pairs a QSPI-only internal template with its own external one).
+    echo 'PARTITION_LAYOUT_TEMPLATE_DEFAULT = "flash_l4t_t194_qspi_p3668.xml"'
   fi
   echo "${MARKER_END}"
 } >> "${CONF}/local.conf"
