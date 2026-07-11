@@ -65,6 +65,10 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
   # Keep downloads / sstate outside the build dir so re-inits are cheap.
   echo "DL_DIR = \"${WORKROOT}/downloads\""
   echo "SSTATE_DIR = \"${WORKROOT}/sstate-cache\""
+  # Delete each recipe's tmp/work/ as soon as it finishes building
+  # (outputs live on in sstate-cache/downloads either way). A full
+  # image build's work dirs can reach 50GB+ otherwise.
+  echo 'INHERIT += "rm_work"'
   # Build parallelism (auto-detected; tune if the host struggles).
   echo 'BB_NUMBER_THREADS ?= "${@oe.utils.cpu_count()}"'
   echo 'PARALLEL_MAKE ?= "-j ${@oe.utils.cpu_count()}"'
