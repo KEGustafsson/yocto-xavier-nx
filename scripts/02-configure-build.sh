@@ -94,10 +94,19 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
     echo "# --- Boot rootfs from external NVMe storage ---"
     echo "TNSPEC_BOOTDEV = \"${BOOTDEV}\""
     echo "ROOTFSPART_SIZE = \"${ROOTFS_SIZE_BYTES}\""
-    # Keep TEGRA_EXTERNAL_DEVICE_SECTORS consistent with ROOTFSPART_SIZE
-    # (meta-tegra's default is a fixed ~58GiB sector count unrelated to
-    # our size) - used when sizing the actual NVMe/external partition.
-    echo "TEGRA_EXTERNAL_DEVICE_SECTORS = \"$((ROOTFS_SIZE_BYTES / 512))\""
+    # TEGRA_EXTERNAL_DEVICE_SECTORS declares the *total* external-device
+    # (NVMe) capacity, not just the APP/rootfs partition - it must leave
+    # room for the other partitions that share the same drive (kernel/
+    # boot.img at ~128MiB, GPT/MBR overhead, etc.), or tegraparser_v2
+    # can't place APP at all ("End sector for APP, expected at: X,
+    # actual: 0") when initrd-flash signs the external layout. Setting
+    # it equal to ROOTFSPART_SIZE (as a previous version of this script
+    # did) leaves zero room for anything else. 1 GiB of headroom is
+    # comfortably more than the other partitions need; it doesn't need
+    # to match the physical SSD's real capacity, only be >= what's
+    # actually used - any leftover space on a larger real drive is
+    # simply unpartitioned.
+    echo "TEGRA_EXTERNAL_DEVICE_SECTORS = \"$(( (ROOTFS_SIZE_BYTES + 1073741824) / 512 ))\""
     # jetson-xavier-nx-devkit's default PARTITION_LAYOUT_TEMPLATE_DEFAULT
     # (flash_l4t_t194_spi_sd_p3668.xml) still carries an internal "APP"
     # partition sized from ROOTFSPART_SIZE, even though TNSPEC_BOOTDEV

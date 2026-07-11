@@ -34,6 +34,19 @@ mkdir -p "${FLASH_DIR}"
 log "Extracting into ${FLASH_DIR} ..."
 tar -C "${FLASH_DIR}" -xf "${TARBALL}"
 
+# initrd-flash bug (NVIDIA L4T R35.6.4): write_to_device() checks
+# `[ -e external-secureflash.xml ]` (file exists) instead of `-s` (file
+# has content) before feeding it to nvflashxmlparse --rewrite-contents-
+# from. With zerosbk/no signing keys (our setup - no -u/-v keyfile),
+# that file legitimately ends up empty, and nvflashxmlparse then dies
+# on it with "no element found: line 1, column 0" instead of just
+# skipping an empty file. Patch it post-extract since this file comes
+# from NVIDIA's prebuilt tarball, not something we build ourselves.
+if [[ -f "${FLASH_DIR}/initrd-flash" ]]; then
+  sed -i 's/if \[ -e external-secureflash\.xml \]; then/if [ -s external-secureflash.xml ]; then/' \
+    "${FLASH_DIR}/initrd-flash"
+fi
+
 log "Unpacked. Contents:"
 ls -1 "${FLASH_DIR}" | sed 's/^/    /'
 log "Next: put the board in recovery mode, then run scripts/05-flash-nvme.sh"
