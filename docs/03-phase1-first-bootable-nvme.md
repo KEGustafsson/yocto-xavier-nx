@@ -17,6 +17,10 @@ IMAGE=core-image-base ./scripts/03-build.sh
 All tunables live in [`scripts/env.sh`](../scripts/env.sh) and can be overridden
 from the shell (e.g. `MACHINE=jetson-xavier-nx-devkit-emmc`).
 
+> On a host newer than Ubuntu 22.04 (24.04, 26.04, …)? Install `gcc-12 g++-12`
+> first (`sudo apt-get install gcc-12 g++-12`) — see
+> [`02-host-prerequisites.md`](02-host-prerequisites.md) for why.
+
 ## Step by step
 
 ### 1. Fetch the layers
@@ -91,7 +95,11 @@ Uses `tar` (never a GUI extractor — permissions/symlinks matter).
 
 Runs `sudo ./initrd-flash`, which RCM-boots a helper Linux over USB, writes the
 **firmware to QSPI** and the **rootfs to the NVMe**. First flash is slow because
-of the firmware step.
+of the firmware step. Writing the rootfs itself is also not fast: it's a raw
+block write of the full `ROOTFSPART_SIZE` (not sparse-aware), so a 64 GiB
+partition over USB 2.0 (recovery mode negotiates at USB 2.0 speeds regardless
+of your cable/port) realistically takes **20-30 minutes**, not a few. Let it run;
+don't disconnect mid-write.
 
 - Re-flashing only the rootfs later? `./scripts/05-flash-nvme.sh --external-only`
   (skips QSPI).
@@ -101,12 +109,18 @@ of the firmware step.
 ### 7. Boot
 
 Disconnect USB, power-cycle. Watch the serial console (115200 8N1). You should
-reach a login prompt with the rootfs on `/dev/nvme0n1p1`. Verify:
+reach a login prompt with the rootfs on `/dev/nvme0n1p1`.
+
+Log in as **`root`** with **no password** (`EXTRA_IMAGE_FEATURES = "debug-tweaks"`,
+poky's default for a bring-up image — turn this off before it's anything other
+than a test image). Verify the rootfs is really on NVMe:
 
 ```bash
-findmnt /            # source should be /dev/nvme0n1p1
-lsblk
+mount | grep ' / '   # core-image-base is minimal; findmnt isn't installed
+# or: df -h /
 ```
+
+Both should show `/dev/nvme0n1p1` as the source.
 
 Once this boots reliably, move on to
 [`04-flashing-nvme.md`](04-flashing-nvme.md) for flashing detail, then

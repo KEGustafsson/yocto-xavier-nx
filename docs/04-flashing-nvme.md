@@ -36,6 +36,13 @@ on-board Linux sees the NVMe drive and writes the partitions to it, and writes
 boot firmware to the module's QSPI. Progress is high-level; on failure read the
 `log.initrd-flash.<timestamp>` file it names.
 
+Expect the rootfs write itself to take **20-30 minutes** for a 64 GiB partition:
+it's a raw block write of the full partition size (not sparse-aware, even
+though the source `.ext4` image usually is), over recovery mode's USB 2.0
+link (regardless of your cable/port's real USB 3.x capability). The firmware
+(QSPI) step is comparatively quick; the rootfs write is the long pole. Let it
+run - don't disconnect or power-cycle mid-write.
+
 ## Path B — `doexternal.sh` (write the SSD on your host)
 
 Useful for provisioning many drives, or when the in-board NVMe write is flaky.
@@ -71,7 +78,16 @@ first bring-up; revisit for production.
 - **TLP installed** → USB power cuts mid-flash. `sudo apt remove tlp` + reboot.
 - **Cheap USB cable/hub** → transient `0955:` disconnects. Use a good cable,
   a direct port, power-cycle, retry.
-- **`cp: cannot stat 'signed/*'`** → partition-layout/size mismatch; check
-  `ROOTFSPART_SIZE` vs SSD size.
+- **`cp: cannot stat 'signed/*'`** during "Step 1: Signing binaries" → **usually
+  harmless.** It's an unused branch of NVIDIA's `odmsign.func`; the flash
+  normally proceeds past it. If the flash later fails at "Step 4: Writing
+  partitions on external storage device" with a Python `xml.etree.ElementTree.
+  ParseError: no element found`, that's a real bug in `initrd-flash` -
+  `write_to_device()` checks `[ -e external-secureflash.xml ]` instead of
+  `-s`, and with zerosbk signing (no `-u`/`-v` keyfile - the default here)
+  that file is legitimately empty. `scripts/04-unpack-tegraflash.sh` already
+  patches this automatically after every unpack; if you're invoking
+  `initrd-flash` directly from an unpacked tarball some other way, apply the
+  same one-line fix (`-e` → `-s` on that line) yourself.
 
 Next: [`05-phase2-boat-computer-layer.md`](05-phase2-boat-computer-layer.md)

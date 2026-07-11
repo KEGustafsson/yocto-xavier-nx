@@ -5,8 +5,27 @@
 - **x86-64 Linux, running natively.** Ubuntu 20.04 or 22.04 are the best-tested
   hosts for kirkstone + meta-tegra. Do **not** build or flash from a VM, WSL, an
   ARM machine, or macOS — flashing needs raw USB and NVIDIA's x86-64 binaries.
-- **Disk:** ~**150 GB** free (downloads + sstate + tmp for one image; more if you
-  build several images or keep history).
+- **Newer hosts (Ubuntu 24.04+, 26.04, …) also work**, but kirkstone (Yocto 4.0,
+  ~2022) predates their toolchains and the build scripts compensate for it:
+  - `scripts/02-configure-build.sh` points `-native` builds at `gcc-12`/`g++-12`
+    instead of the system compiler, because newer GCC defaults (C23) break old
+    gnulib/K&R code bundled in several `-native` recipes. **Install these
+    yourself first** — the dep script doesn't, since only very new hosts need
+    them: `sudo apt-get install gcc-12 g++-12`.
+  - `scripts/pyfix/sitecustomize.py` patches around Python-version removals
+    (e.g. `ast.Str`, gone since 3.12) and a `multiprocessing` default-method
+    change (3.14) that bitbake itself hits on hosts this new.
+  - A `meta-boat` patch works around a glibc/GCC-version mismatch in
+    `pseudo-native`'s `openat2` wrapper.
+
+  None of this needs manual action beyond installing `gcc-12`/`g++-12` above —
+  it's automatic in the scripts — but if you hit a build failure that looks
+  like a compiler/Python-version issue rather than a real code bug, this is
+  why, and the fix likely already exists in `scripts/`.
+- **Disk:** ~**150 GB** free for the first build (downloads + sstate + tmp).
+  `scripts/02-configure-build.sh` enables bitbake's `rm_work`, which deletes
+  each recipe's `tmp/work/` right after it builds, so usage stays close to
+  that instead of growing to 50GB+ over a full image build.
 - **RAM:** 16 GB minimum, 32 GB+ recommended. **CPU:** the more cores the better;
   a first build is 2–6 h.
 - **Time/network:** the first build downloads many GB of source.
