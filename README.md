@@ -92,13 +92,20 @@ All knobs are in [`scripts/env.sh`](scripts/env.sh) and override from the shell:
 
 ## Requirements
 
-- x86-64 Linux host (Ubuntu 20.04/22.04), native, ~150 GB free, 16 GB+ RAM.
+- x86-64 Linux host (Ubuntu 20.04/22.04 best-tested), native, ~150 GB free,
+  16 GB+ RAM. Newer hosts (24.04+, 26.04) work too but need `gcc-12 g++-12`
+  installed manually first - see [host prerequisites](docs/02-host-prerequisites.md).
 - Xavier NX devkit, NVMe M.2 SSD, USB-C cable, barrel-jack PSU, USB-TTL serial.
 
 ## Status & caveats
 
-- The scripts and layer are a working scaffold; run them on real hardware and
-  pin layer commits before treating a build as a product.
+- Phase 1 (NVMe boot, `core-image-base`) has been built, flashed, and verified
+  booting on real Xavier NX hardware with rootfs on `/dev/nvme0n1p1`. Phase 2
+  (`boat-image`/`meta-boat`) is an unverified scaffold - it hasn't been built
+  or flashed yet, so treat package names/recipes there as unproven until you
+  run it.
+- Pin layer commits (`scripts/01-fetch-layers.sh` prints them) before treating
+  a build as a product; `kirkstone` branches move.
 - Package names in `packagegroup-boat` target kirkstone; if one is missing on
   your snapshot, `bitbake-layers show-recipes '*name*'` and adjust.
 - Not affiliated with NVIDIA or the OE4T project. NVIDIA BSP components are used
