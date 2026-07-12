@@ -28,7 +28,7 @@ R35 / meta-tegra names drift between point releases.
 
 ### Division of responsibility
 
-```
+```text
         ┌──────────────────────── Jetson Xavier NX ────────────────────────┐
         │  Yocto rootfs (meta-boat)  =  CONTAINER HOST                       │
         │  ───────────────────────────────────────────────────────────────  │
@@ -129,9 +129,13 @@ Practical wiring:
 - **CSI cameras:** run `nvargus-daemon` on the host and mount its socket into the
   container: `-v /tmp/argus_socket:/tmp/argus_socket`.
 - **USB cameras:** just pass `--device /dev/video0`.
-- **All HW accelerators** ("light up the DLA too") is a matter of the DeepStream
-  config (`enable-dla=1`, `use-dla-core=0/1`) and TensorRT builder flags inside
-  the container — not extra host packages. Xavier NX has **2 DLA cores**.
+- **All HW accelerators** ("light up the DLA too"): the DeepStream config
+  (`enable-dla=1`, `use-dla-core=0/1`) and TensorRT builder flags only *select*
+  accelerators that the **host driver + `nvidia-container-runtime` already
+  expose** into the container — they don't grant access on their own. So the
+  host-side prerequisites above (driver libs, toolkit, device nodes, and for
+  cameras `nvargus-daemon`) must be in place first; the flags then choose GPU
+  vs DLA vs VIC/NVENC/NVDEC/ISP. Xavier NX has **2 DLA cores**.
 
 ## Docker host setup
 
@@ -160,7 +164,7 @@ avahi — see the `startup.sh` in `signalk-server-dockers`):
 ```yaml
 services:
   signalk:
-    image: ghcr.io/kegustafsson/signalk-server:latest-ubuntu   # arm64
+    image: ghcr.io/kegustafsson/signalk-server@sha256:<digest>   # pin, see note
     network_mode: host                      # mDNS + reachability
     volumes:
       - /data/signalk:/home/node/.signalk    # persistent config on NVMe
@@ -168,9 +172,24 @@ services:
     devices:
       - /dev/ttyUSB0                          # any local NMEA0183 / sensor
       - /dev/i2c-1
-    group_add: ["dialout", "i2c", "spi"]
+    group_add: ["990", "989"]                 # NUMERIC host GIDs (i2c, spi) — see note
     restart: unless-stopped
 ```
+
+- **Pin images by digest**, not mutable tags (`latest-*`, `6.3-samples`). Record
+  the deployed digest in the git-tracked compose, keep the previous compose/image
+  set, and roll back to it if a health check fails after an update. The mutable
+  tags elsewhere in this doc are for readability only.
+- **`group_add` resolves group *names* inside the container image**, not on the
+  host — so use **numeric host GIDs** (find them with `getent group i2c`). The
+  `signalk-server-dockers` base does define `i2c=990`/`spi=989`/`docker=991`, so
+  names happen to work *for that image*, but numeric GIDs are portable across
+  images and unambiguous.
+- **Host D-Bus mount is broad:** giving a container `/run/dbus/system_bus_socket`
+  exposes *all* host D-Bus services, not just Avahi/BlueZ. It matches the
+  upstream `startup.sh` contract, but for hardening prefer a **filtered D-Bus
+  proxy** (e.g. `xdg-dbus-proxy`) that whitelists only `org.freedesktop.Avahi`
+  and `org.bluez`, and document the exact permissions the container needs.
 
 ### Example: DeepStream container (GPU + CSI camera)
 
@@ -212,10 +231,19 @@ services:
     restart: unless-stopped
 ```
 
-Boot flow for the display: systemd autologin → **Weston** starts (GPU via Tegra
-EGL) → the Firefox container comes up fullscreen showing Signal K. Add a
-touchscreen with `libinput`; add `wvkbd` for an on-screen keyboard on
-touch-only helms.
+**Wayland access requirements** (or Firefox silently fails to connect at boot):
+mounting the socket is not enough — the container's runtime user must be able to
+*read* `/run/user/1000` and the socket. That means the container user's **UID
+must match the host Weston user's UID** (1000 here), or grant access via a
+matching GID / ACL on `/run/user/1000`. `XDG_RUNTIME_DIR` (`0700`, owned by that
+UID) must line up. Add a small **startup check** in the container that verifies
+`$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY` exists and is accessible before launching
+Firefox, and have the compose `depends_on`/restart until Weston's socket is up.
+
+Boot flow for the display: systemd autologin (UID 1000) → **Weston** starts (GPU
+via Tegra EGL, creating `/run/user/1000/wayland-1`) → the Firefox container
+(same UID) comes up fullscreen showing Signal K. Add a touchscreen with
+`libinput`; add `wvkbd` for an on-screen keyboard on touch-only helms.
 
 ## Time without a GPS or RTC
 
@@ -245,7 +273,7 @@ which feeds the values into the image via the `extrausers` class.
 
 Flow:
 
-```
+```text
 scripts/02-configure-build.sh  ── prompts ─►  username, password, (optional pubkey)
    │  hash the password (openssl passwd -6 → salted SHA-512; plaintext discarded)
    ▼
@@ -259,19 +287,29 @@ Prompt (shell, where interaction is allowed):
 ```sh
 read -rp "Boat username: " BOAT_USER
 read -rsp "Password: " BOAT_PASS; echo
-BOAT_HASH=$(openssl passwd -6 "$BOAT_PASS")   # salted SHA-512; plaintext discarded
+# -stdin keeps the password out of the process list (argv is world-readable)
+BOAT_HASH=$(printf '%s' "$BOAT_PASS" | openssl passwd -6 -stdin)
+unset BOAT_PASS                                # drop the plaintext immediately
 read -rp "Path to SSH public key (optional): " BOAT_PUBKEY
 ```
 
-Gitignored `conf/site-auth.conf` (included from `local.conf`):
+Gitignored `conf/site-auth.conf` (included from `local.conf`) — the wrapper
+writes **resolved literal values** into it (shown here with example
+substitutions, *not* `${BITBAKE}` variables, which would expand empty):
 
-```
+```conf
 INHERIT += "extrausers"
+# Example after substitution — the wrapper emits the real username and the
+# generated hash as literal text (never the shell variable names, and never a
+# committed value). Escape any '$' in the hash so BitBake does not expand it.
 EXTRA_USERS_PARAMS = "\
-    useradd -p '${BOAT_HASH}' -s /bin/bash ${BOAT_USER}; \
-    usermod -a -G sudo,docker,dialout,i2c,spi,video,render ${BOAT_USER}; \
+    useradd -p '\$6\$abc123...\$deadbeef...' -s /bin/bash skipper; \
+    usermod -a -G sudo,docker,dialout,i2c,spi,video,render skipper; \
 "
 ```
+
+The wrapper validates that both the username and hash are non-empty before
+writing this file, so a blank prompt cannot produce an invalid `useradd`.
 
 Security / build notes:
 
@@ -282,8 +320,10 @@ Security / build notes:
   **`video`/`render`** (Weston/GPU), **`dialout`/`i2c`/`spi`** (local devices),
   **`sudo`**.
 - The same user receives the baked `authorized_keys` from the SSH step below.
-- Prefer **SSH key + hashed password**; for a fleet, consider `chage -d 0` to
-  force a password change on first login.
+- Prefer **SSH key + hashed password**. Only force a first-login password change
+  (`chage -d 0`) if a working password-change path exists — **not** on a headless
+  boat where the SSH config below disables password *and* keyboard-interactive
+  auth, or the account can lock itself out. On this box, rely on the SSH key.
 - Baking credentials makes the build **builder-specific** — hence the prompt +
   gitignored `site-auth.conf` rather than a committed `local.conf`.
 
@@ -316,7 +356,10 @@ Two tiers:
 - **Field/production:** **RAUC** (or Mender) with **A/B rootfs slots** for atomic,
   power-fail-safe, rollback-capable OS updates — the correct model for an
   unattended boat. Pair with **BUP** (meta-tegra `generate_bup_payload.sh`) for
-  firmware. Apps update independently by pulling new container tags.
+  firmware. Apps update independently by pulling new **digest-pinned** images
+  (see the Signal K note): bump the digest in the git-tracked compose, keep the
+  previous compose/image set, health-check after `up`, and roll back to the prior
+  digest on failure. Avoid deploying floating `latest` tags to the boat.
 
 ## Reliability
 
