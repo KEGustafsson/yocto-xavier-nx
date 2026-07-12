@@ -236,6 +236,25 @@ client (marina), Wi‑Fi AP (helm hotspot via `hostapd`/`dnsmasq`), Ethernet, an
 cellular, with priority/failover. Add `wireguard-tools` for a VPN home, `avahi`
 for `*.local` discovery (shared into containers), and `nftables` as the firewall.
 
+## Preconfigured SSH
+
+Ship the SSH server locked-down from first boot — no manual setup on the boat.
+`IMAGE_FEATURES += "ssh-server-openssh"` is already set; add to `meta-boat`:
+
+- **`authorized_keys` baked in** — your SSH **public** key(s) to
+  `/home/<user>/.ssh/authorized_keys` (700/600) via a small `boat-ssh-keys.bb`
+  or `ROOTFS_POSTPROCESS_COMMAND`. Key login works immediately.
+- **Hardened `sshd_config` drop-in** (`/etc/ssh/sshd_config.d/10-boat.conf`) via
+  an `openssh_%.bbappend`: `PasswordAuthentication no`,
+  `PermitRootLogin prohibit-password`, `KbdInteractiveAuthentication no`.
+- **A non-root login user** via `EXTRA_USERS_PARAMS` (`extrausers`).
+- **`nftables`** rule allowing port 22.
+
+**Do NOT bake SSH *host* keys** (or any private key / password) into the image —
+a shared host key across every flashed device is a host-key-collision / MITM
+risk. Let host keys generate on first boot (openssh's `sshd-keygen` service does
+this automatically). Bake only *public* authorized keys and config.
+
 ## Updates
 
 Two tiers:
