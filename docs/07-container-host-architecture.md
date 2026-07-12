@@ -236,6 +236,57 @@ client (marina), Wi‑Fi AP (helm hotspot via `hostapd`/`dnsmasq`), Ethernet, an
 cellular, with priority/failover. Add `wireguard-tools` for a VPN home, `avahi`
 for `*.local` discovery (shared into containers), and `nftables` as the firewall.
 
+## Build-time user (interactive)
+
+Create the login user **at build time**, prompting the builder for the username
+and credentials. Key constraint: **bitbake tasks cannot prompt** (the build is
+headless/parallel), so the prompt lives in the configure **wrapper script**,
+which feeds the values into the image via the `extrausers` class.
+
+Flow:
+
+```
+scripts/02-configure-build.sh  ── prompts ─►  username, password, (optional pubkey)
+   │  hash the password (openssl passwd -6 → salted SHA-512; plaintext discarded)
+   ▼
+conf/site-auth.conf  (gitignored)  ─►  EXTRA_USERS_PARAMS
+   ▼
+boat-image.bb  (inherit extrausers)  ─►  user baked into the rootfs
+```
+
+Prompt (shell, where interaction is allowed):
+
+```sh
+read -rp "Boat username: " BOAT_USER
+read -rsp "Password: " BOAT_PASS; echo
+BOAT_HASH=$(openssl passwd -6 "$BOAT_PASS")   # salted SHA-512; plaintext discarded
+read -rp "Path to SSH public key (optional): " BOAT_PUBKEY
+```
+
+Gitignored `conf/site-auth.conf` (included from `local.conf`):
+
+```
+INHERIT += "extrausers"
+EXTRA_USERS_PARAMS = "\
+    useradd -p '${BOAT_HASH}' -s /bin/bash ${BOAT_USER}; \
+    usermod -a -G sudo,docker,dialout,i2c,spi,video,render ${BOAT_USER}; \
+"
+```
+
+Security / build notes:
+
+- **Hash, never plaintext** — pass `-p '<hash>'`, discard the clear password.
+- **Keep `site-auth.conf` out of git** (`.gitignore`). The hash *does* end up in
+  the built rootfs — expected — so protect the flashed image/SSD.
+- Group membership on this box matters: **`docker`** (containers),
+  **`video`/`render`** (Weston/GPU), **`dialout`/`i2c`/`spi`** (local devices),
+  **`sudo`**.
+- The same user receives the baked `authorized_keys` from the SSH step below.
+- Prefer **SSH key + hashed password**; for a fleet, consider `chage -d 0` to
+  force a password change on first login.
+- Baking credentials makes the build **builder-specific** — hence the prompt +
+  gitignored `site-auth.conf` rather than a committed `local.conf`.
+
 ## Preconfigured SSH
 
 Ship the SSH server locked-down from first boot — no manual setup on the boat.
