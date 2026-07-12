@@ -141,9 +141,15 @@ Practical wiring:
 - **Working DNS / egress** via NetworkManager; the clock must be correct before
   the first pull (see Time).
 - **NGC login** for gated images: `docker login nvcr.io` with an NGC API key.
-- You can keep compose files hand-managed under `/data/compose/*.yml`
-  (`docker compose up -d`) *and* later bake the stable ones into `meta-boat` as a
-  systemd unit for reproducibility. Start hand-managed.
+- **Compose as config-as-code (git):** the compose files live in a **git
+  checkout on `/data`** (e.g. `/data/compose`) that you `git pull` on the boat to
+  update settings, then `docker compose up -d`. This is why `git` is on the host
+  (`-tools`). Requirements: `ca-certificates` + a correct clock for HTTPS
+  (a wrong clock fails the TLS handshake, same as registry pulls); for a private
+  repo use the `openssh` client with a **read-only deploy key** (or a scoped
+  token) stored on `/data`, never baked into the image.
+- You can keep this hand-managed *and* later bake the stable compose files into
+  `meta-boat` as a systemd unit for reproducibility. Start hand-managed / git.
 
 ### Example: Signal K container
 
