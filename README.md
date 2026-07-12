@@ -89,6 +89,7 @@ All knobs are in [`scripts/env.sh`](scripts/env.sh) and override from the shell:
 4. [Flashing to NVMe in detail](docs/04-flashing-nvme.md)
 5. [Phase 2 — the boat computer layer](docs/05-phase2-boat-computer-layer.md)
 6. [Troubleshooting](docs/06-troubleshooting.md)
+7. [Container-host architecture (design)](docs/07-container-host-architecture.md)
 
 ## Requirements
 
