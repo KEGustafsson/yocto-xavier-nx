@@ -53,9 +53,17 @@ EXTRA_USERS_PARAMS = "\
     groupadd -f i2c; \
     groupadd -f spi; \
     useradd -u 2000 -m -s /bin/bash -p '*' boat; \
-    usermod -a -G video,render,input,dialout,i2c,spi,docker boat; \
+    usermod -a -G video,render,input,dialout,i2c,spi,docker,jtop boat; \
     usermod -s /bin/bash root; \
 "
+# jtop group: CONFIRMED ON HARDWARE - without it, jtop (from
+# python3-jetson-stats, packagegroup-boat-jetson) fails for the "boat"
+# user with "I can't access jtop.service. Please logout or reboot this
+# board" - jtop.service's socket (/run/jtop.sock) is root:jtop
+# srw-rw----, and nothing added "boat" to that group by default. Like
+# the "docker" group above, "jtop" itself is created by its owning
+# package's (python3-jetson-stats) own postinstall, not by this recipe -
+# it already exists by the time this usermod runs.
 
 # NetworkManager (packagegroup-boat-connectivity) is this image's network
 # manager, not systemd-networkd - but the base systemd package still ships
