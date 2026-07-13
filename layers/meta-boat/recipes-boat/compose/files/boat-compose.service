@@ -1,0 +1,14 @@
+[Unit]
+Description=Bring up the boat's docker-compose stack from /data/compose
+Documentation=file:///usr/share/boat/compose-examples/README
+After=docker.service network-online.target data.mount
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/boat-compose-up
+
+[Install]
+WantedBy=multi-user.target

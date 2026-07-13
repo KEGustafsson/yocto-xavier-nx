@@ -1,0 +1,231 @@
+# Example - copy to /data/compose/ and adjust before use.
+# CONFIRMED ON HARDWARE, end-to-end: signalk-kiosk (Chromium via XWayland,
+# in normal windowed mode - tabs/address bar, not --kiosk) renders Signal
+# K's page maximized on the boat's HDMI screen, fully automatically on
+# every container (re)start. Getting here needed several hardware-specific
+# fixes, all documented inline below and worth reading if you're adapting
+# this to different hardware:
+#   - shm_size (default 64MB caused a black-but-alive window)
+#   - overriding the image's own ENTRYPOINT (it defaults to --headless)
+#   - a synthetic-click workaround for maximizing (Weston's desktop-shell
+#     doesn't honor --start-maximized/--start-fullscreen or any window-
+#     state request from a process other than the window's own client)
+#
+# Use `docker compose` (v2, space-separated), NOT `docker-compose` (v1) -
+# see the ExecStart note in boat-compose.service / docs/06-troubleshooting.md;
+# python3-docker-compose currently fails on this image with "No module
+# named 'distutils'" (missing python3-distutils RDEPENDS).
+#
+# This combines Signal K's own web admin UI with a Chromium container so
+# it shows directly on the boat's own HDMI screen, instead of needing a
+# browser on another device (see docs/05-phase2-boat-computer-layer.md
+# "Container GUI apps on the HDMI screen (X11 via XWayland)").
+#
+# zenika/alpine-chrome is a small, multi-arch (incl. linux/arm64) image with
+# a real (non-headless-only) Chromium build.
+#
+# signalk-server below is adapted from the operator's own known-working
+# "Arabella" stack (docker-compose-arabella-sk.yml) - it execs
+# signalk-server directly via tini instead of the image's default
+# pm2-runtime entrypoint (which fails with "pm2-runtime: not found" on
+# this hardware, see :latest above vs :latest-alpine here). Two things
+# changed from that source file for this trimmed-down example:
+#   - `depends_on: influxdb` dropped - influxdb/grafana aren't part of this
+#     compose file; add them back (and restore the dependency) if you want
+#     the full historian stack alongside the kiosk browser.
+#   - config volume repointed at /data/signalk (this project's persistent-
+#     storage convention, on the NVMe rootfs) instead of the original
+#     /home/kgustafs/docker/apps/signalk_conf, which is a path from a
+#     different (non-Jetson) Docker host and doesn't exist on this image.
+x-common: &common
+  restart: unless-stopped
+  network_mode: host
+  logging:
+    options:
+      max-size: 10m
+
+services:
+  signalk-server:
+    <<: *common
+    image: ghcr.io/kegustafsson/signalk-server:latest-alpine
+    container_name: signalk-server
+    mem_limit: 2048m
+    memswap_limit: 2048m        # equal to mem_limit -> swap disabled
+    environment:
+      IS_IN_DOCKER: "true"
+      NODE_NO_WARNINGS: "1"
+      UV_THREADPOOL_SIZE: "16"
+      NSOLID_APPNAME: SignalK-Server-Arabella
+      NSOLID_HUB: none
+      NSOLID_REPORTER_INTERVAL: "5000"
+      NODE_OPTIONS: "--dns-result-order=ipv4first"
+    volumes:
+      - /data/signalk:/home/node/.signalk       # persistent config on NVMe
+      - /dev:/dev/hostdev
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker
+      - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket
+    # NOTE: privileged + docker.sock mounted in = signalk-server has root-
+    # equivalent control of the host. Carried over verbatim from the
+    # operator's own proven "Arabella" config, not something introduced
+    # here - keep if that access is actually used (e.g. jetson-stats,
+    # managing sibling containers), drop cap_add/privileged/docker.sock if
+    # not.
+    privileged: true
+    security_opt:
+      - no-new-privileges:false
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_TIME
+    # tini as PID 1 (signal forwarding, zombie reaping), shell script as PID 2.
+    entrypoint: ["/sbin/tini", "--", "/bin/sh", "-c"]
+    command:
+      - |
+        # Detect container runtime
+        if [ -z "$$CONTAINER_RUNTIME" ]; then
+            if [ -f /.dockerenv ]; then
+                export CONTAINER_RUNTIME="docker"
+            elif [ -f /run/.containerenv ]; then
+                export CONTAINER_RUNTIME="podman"
+            elif [ -n "$$KUBERNETES_SERVICE_HOST" ]; then
+                export CONTAINER_RUNTIME="kubernetes"
+            elif [ -f /proc/1/cgroup ]; then
+                grep -q '/docker'     /proc/1/cgroup 2>/dev/null && export CONTAINER_RUNTIME="docker"
+                grep -q '/libpod'     /proc/1/cgroup 2>/dev/null && export CONTAINER_RUNTIME="podman"
+                grep -q '/kubepods'   /proc/1/cgroup 2>/dev/null && export CONTAINER_RUNTIME="kubernetes"
+                grep -q '/lxc'        /proc/1/cgroup 2>/dev/null && export CONTAINER_RUNTIME="lxc"
+                grep -q '/containerd' /proc/1/cgroup 2>/dev/null && export CONTAINER_RUNTIME="containerd"
+            fi
+        fi
+
+        # Start D-Bus / Avahi only when the host socket is not available
+        if [ -S /run/dbus/system_bus_socket ] \
+           && dbus-send --system --dest=org.freedesktop.DBus --print-reply \
+                /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
+            echo "Using host D-Bus (socket mounted from host)"
+        else
+            echo "Starting container D-Bus and Avahi services"
+            sudo service dbus restart
+            sudo /usr/sbin/avahi-daemon -k 2>/dev/null
+            sudo /usr/sbin/avahi-daemon --no-drop-root &
+            sudo service bluetooth restart
+        fi
+
+        # Launch Signal K - tini handles PID 1 duties (signal forwarding, zombie reaping)
+        exec node /home/node/signalk/node_modules/signalk-server/bin/signalk-server \
+            --securityenabled
+
+  signalk-kiosk:
+    image: zenika/alpine-chrome:latest
+    # CONFIRMED ON HARDWARE (crash-loop, ExitCode=0 every ~20s): this image's
+    # baked-in ENTRYPOINT is "chromium-browser --headless" - a plain
+    # `command:` only appends args after that, so leaving entrypoint alone
+    # launches `chromium-browser --headless --kiosk ...`, which loads the
+    # page then exits immediately. Below, entrypoint is overridden with a
+    # full shell script instead (see command: below) for the maximize
+    # workaround - that also removes the --headless problem as a side
+    # effect, since the script's own `exec chromium-browser ...` line has
+    # no --headless in it.
+    entrypoint: ["/bin/sh", "-c"]
+    user: "0"                # root - needed for the `apk add xdotool` below
+    network_mode: host      # so "localhost:3000" inside the container reaches
+                             # signalk-server above (host networking - actual
+                             # container_name doesn't matter for reachability)
+    environment:
+      - DISPLAY=:0
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - boat-chromium-apk-cache:/etc/apk/cache   # persist across recreates so
+                                                  # xdotool installs instantly
+                                                  # after the first time
+    depends_on:
+      - signalk-server
+    # CONFIRMED ON HARDWARE: Docker's default /dev/shm (64MB) was exactly
+    # the black-screen cause - too small for Chromium's renderer<->GPU-
+    # process shared memory (process ran fine, nothing ever composited to
+    # screen). Bumping it fixed the black screen. firefox.yml.example
+    # already sets this for the same reason.
+    shm_size: "1gb"
+    # Plain normal-mode browser (no --kiosk, no --app): full chrome -
+    # address bar, tabs, menu - opening straight to Signal K's page in the
+    # first tab. No lockdown at all; use --app or --kiosk instead (see git
+    # history of this file) if you want to trade tabs/chrome back out.
+    #
+    # CONFIRMED ON HARDWARE: --start-maximized/--start-fullscreen do NOT
+    # take effect here - Weston's minimal desktop-shell only honors
+    # maximize/move/resize requests that come from the window's own client
+    # at the moment they're made, not a startup flag processed before the
+    # window is fully mapped, and NOT a *different* process (e.g. xdotool)
+    # asking on the window's behalf after the fact either - manipulating
+    # _NET_WM_STATE or the window's geometry externally was silently
+    # ignored/reverted in testing. What DOES work: a synthetic mouse click
+    # on Chromium's own maximize button, sent from the same X connection,
+    # after the window has actually mapped - which is what this script
+    # does. The coordinates (1909,77) are specific to this window's
+    # CONFIRMED-consistent initial geometry (1920x1200 display, window
+    # opens at 38,91/1919x1199 every time) - they will be wrong on a
+    # different screen resolution or if Chromium's title bar layout
+    # changes; find new ones the same way this pair was found (position
+    # the pointer over the button by hand, `xdotool getmouselocation`).
+    command:
+      - |
+        apk add --no-cache xdotool >/dev/null 2>&1
+        # Wait for signalk-server to actually answer before loading the
+        # page. CONFIRMED ON HARDWARE: `depends_on` only orders container
+        # *start*, not readiness - Signal K's Node process takes a few
+        # seconds after its container starts to actually bind :3000, and
+        # on a systemd-triggered boot (both containers created near-
+        # simultaneously) a fixed short sleep loaded the page too early,
+        # landing on a stale "site can't be reached" page that Chromium
+        # (unlike a person) never retries on its own. 30s cap so this
+        # doesn't hang forever if signalk-server never comes up.
+        i=0
+        until wget -q -O /dev/null http://localhost:3000 || [ "$$i" -ge 150 ]; do
+            sleep 0.2
+            i=$$((i + 1))
+        done
+        # Fast-start flags (same family Puppeteer/headless tooling uses to
+        # cut Chromium's own boot time) - background-networking/sync/
+        # translate/default-apps are all irrelevant for a fixed single-page
+        # kiosk anyway.
+        chromium-browser \
+          --no-sandbox \
+          --disable-gpu \
+          --no-first-run \
+          --no-default-browser-check \
+          --test-type \
+          --disable-background-networking \
+          --disable-sync \
+          --disable-translate \
+          --disable-default-apps \
+          --metrics-recording-only \
+          --window-size=1920,1200 \
+          --window-position=0,0 \
+          http://localhost:3000 &
+        CHROME_PID=$$!
+        # Poll for the window actually existing instead of a fixed sleep -
+        # CONFIRMED ON HARDWARE the fixed 3s was a worst-case guess; this
+        # clicks as soon as the window maps instead of always waiting the
+        # full 3s. 10s cap in case something's gone wrong with the launch.
+        #
+        # CONFIRMED ON HARDWARE: searching --name "Chromium" is too broad -
+        # Chromium creates several internal helper windows that also match
+        # ("Chromium clipboard", plus a couple of bare "chromium" utility
+        # windows) *before* the real top-level browser window is mapped, so
+        # the poll succeeded on one of those and clicked too early, missing
+        # the actual maximize button entirely. Match the page title instead
+        # ("Signal K Server - Chromium") - specific to this window, and
+        # also guarantees the page itself has actually loaded by the time
+        # we click, not just that some Chromium window exists.
+        i=0
+        until DISPLAY=:0 xdotool search --name "Signal K" >/dev/null 2>&1 || [ "$$i" -ge 50 ]; do
+            sleep 0.2
+            i=$$((i + 1))
+        done
+        DISPLAY=:0 xdotool mousemove 1909 77 click 1
+        wait $$CHROME_PID
+    restart: unless-stopped
+
+volumes:
+  boat-chromium-apk-cache: {}

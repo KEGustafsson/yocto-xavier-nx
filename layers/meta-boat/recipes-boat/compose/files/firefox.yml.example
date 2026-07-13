@@ -1,0 +1,23 @@
+# Example - copy to /data/compose/ and adjust before use.
+# Confirmed working on real arm64 hardware (see docs/05-phase2-boat-computer-layer.md
+# "Example: Firefox as the helm UI") - linuxserver/firefox has official arm64v8
+# builds and doesn't need the fragile native-Wayland-socket-sharing approach
+# (UID matching, XDG_RUNTIME_DIR permissions, waiting for Weston's socket).
+# It runs its own browser-accessible desktop (KasmVNC) instead - view it from
+# ANY device's browser on the network, not just the boat's own HDMI screen.
+services:
+  firefox:
+    image: lscr.io/linuxserver/firefox:latest
+    container_name: firefox
+    security_opt:
+      - seccomp=unconfined   # optional, quiets some sandbox syscall warnings
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    volumes:
+      - /data/firefox/config:/config   # persistent browser profile on NVMe
+    ports:
+      - 3000:3000   # http://<jetson-ip>:3000 - KasmVNC, any browser, any device on the LAN
+    shm_size: "1gb"
+    restart: unless-stopped

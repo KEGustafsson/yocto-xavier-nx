@@ -1,0 +1,14 @@
+# Example - copy to /data/compose/ and adjust before use.
+# See docs/05-phase2-boat-computer-layer.md "Example: Signal K container".
+services:
+  signalk:
+    image: ghcr.io/kegustafsson/signalk-server@sha256:<digest>   # pin by digest, not a floating tag
+    network_mode: host                      # mDNS + reachability
+    volumes:
+      - /data/signalk:/home/node/.signalk    # persistent config on NVMe
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket  # use host avahi/bluez
+    devices:
+      - /dev/ttyUSB0                          # any local NMEA0183 / sensor
+      - /dev/i2c-1
+    group_add: ["990", "989"]                 # NUMERIC host GIDs (i2c, spi) - `getent group i2c`
+    restart: unless-stopped

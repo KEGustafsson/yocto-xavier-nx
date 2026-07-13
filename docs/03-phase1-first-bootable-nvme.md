@@ -101,7 +101,7 @@ partition over USB 2.0 (recovery mode negotiates at USB 2.0 speeds regardless
 of your cable/port) realistically takes **20-30 minutes**, not a few. Let it run;
 don't disconnect mid-write.
 
-- Re-flashing only the rootfs later? `./scripts/05-flash-nvme.sh --external-only`
+- Re-flashing only the rootfs later? `./scripts/05-flash-nvme.sh --skip-bootloader`
   (skips QSPI).
 - Prefer to write the SSD on your host instead of in the board?
   `./scripts/05-flash-nvme.sh --host-drive /dev/sdX` (uses `doexternal.sh`).

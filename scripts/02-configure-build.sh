@@ -37,6 +37,8 @@ BBLAYERS ?= " \\
   ${LAYERS_DIR}/meta-openembedded/meta-networking \\
   ${LAYERS_DIR}/meta-openembedded/meta-filesystems \\
   ${LAYERS_DIR}/meta-tegra \\
+  ${LAYERS_DIR}/meta-virtualization \\
+  ${LAYERS_DIR}/meta-tegra-community \\
   ${REPO_ROOT}/layers/meta-boat \\
   "
 EOF
@@ -62,6 +64,23 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
   echo 'LICENSE_FLAGS_ACCEPTED += "commercial"'
   # systemd init - appropriate for an always-on embedded/boat computer.
   echo 'INIT_MANAGER = "systemd"'
+  # boat-image's container-host design (docs/05) needs these distro
+  # features: "virtualization" gates Docker + nvidia-container-toolkit's
+  # REQUIRED_DISTRO_FEATURES, "wayland"/"opengl" gate Weston. DISTRO_FEATURES
+  # is evaluated per-recipe at parse time against this global config, not
+  # per-image, so it has to live here rather than in boat-image.bb - setting
+  # it build-wide is harmless for a plain core-image-base build too (it just
+  # makes a few common recipes' optional wayland/virtualization
+  # PACKAGECONFIGs available, it doesn't install anything by itself).
+  # "pam" is also load-bearing, not just a weston-init gate: with systemd
+  # init, pam_systemd is what makes systemd-logind create the
+  # /run/user/<uid> session directory boat-hmi-autostart's Weston session
+  # (and any container mounting that socket) depends on.
+  # "x11" gates epiphany/xwayland/xauth etc: XWayland (launched by Weston,
+  # see meta-boat's weston-init.bbappend) is how X11-only containerized GUI
+  # apps (e.g. OpenCPN) get a display on this Wayland-only host - X11 itself
+  # isn't the display server, XWayland just bridges X11 clients into it.
+  echo 'DISTRO_FEATURES:append = " virtualization wayland opengl pam x11"'
   # Keep downloads / sstate outside the build dir so re-inits are cheap.
   echo "DL_DIR = \"${WORKROOT}/downloads\""
   echo "SSTATE_DIR = \"${WORKROOT}/sstate-cache\""

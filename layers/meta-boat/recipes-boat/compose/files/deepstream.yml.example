@@ -1,0 +1,16 @@
+# Example - copy to /data/compose/ and adjust before use.
+# See docs/05-phase2-boat-computer-layer.md "Example: DeepStream container".
+# OPEN RISK: validate `docker run --runtime nvidia ...` sees the GPU on this
+# machine/L4T combo before relying on this - nvidia-container-toolkit on
+# meta-tegra kirkstone is unproven (docs/05 "Open risks").
+services:
+  vision-ai:
+    image: nvcr.io/nvidia/deepstream-l4t:6.3-samples   # JP5.1 / R35
+    runtime: nvidia                # or rely on Docker's default-runtime
+    network_mode: host
+    volumes:
+      - /tmp/argus_socket:/tmp/argus_socket             # CSI camera (Argus)
+      - /data/models:/models
+    devices:
+      - /dev/video0                                     # USB camera (optional)
+    restart: unless-stopped

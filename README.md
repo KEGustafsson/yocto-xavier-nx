@@ -8,8 +8,10 @@ Two phases:
 
 1. **Phase 1** — a minimal image booting from NVMe. Prove the toolchain, flash
    and boot path first.
-2. **Phase 2** — add the [`meta-boat`](layers/meta-boat) layer: GNSS, NMEA 2000
-   (CAN), MQTT, Wi-Fi AP, a Node.js runtime for Signal K, watchdog and tools.
+2. **Phase 2** — add the [`meta-boat`](layers/meta-boat) layer: a Jetson
+   **container host** (Docker + Weston + Jetson tooling); Signal K, GNSS/CAN
+   bridging, DeepStream and a browser HMI run as containers you compose
+   yourself, not baked-in packages.
 
 ## Quick start
 
@@ -28,9 +30,12 @@ IMAGE=core-image-base ./scripts/03-build.sh
 # power-cycle -> boots from /dev/nvme0n1p1
 
 # Phase 2 — the boat computer
-IMAGE=boat-image ./scripts/03-build.sh
+export IMAGE=boat-image   # must stay exported for unpack + flash too, not just build -
+                           # IMAGE defaults to core-image-base otherwise and these
+                           # scripts will silently unpack/flash the WRONG (stale) image
+./scripts/03-build.sh
 ./scripts/04-unpack-tegraflash.sh
-./scripts/05-flash-nvme.sh --external-only
+./scripts/05-flash-nvme.sh --skip-bootloader
 ```
 
 Prefer a single-command reproducible build? Use kas:
@@ -61,7 +66,7 @@ that writes both. Full explanation in
 scripts/     deps → fetch → configure → build → unpack → flash  (all read scripts/env.sh)
 config/      reference local.conf / bblayers.conf
 layers/
-  meta-boat/ the Phase-2 marine layer (image, packagegroup, CAN setup)
+  meta-boat/ the Phase-2 container-host layer (image, packagegroup, Docker/Weston config)
 kas/         optional kas-based reproducible build
 docs/        the full guide (start at 01)
 ```
@@ -89,7 +94,6 @@ All knobs are in [`scripts/env.sh`](scripts/env.sh) and override from the shell:
 4. [Flashing to NVMe in detail](docs/04-flashing-nvme.md)
 5. [Phase 2 — the boat computer layer](docs/05-phase2-boat-computer-layer.md)
 6. [Troubleshooting](docs/06-troubleshooting.md)
-7. [Container-host architecture (design)](docs/07-container-host-architecture.md)
 
 ## Requirements
 
@@ -102,9 +106,14 @@ All knobs are in [`scripts/env.sh`](scripts/env.sh) and override from the shell:
 
 - Phase 1 (NVMe boot, `core-image-base`) has been built, flashed, and verified
   booting on real Xavier NX hardware with rootfs on `/dev/nvme0n1p1`. Phase 2
-  (`boat-image`/`meta-boat`) is an unverified scaffold - it hasn't been built
-  or flashed yet, so treat package names/recipes there as unproven until you
-  run it.
+  (`boat-image`/`meta-boat`) is now the **Jetson container-host** design in
+  [`docs/05-phase2-boat-computer-layer.md`](docs/05-phase2-boat-computer-layer.md)
+  (Docker + Weston + Jetson tooling on the host; Signal K/DeepStream/Firefox
+  run as containers) rather than the earlier "bake everything into the
+  rootfs" scaffold. It has been built successfully (0 errors) but not yet
+  flashed or booted on hardware, so treat it as unverified until that
+  happens. `scripts/01-fetch-layers.sh` now also fetches
+  `meta-virtualization` and `meta-tegra-community` for it.
 - Pin layer commits (`scripts/01-fetch-layers.sh` prints them) before treating
   a build as a product; `kirkstone` branches move.
 - Package names in `packagegroup-boat` target kirkstone; if one is missing on

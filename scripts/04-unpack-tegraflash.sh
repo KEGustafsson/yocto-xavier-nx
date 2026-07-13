@@ -10,6 +10,13 @@ source "${HERE}/lib.sh"
 source "${HERE}/env.sh"
 
 DEPLOY="${BUILD_DIR}/tmp/deploy/images/${MACHINE}"
+# IMAGE defaults to core-image-base (env.sh) unless exported - if you built a
+# different IMAGE (e.g. boat-image) and forget to export it here too, this
+# silently unpacks a *different, possibly stale* tarball instead of failing
+# loudly. Always echo what was actually resolved so that mismatch is visible
+# before you flash it.
+log "IMAGE=${IMAGE} (unset it and re-export explicitly if this isn't what you built)"
+
 # Accept either the kirkstone .tar.gz or the newer .tar.zst naming.
 TARBALL=""
 for cand in \
@@ -22,6 +29,17 @@ done
 [[ -n "${TARBALL}" ]] || die "no tegraflash tarball in ${DEPLOY}; run scripts/03-build.sh"
 
 log "Using tarball: ${TARBALL}"
+
+# Warn if a *newer* tarball for a *different* IMAGE exists in the same deploy
+# dir - the exact trap above: IMAGE resolved to something with an existing
+# tarball, but it isn't the most recently built one, so you're about to flash
+# stale content without any error.
+NEWEST="$(ls -t "${DEPLOY}"/*.tegraflash.tar.gz "${DEPLOY}"/*.tegraflash-tar.zst 2>/dev/null | head -n1 || true)"
+if [[ -n "${NEWEST}" && "${NEWEST}" != "${TARBALL}" ]]; then
+  warn "A newer tegraflash tarball exists but wasn't selected: ${NEWEST}"
+  warn "  (selected instead: ${TARBALL})"
+  warn "If you meant to unpack the newer one, re-run with IMAGE set to match it."
+fi
 # FLASH_DIR is env-overridable; canonicalize and refuse dangerous targets before
 # the recursive delete so a typo/bad override can't wipe an important directory.
 FLASH_DIR="$(realpath -m -- "${FLASH_DIR}")"

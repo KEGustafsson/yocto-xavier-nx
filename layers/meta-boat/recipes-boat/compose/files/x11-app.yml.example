@@ -1,0 +1,20 @@
+# Example - copy to /data/compose/ and adjust before use.
+# Generic template for an X11-only containerized GUI app (e.g. OpenCPN) to
+# display on the Jetson's own HDMI screen via XWayland. See
+# docs/05-phase2-boat-computer-layer.md "Container GUI apps on the HDMI
+# screen (X11 via XWayland)".
+#
+# Unlike the .Xauthority-cookie pattern some X11-in-docker examples use,
+# boat-hmi-autostart runs `xhost +local:` once XWayland comes up (see
+# boat-weston-autostart.sh) - so no .Xauthority mount or DISPLAY inherited
+# from the host shell is needed, just the two lines below. This only grants
+# access to *local* (same-machine) clients, not the network.
+services:
+  x11-app:
+    image: <your X11 app image, arm64>
+    network_mode: host
+    environment:
+      - DISPLAY=:0
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    restart: unless-stopped

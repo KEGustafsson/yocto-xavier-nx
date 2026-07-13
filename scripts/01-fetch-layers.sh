@@ -3,10 +3,14 @@
 # pinned to the branch defined in env.sh (default: kirkstone).
 #
 # Layers:
-#   poky                -> OpenEmbedded-Core + bitbake (the build system)
-#   meta-openembedded   -> meta-oe / meta-python / meta-networking / meta-filesystems
-#                          (provides gpsd, can-utils, mosquitto, chrony, nodejs, ...)
-#   meta-tegra          -> the NVIDIA Jetson BSP (kernel, bootloader, tegraflash)
+#   poky                  -> OpenEmbedded-Core + bitbake (the build system)
+#   meta-openembedded     -> meta-oe / meta-python / meta-networking / meta-filesystems
+#                            (provides chrony, avahi, networkmanager, nftables, ...)
+#   meta-tegra            -> the NVIDIA Jetson BSP (kernel, bootloader, tegraflash)
+#   meta-virtualization   -> Docker (docker-moby) + container runtime; also unlocks
+#                            meta-tegra's external/virtualization-layer overlay
+#                            (nvidia-container-toolkit, libnvidia-container-*)
+#   meta-tegra-community  -> extra Jetson userspace tools (python3-jetson-stats)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -22,6 +26,8 @@ LAYERS=(
   "poky|https://git.yoctoproject.org/poky"
   "meta-openembedded|https://github.com/openembedded/meta-openembedded.git"
   "meta-tegra|https://github.com/OE4T/meta-tegra.git"
+  "meta-virtualization|https://git.yoctoproject.org/meta-virtualization"
+  "meta-tegra-community|https://github.com/OE4T/meta-tegra-community.git"
 )
 
 clone_or_update() {

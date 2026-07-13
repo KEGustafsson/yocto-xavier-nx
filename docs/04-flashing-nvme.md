@@ -20,7 +20,7 @@ reboot.
 ```bash
 cd yocto/flash
 sudo ./initrd-flash                 # firmware (QSPI) + rootfs (NVMe)
-sudo ./initrd-flash --external-only # only the rootfs (fast; firmware already done)
+sudo ./initrd-flash --skip-bootloader # only the rootfs (fast; firmware already done)
 sudo ./initrd-flash --qspi-only     # only the firmware
 ```
 
@@ -28,7 +28,7 @@ sudo ./initrd-flash --qspi-only     # only the firmware
 
 ```bash
 ./scripts/05-flash-nvme.sh                 # full flash
-./scripts/05-flash-nvme.sh --external-only # rootfs only on subsequent flashes
+./scripts/05-flash-nvme.sh --skip-bootloader # rootfs only on subsequent flashes
 ```
 
 How it works: the script RCM-boots a minimal Linux onto the board over USB; that

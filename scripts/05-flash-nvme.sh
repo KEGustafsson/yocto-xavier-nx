@@ -11,7 +11,7 @@
 #                             been flashed at least once via initrd-flash first.
 #
 # Extra flags after the mode are passed through to the underlying script, e.g.
-#   scripts/05-flash-nvme.sh --external-only     # skip the slow QSPI firmware step
+#   scripts/05-flash-nvme.sh --skip-bootloader     # skip the slow QSPI firmware step
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
