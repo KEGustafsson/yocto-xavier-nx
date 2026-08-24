@@ -10,6 +10,7 @@ SRC_URI = "file://autologin.conf \
            file://boat-xfce-autostart.sh \
            file://boat-xfce-session \
            file://10-boat-keyboard.conf \
+           file://boat-x11-cookie.conf \
 "
 
 S = "${WORKDIR}"
@@ -51,22 +52,37 @@ do_install() {
         ${D}${sysconfdir}/X11/xorg.conf.d/10-boat-keyboard.conf
     sed -i -e 's,@BOAT_HMI_XKB_LAYOUT@,${BOAT_HMI_XKB_LAYOUT},g' \
         ${D}${sysconfdir}/X11/xorg.conf.d/10-boat-keyboard.conf
+
+    # /run/boat-x11, where boat-xfce-session exports the X cookie the
+    # containerized GUI apps present. systemd-tmpfiles has to create it: /run
+    # is a tmpfs, so nothing baked into the rootfs survives there, and the
+    # session user cannot mkdir in it. Shipped under ${nonarch_libdir} (the
+    # package's own default) rather than ${sysconfdir}, which is where a
+    # site override of it would go.
+    install -d ${D}${nonarch_libdir}/tmpfiles.d
+    install -m 0644 ${WORKDIR}/boat-x11-cookie.conf \
+        ${D}${nonarch_libdir}/tmpfiles.d/boat-x11.conf
+    sed -i -e 's,@BOAT_HMI_USER@,${BOAT_HMI_USER},g' \
+        ${D}${nonarch_libdir}/tmpfiles.d/boat-x11.conf
 }
 
 FILES:${PN} = "\
     ${systemd_system_unitdir}/getty@tty1.service.d/autologin.conf \
     ${sysconfdir}/profile.d/boat-xfce-autostart.sh \
     ${sysconfdir}/X11/xorg.conf.d/10-boat-keyboard.conf \
+    ${nonarch_libdir}/tmpfiles.d/boat-x11.conf \
     ${bindir}/boat-xfce-session \
 "
 
-# What the two scripts above actually exec: startx (xinit), xhost, the XFCE
-# session manager, and dbus-run-session (in the "dbus" package - poky's dbus
-# also RPROVIDES the "dbus-x11" name xfce4-session itself asks for).
-# The rest of the desktop comes from packagegroup-boat-hmi.
+# What the two scripts above actually exec: startx (xinit), xauth (the
+# container cookie export in boat-xfce-session - `xhost` is deliberately not
+# needed any more), the XFCE session manager, and dbus-run-session (in the
+# "dbus" package - poky's dbus also RPROVIDES the "dbus-x11" name
+# xfce4-session itself asks for). sed comes from busybox/coreutils in any
+# image. The rest of the desktop comes from packagegroup-boat-hmi.
 RDEPENDS:${PN} = "\
     xinit \
-    xhost \
+    xauth \
     dbus \
     xfce4-session \
 "

@@ -4,17 +4,28 @@
 # See docs/05-phase2-boat-computer-layer.md "Container GUI apps on the HDMI
 # screen (X11)".
 #
-# Unlike the .Xauthority-cookie pattern some X11-in-docker examples use,
-# boat-hmi-autostart runs `xhost +local:` as the X session starts (see
-# boat-xfce-session) - so no .Xauthority mount or DISPLAY inherited from the
-# host shell is needed, just the two lines below. This only grants access to
-# *local* (same-machine) clients, not the network.
+# Three things are needed, all below: the X socket, DISPLAY, and the session's
+# MIT-MAGIC-COOKIE. boat-xfce-session exports a copy of that cookie to
+# /run/boat-x11/Xauthority as the desktop starts; mount that directory
+# read-only and point XAUTHORITY at the file inside it.
+#
+# The cookie is the session's own, so it grants FULL access to the helm
+# display - input injection, screen capture, window manipulation. Give it only
+# to containers you trust with the screen. (Earlier versions of this image
+# instead ran `xhost +local:`, which handed the same power to every local
+# process of every uid, mount or no mount.)
+#
+# Mount the *directory*, not the file: the session rewrites the cookie file on
+# every restart, and a file bind-mount would keep pointing at the old, deleted
+# one.
 services:
   x11-app:
     image: <your X11 app image, arm64>
     network_mode: host
     environment:
       - DISPLAY=:0
+      - XAUTHORITY=/run/boat-x11/Xauthority
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
+      - /run/boat-x11:/run/boat-x11:ro
     restart: unless-stopped

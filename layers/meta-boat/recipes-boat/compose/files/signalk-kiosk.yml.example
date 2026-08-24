@@ -131,8 +131,15 @@ services:
                              # container_name doesn't matter for reachability)
     environment:
       - DISPLAY=:0
+      # The session's MIT-MAGIC-COOKIE, exported to this path by
+      # boat-xfce-session. Without it X rejects the connection with
+      # "Authorization required, but no authorization protocol specified". Mount the directory rather than the file: the
+      # session writes a fresh cookie file on every restart. It grants full
+      # access to the helm display, so mount it read-only and only here.
+      - XAUTHORITY=/run/boat-x11/Xauthority
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
+      - /run/boat-x11:/run/boat-x11:ro
     depends_on:
       - signalk-server
     # CONFIRMED ON HARDWARE: Docker's default /dev/shm (64MB) was exactly

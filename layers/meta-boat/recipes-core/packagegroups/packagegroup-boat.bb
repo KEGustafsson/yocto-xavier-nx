@@ -126,9 +126,12 @@ RDEPENDS:${PN}-connectivity = "\
 # more panel plugins, themes and desktop apps that just grow the rootfs on
 # an appliance.
 #
-# xauth/xhost: boat-xfce-session runs `xhost +local:` so containerized GUI
-# apps can use the mounted /tmp/.X11-unix socket without a cookie - see
-# docs/05 "Container GUI apps on the HDMI screen (X11)".
+# xauth: boat-xfce-session uses it to export a copy of the session's
+# MIT-MAGIC-COOKIE for containerized GUI apps, which present it over the
+# mounted /tmp/.X11-unix socket - see docs/05 "Container GUI apps on the HDMI
+# screen (X11)". `xhost` is deliberately NOT installed: the blanket
+# `xhost +local:` grant this image used to rely on disables cookie auth for
+# every local uid, and leaving the tool out keeps it from creeping back in.
 # dbus/libinput/fontconfig deliberately NOT listed here, even though the
 # session needs all three: they are pulled in transitively (xfce4-session
 # RDEPENDS "dbus-x11", which poky's dbus package RPROVIDES and which is also
@@ -147,7 +150,6 @@ RDEPENDS:${PN}-hmi = "\
     packagegroup-xfce-base \
     xinit \
     xauth \
-    xhost \
     xrandr \
     xset \
     xdpyinfo \

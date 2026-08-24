@@ -114,7 +114,7 @@ project's actual fetched layers (kirkstone), not guessed:
 | `-nvidia-host` | `tegra-argus-daemon` (CSI cameras). Tegra userspace driver libs (`tegra-libraries-*`) are already pulled in by the BSP, not listed again |
 | `-jetson` | `tegra-nvpmodel`, `tegra-nvfancontrol`, `tegra-tools` (`jetson_clocks`/`tegrastats`), `python3-jetson-stats` (jtop) |
 | `-connectivity` | `networkmanager`, `modemmanager`, `avahi-daemon`+`avahi-utils`, `bluez5`, `hostapd`, `dnsmasq`, `iw`, `wireless-regdb-static`, `wireguard-tools`, `chrony` |
-| `-hmi` | `packagegroup-core-x11-xserver` (expands to meta-tegra's own `XSERVER`: `xserver-xorg` + NVIDIA's `xserver-xorg-video-nvidia`), `packagegroup-xfce-base` (xfwm4, xfce4-session, xfce4-panel, xfdesktop, xfce4-settings, thunar, xfce4-terminal, …), `xinit`, `xauth`, `xhost`, `xrandr`, `xset`, `xdpyinfo`, `dbus`, `ttf-dejavu-sans` — browsers/apps themselves are containers, not packages |
+| `-hmi` | `packagegroup-core-x11-xserver` (expands to meta-tegra's own `XSERVER`: `xserver-xorg` + NVIDIA's `xserver-xorg-video-nvidia`), `packagegroup-xfce-base` (xfwm4, xfce4-session, xfce4-panel, xfdesktop, xfce4-settings, thunar, xfce4-terminal, …), `xinit`, `xauth`, `xrandr`, `xset`, `xdpyinfo`, `dbus`, `ttf-dejavu-sans` — browsers/apps themselves are containers, not packages |
 | `-reliability` | `watchdog` (not `watchdog-keepalive` too — upstream declares them mutually exclusive alternatives) |
 | `-security` | `openssh`, `nftables` |
 | `-nettools` | `iproute2`, `net-tools`, `iputils`, `bmon`, `tcpdump`, `mtr`, `traceroute`, `ethtool`, `iftop`, `curl`, `nmap`, `libqmi`/`libmbim` (cellular debug) |
@@ -347,10 +347,12 @@ exec startx /usr/bin/boat-xfce-session -- :0 vt1
 ```
 
 `/usr/bin/boat-xfce-session` (also from this recipe) is the X session's first
-and only client. It runs `xhost +local:` — the X server is already up and
-`XAUTHORITY` is already set at that point — and then execs
-`dbus-run-session -- xfce4-session`, giving XFCE the session bus that
-`xfconf`, `xfsettingsd`, `thunar` and `xfce4-notifyd` all need.
+and only client. It exports a copy of the session's MIT-MAGIC-COOKIE to
+`/run/boat-x11/Xauthority` for containerized GUI apps — the X
+server is already up and `XAUTHORITY` is already set at that point, which is
+why the export lives here — and then execs `dbus-run-session --
+xfce4-session`, giving XFCE the session bus that `xfconf`, `xfsettingsd`,
+`thunar` and `xfce4-notifyd` all need.
 
 Boot flow: systemd autologin (`boat`, UID 2000) → `pam_systemd` creates the
 logind session on seat0 → `startx` → Xorg on vt1 with NVIDIA's Tegra X driver
@@ -438,11 +440,19 @@ explain shapes still visible in the code and in git history:
 Not every containerized GUI app ships a KasmVNC-style web desktop like
 `linuxserver/firefox`. Plain X11 apps (OpenCPN, Chromium, …) render straight
 onto the HDMI screen instead, as ordinary clients of the same X server the
-XFCE desktop is running on — no XWayland bridge in the path any more, and no
-`.Xauthority` juggling: `boat-xfce-session` runs `xhost +local:` as the
-session starts, which grants same-machine clients access without a cookie
-(and grants nothing to the network — `startx` also passes `-nolisten tcp` by
-default).
+XFCE desktop is running on — no XWayland bridge in the path any more. They
+need three things: the X socket, `DISPLAY`, and an authorization cookie. As
+the session starts, `boat-xfce-session` exports a copy of its
+MIT-MAGIC-COOKIE (family rewritten to `FamilyWildcard`, so it matches from
+inside a container's own UTS namespace) to:
+
+```
+/run/boat-x11/Xauthority
+```
+
+`/run/boat-x11` itself is created at boot by `systemd-tmpfiles`, from
+`/usr/lib/tmpfiles.d/boat-x11.conf` (shipped by the same recipe), mode `0700`
+and owned by the `boat` user.
 
 Compose your container with:
 
@@ -453,10 +463,65 @@ services:
     network_mode: host
     environment:
       - DISPLAY=:0
+      - XAUTHORITY=/run/boat-x11/Xauthority
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
+      - /run/boat-x11:/run/boat-x11:ro
     restart: unless-stopped
 ```
+
+Mount the *directory*, not the file: the session writes a fresh cookie file
+on every restart, and a file bind-mount would keep the container pinned to
+the old, deleted one. `:ro` because nothing in the container has any reason
+to write it.
+
+**This cookie is the session's own, so it is full access to the helm
+display** — anything holding it can inject keystrokes and pointer events,
+capture the screen and manipulate other clients' windows. Hand it only to
+containers you trust with the display; there is no lesser grant here (X's
+`SECURITY` extension "untrusted" cookies exist, but break GLX and most real
+apps, so this image does not use them).
+
+Earlier versions of this image ran `xhost +local:` in `boat-xfce-session`
+instead, and containers needed no cookie at all. That grant turns cookie
+authentication **off** for every same-machine client: any local process, of
+any uid, could then keylog or take over the helm session, whether or not it
+was ever given the X socket. `-nolisten tcp` does not help — it only keeps
+the network out, and these clients come in over `/tmp/.X11-unix`. The
+mounted-cookie scheme above grants exactly the same power, but only to the
+containers that were actually handed the mount. The cookie file itself is
+readable by any uid (container images often run their app as a non-root
+user), which is safe because its parent `/run/boat-x11` is `0700`: no other
+unprivileged uid on the host can traverse into it, and `dockerd` bind-mounts
+it as root.
+
+**Why not `/run/user/2000`**, the obvious place for a session's runtime
+files: `logind` mounts a tmpfs there for each login session, and `dockerd`
+silently creates a missing bind-mount source as a root-owned directory. A
+container coming up before the first login would create — then stay pinned
+to — the directory *underneath* that later tmpfs, and would never see a
+cookie. A tmpfiles-created directory outside `/run/user` exists before
+`docker.service` starts and survives session restarts.
+
+To verify on hardware — the approved path from the `boat` session, the
+rejected one from a root shell (serial console or SSH):
+
+```sh
+# approved: the exported cookie, exactly what the containers are handed
+XAUTHORITY=/run/boat-x11/Xauthority DISPLAY=:0 xdpyinfo | head -3
+#   name of display:    :0
+#   version number:     11.0
+#   ...
+
+# unrelated local client: another uid, no cookie, and no way into
+# /run/boat-x11 to find one -> rejected
+su -s /bin/sh -c 'DISPLAY=:0 xdpyinfo' nobody
+#   No protocol specified
+#   xdpyinfo: unable to open display ":0".
+```
+
+Under the old `xhost +local:` grant that second command printed the display
+information instead of failing — that is the whole difference.
 
 See
 [`x11-app.yml.example`](../layers/meta-boat/recipes-boat/compose/files/x11-app.yml.example)
@@ -592,8 +657,9 @@ UI" above.)
   autologin-and-launch-a-session-from-tty1 mechanism, in its Weston form.
   ❓ The XFCE/Xorg form of it is written but not yet flashed and booted.
 - ✅ X11 for containerized GUI apps — now the desktop's own X server rather
-  than XWayland, with the same `xhost +local:` grant. See "Container GUI
-  apps on the HDMI screen (X11)".
+  than XWayland, and with a per-container mounted MIT-MAGIC-COOKIE instead of
+  the Weston-era blanket `xhost +local:` grant. See "Container GUI apps on
+  the HDMI screen (X11)". ❓ Not yet re-confirmed on hardware.
 - ✅ `boat-compose` (example compose files including `x11-app.yml.example` +
   `boat-compose.service`). **Confirmed on hardware:** `linuxserver/firefox`
   (KasmVNC-based, so it never touches the host display - see "Deploying an

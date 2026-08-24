@@ -18,7 +18,7 @@ on the target. The full design is
 | NVIDIA container runtime | `nvidia-container-toolkit` (GPU/DLA/NVENC/NVDEC/ISP in containers) — **unproven on kirkstone, see Open risks below** |
 | Jetson host bits | `tegra-argus-daemon` (CSI cameras), `tegra-nvpmodel`, `tegra-nvfancontrol`, `tegra-tools` (`jetson_clocks`/`tegrastats`), `python3-jetson-stats` |
 | Connectivity | `networkmanager`+`modemmanager`, `avahi`, `bluez5`, `hostapd`+`dnsmasq`, `wireguard-tools`, `chrony` |
-| HMI | `packagegroup-core-x11-xserver` (Xorg + NVIDIA's Tegra X driver), `packagegroup-xfce-base` (the XFCE desktop), `xinit`/`xauth`/`xhost`/`xrandr`/`xset`, `boat-hmi-autostart` (autologin + `startx` → `xfce4-session` on tty1) |
+| HMI | `packagegroup-core-x11-xserver` (Xorg + NVIDIA's Tegra X driver), `packagegroup-xfce-base` (the XFCE desktop), `xinit`/`xauth`/`xrandr`/`xset`, `boat-hmi-autostart` (autologin + `startx` → `xfce4-session` on tty1) |
 | Reliability | `watchdog` |
 | Security | `openssh`, `nftables` |
 | Network diagnostics | `iproute2`, `net-tools`, `iputils`, `tcpdump`, `mtr`, `nmap`, `libqmi`/`libmbim`, ... |
