@@ -1,0 +1,26 @@
+#!/bin/sh
+# Installed as /usr/bin/boat-xfce-session; run by startx (see
+# /etc/profile.d/boat-xfce-autostart.sh) as the X session's first and only
+# client. DISPLAY and XAUTHORITY are already set correctly here, and the X
+# server is already accepting connections - that is the whole reason the
+# xhost grant below lives in this file rather than alongside the startx call.
+# (The Weston-era version of this image had to poll for XWayland's socket
+# from a backgrounded subshell instead; with startx there is nothing to wait
+# for, and a subshell forked before startx would not have the auth cookie.)
+
+# Let container GUI apps (Signal K's Chromium kiosk, OpenCPN, ...) connect
+# over the mounted /tmp/.X11-unix socket without needing the session's
+# MIT-MAGIC-COOKIE copied into every image. "+local:" grants same-machine
+# clients only - it does not open anything to the network. See
+# docs/05-phase2-boat-computer-layer.md "Container GUI apps on the HDMI
+# screen".
+xhost +local: >/dev/null 2>&1
+
+# XFCE needs a D-Bus session bus (xfconf, xfsettingsd, thunar, notifyd all
+# talk over it). Under systemd+logind a user bus may already be running, in
+# which case reuse it rather than starting a second, competing one.
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    exec dbus-run-session -- xfce4-session
+fi
+
+exec xfce4-session

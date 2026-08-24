@@ -36,6 +36,25 @@
 | Boots but `mount \| grep ' / '` isn't `/dev/nvme0n1p1` (`findmnt` isn't installed on `core-image-base`) | `TNSPEC_BOOTDEV` wasn't set at build time. Rebuild with `TNSPEC_BOOTDEV = "nvme0n1p1"`, reflash. |
 | **Won't boot from NVMe on older firmware** | Insert a **blank** SD card (no ESP/APP partitions) as a fallback, or update the module firmware (`--qspi-only` flash) to the R35 UEFI build. |
 
+## Helm display / XFCE desktop (Phase 2)
+
+The desktop is Xorg + XFCE started from the `boat` user's tty1 autologin -
+see [`05-phase2-boat-computer-layer.md`](05-phase2-boat-computer-layer.md)
+"HMI / XFCE autostart". Two logs cover almost everything:
+`~boat/.local/share/xorg/Xorg.0.log` (the X server) and
+`/tmp/boat-xfce-session.log` (`startx` + the session). SSH in rather than
+debugging on the console - the console *is* the thing that's broken.
+
+| Symptom | Fix |
+|---------|-----|
+| Console autologins, screen stays black, nothing in `/tmp/boat-xfce-session.log` | The `/etc/profile.d` guard didn't fire. It requires UID 2000 (`BOAT_HMI_UID`), `$DISPLAY` unset and `tty` = `/dev/tty1`; check `id -u`, and that the login shell is bash (`profile.d` is not read by `sh`). |
+| `xf86OpenConsole: Cannot open virtual console` / `Cannot open /dev/dri/card0` in `Xorg.0.log` | The unprivileged Xorg has no logind session to get devices from. `loginctl` should list one session for `boat`, `seat0`, `tty1`; if not, `pam` is missing from `DISTRO_FEATURES` or `pam_systemd` isn't in `/etc/pam.d/login`. |
+| Xorg starts but fails loading the NVIDIA driver | Confirm `xserver-xorg-video-nvidia` and `tegra-configs-xorg` are installed (`/usr/lib/xorg/modules/drivers/nvidia_drv.so`, `/etc/X11/xorg.conf`) and that `boat` is in the `video` group - meta-tegra's udev rules give `/dev/nvhost-*` to that group. As a bisect, run `startx /usr/bin/boat-xfce-session -- :0 vt1` as root from tty1 (`su -`; `sudo` is not in this image): if root works and `boat` doesn't, it's a permissions/logind problem, not a driver one. |
+| Desktop comes up but the keyboard layout is wrong | `/etc/X11/xorg.conf.d/10-boat-keyboard.conf` (`XkbLayout`, from `BOAT_HMI_XKB_LAYOUT`, default `fi`). Read at X server start, so restart the session after changing it - or `setxkbmap <layout>` for a live test. |
+| Screen blanks after ~10 minutes | X's built-in screensaver; `xfce4-power-manager` isn't installed. `xset s off -dpms`, or add `-s 0 -dpms` to the `startx` server args in `boat-xfce-autostart.sh` to make it permanent. |
+| Container GUI app: `cannot open display :0` / `Authorization required` | The container needs `DISPLAY=:0` **and** `/tmp/.X11-unix` bind-mounted. If both are set, check the `xhost +local:` grant survived: run `xhost` from the desktop session - it should list `LOCAL:`. |
+| Screen flickers between console and black, repeatedly | The session is crash-looping: `xfce4-session` (or Xorg) exits, the login shell ends, agetty autologins again. `/tmp/boat-xfce-session.log` names the failure; a missing package from `packagegroup-xfce-base` is the usual cause. |
+
 ## CAN / NMEA 2000 (Phase 2)
 
 | Symptom | Fix |

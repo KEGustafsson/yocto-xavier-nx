@@ -4,8 +4,13 @@
 #
 # Layers:
 #   poky                  -> OpenEmbedded-Core + bitbake (the build system)
-#   meta-openembedded     -> meta-oe / meta-python / meta-networking / meta-filesystems
-#                            (provides chrony, avahi, networkmanager, nftables, ...)
+#   meta-openembedded     -> meta-oe / meta-python / meta-networking /
+#                            meta-filesystems (chrony, avahi, networkmanager,
+#                            nftables, ...) plus meta-xfce and its own layer
+#                            dependencies meta-gnome / meta-multimedia, which
+#                            provide the Phase-2 XFCE helm desktop. All are
+#                            sublayers of this single clone; which ones get
+#                            enabled is decided in 02-configure-build.sh.
 #   meta-tegra            -> the NVIDIA Jetson BSP (kernel, bootloader, tegraflash)
 #   meta-virtualization   -> Docker (docker-moby) + container runtime; also unlocks
 #                            meta-tegra's external/virtualization-layer overlay

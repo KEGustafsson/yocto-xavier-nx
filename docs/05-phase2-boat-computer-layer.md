@@ -1,11 +1,18 @@
 # 05 — Phase 2: The Boat Computer Layer (`meta-boat`)
 
 **Status: `boat-image` has been built, flashed, and booted on real Xavier NX
-hardware.** Confirmed working: `boat-hmi-autostart` (autologin + Weston on
-tty1, giving a working Wayland session/terminal), `dockerd` (`docker ps`
-responds), and networking (internet reachable). Not yet confirmed: GPU access
-in containers via `nvidia-container-toolkit` — still the biggest open risk,
-see "Open risks" and "What's built vs deferred" at the end.
+hardware.** Confirmed working on that build: `boat-hmi-autostart` (autologin
++ a graphical session on tty1), `dockerd` (`docker ps` responds), and
+networking (internet reachable). Not yet confirmed: GPU access in containers
+via `nvidia-container-toolkit` — still the biggest open risk, see "Open
+risks" and "What's built vs deferred" at the end.
+
+> **The helm display changed: Weston/Wayland → XFCE on Xorg.** The confirmed
+> boot above was the old Weston session. The desktop is now a full XFCE
+> desktop started on an Xorg server (see "HMI / XFCE autostart"), which has
+> **not** been re-validated on hardware yet. Everything else in this document
+> — Docker, the container design, networking, `/data` — is unchanged. If you
+> are reading this after a successful XFCE boot, please update this note.
 
 `meta-boat` turns the plain NVMe-booting image from Phase 1 into a **minimal,
 reliable Jetson container host**, not a box with Signal K/GNSS/CAN tooling
@@ -64,7 +71,7 @@ and `libnvidia-container-*`) and **meta-tegra-community**
         │  kernel + Tegra GPU driver   Docker + nvidia-container-runtime     │
         │  nvargus-daemon (CSI cams)   NetworkManager + ModemManager         │
         │  dbus / avahi / bluez        chrony                                │
-        │  Weston compositor (GPU)     nvpmodel / jetson-clocks / nvfancontrol│
+        │  Xorg + XFCE desktop (GPU)   nvpmodel / jetson-clocks / nvfancontrol│
         │  openssh / nftables          watchdog                              │
         └───────────────┬───────────────────────────────────────────────────┘
                         │  docker-compose (files on /data)
@@ -72,13 +79,13 @@ and `libnvidia-container-*`) and **meta-tegra-community**
         │  CONTAINERS (you pull / compose)                                    │
         │   • signalk-server  (your GHCR / Docker Hub, arm64)                 │
         │   • deepstream-l4t  (nvcr.io, GPU + DLA + NVENC/NVDEC + ISP)        │
-        │   • firefox         (helm UI → Weston Wayland socket)              │
+        │   • firefox         (helm UI → own KasmVNC desktop, any browser)   │
         │   • influxdb / grafana / node-red  (optional dashboards)            │
         └────────────────────────────────────────────────────────────────────┘
 ```
 
 Rule of thumb: **anything that owns real hardware — the GPU driver, the
-display compositor, the network interfaces, the system clock, the watchdog —
+display server, the network interfaces, the system clock, the watchdog —
 is on the host. Everything else is a container.**
 
 ## What changed from the earlier scaffold
@@ -107,7 +114,7 @@ project's actual fetched layers (kirkstone), not guessed:
 | `-nvidia-host` | `tegra-argus-daemon` (CSI cameras). Tegra userspace driver libs (`tegra-libraries-*`) are already pulled in by the BSP, not listed again |
 | `-jetson` | `tegra-nvpmodel`, `tegra-nvfancontrol`, `tegra-tools` (`jetson_clocks`/`tegrastats`), `python3-jetson-stats` (jtop) |
 | `-connectivity` | `networkmanager`, `modemmanager`, `avahi-daemon`+`avahi-utils`, `bluez5`, `hostapd`, `dnsmasq`, `iw`, `wireless-regdb-static`, `wireguard-tools`, `chrony` |
-| `-hmi` | `weston`+`weston-init`, `wayland`, `wayland-protocols`, `libinput`, `ttf-dejavu-sans`, `fontconfig` — Firefox itself is a container, not a package |
+| `-hmi` | `packagegroup-core-x11-xserver` (expands to meta-tegra's own `XSERVER`: `xserver-xorg` + NVIDIA's `xserver-xorg-video-nvidia`), `packagegroup-xfce-base` (xfwm4, xfce4-session, xfce4-panel, xfdesktop, xfce4-settings, thunar, xfce4-terminal, …), `xinit`, `xauth`, `xhost`, `xrandr`, `xset`, `xdpyinfo`, `dbus`, `ttf-dejavu-sans` — browsers/apps themselves are containers, not packages |
 | `-reliability` | `watchdog` (not `watchdog-keepalive` too — upstream declares them mutually exclusive alternatives) |
 | `-security` | `openssh`, `nftables` |
 | `-nettools` | `iproute2`, `net-tools`, `iputils`, `bmon`, `tcpdump`, `mtr`, `traceroute`, `ethtool`, `iftop`, `curl`, `nmap`, `libqmi`/`libmbim` (cellular debug) |
@@ -115,7 +122,7 @@ project's actual fetched layers (kirkstone), not guessed:
 
 Not available in this project's fetched kirkstone-era layers, and
 deliberately **omitted** rather than left as names that fail the build:
-`wvkbd` (on-screen keyboard), `fail2ban`, `wavemon`, `bind-utils`
+`fail2ban`, `wavemon`, `bind-utils`
 (`dig`/`nslookup`), `fake-hwclock`. Add them from a newer layer snapshot if
 you need them. See
 [`../layers/meta-boat/recipes-core/packagegroups/packagegroup-boat.bb`](../layers/meta-boat/recipes-core/packagegroups/packagegroup-boat.bb)
@@ -127,15 +134,26 @@ for the authoritative, commented list.
   meta-networking / meta-filesystems, already present). meta-tegra provides
   the Tegra driver, `nvargus-daemon` and the container-runtime bits once
   meta-virtualization's `virtualization-layer` collection is present.
-  `meta-tegra-community` provides `jetson-stats`.
+  `meta-tegra-community` provides `jetson-stats`. **`meta-xfce`** provides
+  the helm desktop, and drags in **`meta-gnome`** and **`meta-multimedia`**
+  as its own declared `LAYERDEPENDS` — bitbake refuses to parse without
+  them. All three are sublayers of the `meta-openembedded` clone
+  `scripts/01-fetch-layers.sh` already makes, so nothing extra is fetched;
+  `scripts/02-configure-build.sh` just adds them to `bblayers.conf`.
 - `scripts/02-configure-build.sh` sets
-  `DISTRO_FEATURES:append = " virtualization wayland opengl pam"` in
+  `DISTRO_FEATURES:append = " virtualization opengl pam x11"` in
   `local.conf` (build-wide, not per-image — `DISTRO_FEATURES` gates other
   recipes' `REQUIRED_DISTRO_FEATURES` at parse time, so an image-recipe-local
-  append can't retroactively unskip them). `pam` isn't just a `weston-init`
-  gate: with systemd init, `pam_systemd` is what makes `systemd-logind`
-  create the `/run/user/<uid>` session directory the Weston autostart (and
-  any container mounting that socket) depends on.
+  append can't retroactively unskip them). `x11` gates `xserver-xorg`,
+  `packagegroup-core-x11-xserver` and every meta-xfce recipe; `opengl`
+  builds GLX, which xfwm4's compositor and any GPU-accelerated app on the
+  same display need. `pam` isn't cosmetic either: with systemd init,
+  `pam_systemd` is what makes `systemd-logind` create a session on seat0 for
+  the autologin user — without that session the **unprivileged** Xorg
+  `boat-hmi-autostart` starts cannot take DRM master or open input devices
+  at all.
+  `wayland` was dropped from that list along with Weston; add it back if you
+  reintroduce a Wayland compositor.
 - **`LICENSE_FLAGS_ACCEPTED += "commercial"`** (Tegra driver / NVIDIA
   components) — already set in this project.
 
@@ -279,17 +297,17 @@ on meta-tegra kirkstone is unproven, see "Open risks" below.
 
 ### Deploying an app: Firefox as the helm UI
 
-Firefox is **not** built in Yocto and does **not** connect to `boat-hmi-autostart`'s
-Weston session via a shared Wayland socket — that native-Wayland-in-container
-approach is fragile in practice (exact UID match, `XDG_RUNTIME_DIR`
-permissions, waiting for the socket to exist, no widely-used prebuilt image
-actually does it for Firefox) and isn't what's actually deployed here.
-
-Instead: **[`linuxserver/firefox`](https://docs.linuxserver.io/images/docker-firefox/)**,
+Firefox is **not** built in Yocto, and this deployment doesn't hand it the
+host's display at all. Instead:
+**[`linuxserver/firefox`](https://docs.linuxserver.io/images/docker-firefox/)**,
 which has official `arm64v8` builds and runs its own browser-accessible
-desktop (KasmVNC) rather than needing the host's Wayland socket at all. This
-is also more useful on a boat: any phone/tablet/laptop browser on the LAN can
-reach the helm UI, not just whatever's plugged into the HDMI port.
+desktop (KasmVNC). This is more useful on a boat: any phone/tablet/laptop
+browser on the LAN can reach the helm UI, not just whatever's plugged into
+the HDMI port.
+
+(If you *do* want a browser painting on the Jetson's own screen, that is the
+X11 route below — `signalk-kiosk.yml.example` does exactly that with
+Chromium.)
 
 ```yaml
 services:
@@ -310,75 +328,123 @@ services:
     restart: unless-stopped
 ```
 
-`boat-hmi-autostart`'s local Weston/tty1 session is still useful on its own
-(a kiosk-style local display showing whatever's convenient, e.g. this same
-KasmVNC URL pointed at `localhost:3000` in a local browser) — it's just not
-wired *into* the Firefox container via Wayland socket sharing.
+`boat-hmi-autostart`'s local XFCE/tty1 desktop is still useful on its own —
+open this same KasmVNC URL (`localhost:3000`) in a local browser there if you
+want the Firefox container on the HDMI screen too.
 
-## HMI / Weston autostart
+## HMI / XFCE autostart
+
+The helm display is a full **XFCE desktop on an Xorg server**, started
+automatically at boot. (Earlier versions of this image booted into a bare
+Weston/Wayland session instead; see "Why not Weston any more" below.)
 
 `boat-hmi-autostart` autologins a fixed `boat` user (UID 2000, created via
-`extrausers` in `boat-image.bb`) on tty1 and launches Weston from a
-`/etc/profile.d/` script on that session — **not** `weston-init`'s own
-`weston.service`, which runs Weston as a separate `weston` system user, not
-the UID a container's `/run/user/<uid>` mount is pinned to. Because the
-login goes through a real getty + PAM session (`pam_systemd`,
-`DISTRO_FEATURES` `pam`), `systemd-logind` creates `/run/user/2000/wayland-1`.
+`extrausers` in `boat-image.bb`) on tty1 via a `getty@tty1.service` drop-in,
+and `/etc/profile.d/boat-xfce-autostart.sh` then runs, from that login shell:
 
-**CONFIRMED ON HARDWARE, and the reason this doesn't just call
-`weston-init`'s own `weston-start` script:** `weston-start` unconditionally
-launches weston through `su -c "..." $WESTON_USER`. With `$WESTON_USER`
-unset (our case — we're already logged in as the right user via getty
-autologin, no privilege switch needed), that becomes `su` with no target
-user, which defaults to **root**, and separately `su` refuses to run at all
-unless it's the foreground process group of the controlling tty. The
-symptoms were exactly "su: must be run from a terminal" printed to the
-console, and — once that specific failure mode was worked around — weston
-silently running as **root** instead of `boat` (breaking the
-`/run/user/2000` socket ownership the whole design depends on).
-`boat-weston-autostart.sh` sidesteps all of this by calling `weston` (with
-`--modules=systemd-notify.so`, matching what `weston-start` would have
-passed) directly — no `su`, no `weston-start`.
+```sh
+exec startx /usr/bin/boat-xfce-session -- :0 vt1
+```
 
-Boot flow: systemd autologin (`boat`, UID 2000) → Weston starts (GPU via
-Tegra EGL). Add a touchscreen with `libinput`; there's no on-screen-keyboard
-package available on this kirkstone snapshot (`wvkbd` isn't packaged) for a
-touch-only helm.
+`/usr/bin/boat-xfce-session` (also from this recipe) is the X session's first
+and only client. It runs `xhost +local:` — the X server is already up and
+`XAUTHORITY` is already set at that point — and then execs
+`dbus-run-session -- xfce4-session`, giving XFCE the session bus that
+`xfconf`, `xfsettingsd`, `thunar` and `xfce4-notifyd` all need.
+
+Boot flow: systemd autologin (`boat`, UID 2000) → `pam_systemd` creates the
+logind session on seat0 → `startx` → Xorg on vt1 with NVIDIA's Tegra X driver
+→ `xfce4-session` → panel, desktop, window manager.
+
+**Why it starts from the autologin session and not `xserver-nodm-init`:**
+poky's `xserver-nodm-init` is the usual "X with no display manager" unit, but
+it runs Xorg **as root**, so the whole desktop and everything launched from
+it would be root too, and `systemd-logind` would never create the
+`/run/user/2000` session directory this image's design pins to
+`BOAT_HMI_UID`. Starting X from the autologin session instead keeps the
+desktop unprivileged and gives it a real seat — which is also the thing that
+lets a non-root Xorg take DRM master and open input devices in the first
+place (Xorg 21.1 is built here with `systemd-logind` support; poky does not
+build the setuid `Xorg.wrap`, so there is no other way for a normal user to
+start it). For the same reason `xserver-nodm-init` is deliberately **not**
+installed: it declares `Alias=display-manager.service` and would race this
+session for vt1. That is why `packagegroup-boat-hmi` pulls
+`packagegroup-core-x11-xserver` rather than the broader
+`packagegroup-core-x11`, whose `-utils` half would drag it in.
+
+**Where to look when the screen stays black:**
+
+| What | Where |
+|------|-------|
+| Xorg's own log | `~boat/.local/share/xorg/Xorg.0.log` (a non-root Xorg redirects there by itself; `/var/log` isn't writable) |
+| `startx` + XFCE output | `/tmp/boat-xfce-session.log` |
+| Is the session even up? | `loginctl` — expect one session for `boat` on `seat0`, `tty1` |
+
+**Keyboard layout** is set by `/etc/X11/xorg.conf.d/10-boat-keyboard.conf`
+(`XkbLayout`, default `fi`), installed by this same recipe from
+`BOAT_HMI_XKB_LAYOUT`. It replaces the `keymap_layout` weston.ini setting the
+Weston session used, and like that one it's read when the X server starts, so
+changing it on a running device needs the session restarted. The display
+driver config itself is L4T's own `/etc/X11/xorg.conf`, shipped by
+meta-tegra's `tegra-configs-xorg` (pulled in by `xserver-xorg-video-nvidia`)
+— don't hand-write one.
+
+**Shut down / reboot from the panel menu will not work** as the `boat` user:
+`polkit` is not in `DISTRO_FEATURES`, so `systemd-logind` only grants
+power-off/reboot to root. Log Out works (that's `xfce4-session`'s own D-Bus
+call, no privilege involved). Run `poweroff` as root instead (`su -` in
+`xfce4-terminal`, or over SSH — `sudo` is not in this image), or add
+`polkit` to the `DISTRO_FEATURES:append` line in
+`scripts/02-configure-build.sh` — that also switches on `xfce4-session`'s own
+`polkit` PACKAGECONFIG.
+
+**Screen blanking** is X's default (blank after ~10 min, DPMS off after
+~20/30 min); `xfce4-power-manager` is not installed. For an always-on helm
+panel, add `-s 0 -dpms` to the server arguments in
+`boat-xfce-autostart.sh`, or run `xset s off -dpms` from the session.
 
 `BOAT_HMI_USER`/`BOAT_HMI_UID` in
 [`boat-hmi-autostart.bb`](../layers/meta-boat/recipes-boat/hmi-autostart/boat-hmi-autostart.bb)
 must keep matching whatever `extrausers` creates in `boat-image.bb` — they
 default to `boat`/`2000` in both places.
 
-## Container GUI apps on the HDMI screen (X11 via XWayland)
+### Why not Weston any more
 
-Not every containerized GUI app is Wayland-native or ships a KasmVNC-style
-web desktop like `linuxserver/firefox`. For plain X11 apps (e.g. OpenCPN),
-`boat-hmi-autostart` also launches **XWayland** so they can render straight
-onto the HDMI screen via Weston, instead of needing a browser on another
-device to view them.
+The previous design ran Weston directly from the same autologin session. It
+worked (confirmed on hardware) but was a bare compositor: no panel, no
+launcher, no file manager, no settings UI — and every X11-only application
+had to reach it through XWayland. Notes from that setup, kept because they
+explain shapes still visible in the code and in git history:
 
-**Packaging gotcha, confirmed on hardware:** weston's `xwayland` support is
-gated on `x11` + `wayland` both being in `DISTRO_FEATURES` (it is, see
-above) — but the built `xwayland.so` compositor module ships in a
-**separate package**, `weston-xwayland`, not bundled into plain `weston`.
-Installing just `weston` + enabling `xwayland=true` in `weston.ini` without
-also pulling in `weston-xwayland` makes weston **fatally** fail to load the
-module at startup ("cannot open shared object file") and crash-loop the
-whole console session (autologin → crash → getty restarts → autologin →
-crash..., visible as screen flicker between a login screen and black).
-`packagegroup-boat-hmi` includes `weston-xwayland` for exactly this reason —
-don't drop it.
+- `weston-init`'s `weston-start` wrapper was unusable here: it launches
+  weston through `su -c "..." $WESTON_USER`, which with `WESTON_USER` unset
+  defaults to **root** and separately refuses to run unless it's the
+  controlling tty's foreground process group ("su: must be run from a
+  terminal"). The autostart script called `weston` directly to sidestep it —
+  the current script calls `startx` directly for the analogous reason.
+- Weston needed `--use-pixman` on this Jetson: with the GL/GBM renderer the
+  pointer left trailing black boxes behind it. That was a compositor-side
+  cursor-plane damage-tracking problem, not something Xorg + NVIDIA's Tegra
+  driver goes through — but if you see cursor corruption on the XFCE desktop,
+  turning off xfwm4's compositor (Settings → Window Manager Tweaks →
+  Compositor) is the equivalent first thing to try.
+- XWayland shipped in a **separate** `weston-xwayland` package, and weston
+  crash-looped the whole console session without it. Nothing in the X11 setup
+  has that failure mode; `xserver-xorg-video-nvidia` is a hard `RDEPENDS` of
+  the packagegroup entry.
 
-Also note the **weston.ini directive changed** between weston versions:
-this project's weston 10.0.2 wants `xwayland=true` in `[core]`, not the
-older `modules=xwayland.so` form (weston prints a deprecation warning and
-still tries to load it the old way, but the packaging gotcha above applies
-either way).
+## Container GUI apps on the HDMI screen (X11)
 
-Once XWayland is up, `boat-weston-autostart.sh` polls for its socket
-(`/tmp/.X11-unix/X0`) and runs `xhost +local:` (no auth, local-machine-only)
-so containers can connect. Compose your container with:
+Not every containerized GUI app ships a KasmVNC-style web desktop like
+`linuxserver/firefox`. Plain X11 apps (OpenCPN, Chromium, …) render straight
+onto the HDMI screen instead, as ordinary clients of the same X server the
+XFCE desktop is running on — no XWayland bridge in the path any more, and no
+`.Xauthority` juggling: `boat-xfce-session` runs `xhost +local:` as the
+session starts, which grants same-machine clients access without a cookie
+(and grants nothing to the network — `startx` also passes `-nolisten tcp` by
+default).
+
+Compose your container with:
 
 ```yaml
 services:
@@ -394,23 +460,24 @@ services:
 
 See
 [`x11-app.yml.example`](../layers/meta-boat/recipes-boat/compose/files/x11-app.yml.example)
-for the shipped copy of this template. No `.Xauthority` mount needed — the
-`xhost +local:` grant handles that instead of the cookie-based auth some
-X11-in-docker examples use.
+for the shipped copy of this template.
 
-**Concrete example, CONFIRMED ON HARDWARE:**
+**Concrete example:**
 [`signalk-kiosk.yml.example`](../layers/meta-boat/recipes-boat/compose/files/signalk-kiosk.yml.example)
 combines Signal K with a normal-mode (not `--kiosk`) Chromium container
 (`zenika/alpine-chrome`) pointed at `http://localhost:3000`, so Signal K's
 web admin UI shows up directly on the boat's own HDMI screen, full browser
-chrome (tabs, address bar) included, instead of needing a browser on
-another device. Confirmed end-to-end on this Jetson: XWayland rendering,
-`shm_size` (default 64MB was a black-screen cause), and an automatic-
-maximize workaround (see the service's own comments for why
-`--start-maximized`/`--start-fullscreen` don't work under Weston's
-minimal `desktop-shell` here, and why the fix is a synthetic mouse click
-at a hardcoded, screen-resolution-specific coordinate instead). The
-`signalk-server` service in that file is adapted from a known-working
+chrome (tabs, address bar) included, instead of needing a browser on another
+device. Two fixes in that file were confirmed on hardware under the Weston
+session and are unaffected by the switch: `shm_size` (Docker's default 64MB
+was a black-screen cause) and overriding the image's `--headless`
+`ENTRYPOINT`. A third one is now **gone**: under Weston's minimal
+`desktop-shell`, `--start-maximized` was ignored and the file resorted to a
+synthetic mouse click at a hardcoded screen coordinate to maximize the
+window. `xfwm4` is a full EWMH window manager, so `--start-maximized` (and
+`wmctrl`/`xdotool` window-state requests from other processes) should simply
+work — this is the one part of that example not yet re-confirmed on hardware.
+The `signalk-server` service in that file is adapted from a known-working
 external stack, not this project's own `signalk.yml.example` — see the
 comments at the top of the file for what changed and why.
 
@@ -495,10 +562,20 @@ unresolved:
 4. **Image size / partition growth** — Docker `data-root` on NVMe, and the
    `/data` partition itself doesn't exist yet.
 
+5. **Unprivileged Xorg on the Tegra X driver** — new with the XFCE switch and
+   not yet booted. `boat-hmi-autostart` starts Xorg as the `boat` user,
+   relying on `systemd-logind` for DRM master and input devices; L4T's own
+   Ubuntu images run X as root under a display manager instead. The
+   NVIDIA `nvidia_drv.so` also wants `/dev/nvhost-*` and `/dev/nvmap`, which
+   meta-tegra's udev rules give to group `video` (`boat` is a member). If the
+   first boot comes up black, `~boat/.local/share/xorg/Xorg.0.log` says which
+   of those two it was; running the same `startx` line as root from tty1 is
+   the quick way to confirm it's a privilege problem rather than a driver one.
+
 (The Firefox-in-container Wayland-socket-handshake risk from an earlier draft
-of this doc is gone — the actual deployed approach, `linuxserver/firefox`,
-doesn't touch the host's Wayland socket at all. See "Deploying an app:
-Firefox as the helm UI" above.)
+of this doc is gone — the deployed approach, `linuxserver/firefox`, doesn't
+touch the host's display at all. See "Deploying an app: Firefox as the helm
+UI" above.)
 
 ## What's built vs deferred
 
@@ -509,19 +586,18 @@ Firefox as the helm UI" above.)
 - ✅ `boat-docker-config` (`daemon.json`: nvidia default-runtime, data-root
   on `/data` — the `/data` mount itself is not provisioned). **Confirmed on
   hardware:** `dockerd` starts and `docker ps` responds.
-- ✅ `boat-hmi-autostart` (fixed `boat`/UID 2000 autologin + Weston on
-  tty1, direct `weston` exec - not `weston-start`, see "HMI / Weston
-  autostart" for why). No touchscreen-specific calibration wired up.
-  **Confirmed on hardware:** boots straight to a working Wayland
-  session/terminal, no login prompt.
-- ✅ XWayland for X11-only containerized GUI apps (`weston-xwayland`
-  package, `xwayland=true` in `weston.ini`, `xhost +local:` grant). See
-  "Container GUI apps on the HDMI screen". Recipes fixed and confirmed
-  buildable; not yet flashed/booted with this specific fix.
+- ✅ `boat-hmi-autostart` (fixed `boat`/UID 2000 autologin on tty1, then
+  `startx` → `xfce4-session`, see "HMI / XFCE autostart"). No
+  touchscreen-specific calibration wired up. **Confirmed on hardware:** the
+  autologin-and-launch-a-session-from-tty1 mechanism, in its Weston form.
+  ❓ The XFCE/Xorg form of it is written but not yet flashed and booted.
+- ✅ X11 for containerized GUI apps — now the desktop's own X server rather
+  than XWayland, with the same `xhost +local:` grant. See "Container GUI
+  apps on the HDMI screen (X11)".
 - ✅ `boat-compose` (example compose files including `x11-app.yml.example` +
   `boat-compose.service`). **Confirmed on hardware:** `linuxserver/firefox`
-  (KasmVNC-based, not the fragile Wayland-socket-sharing approach an
-  earlier draft sketched - see "Deploying an app: Firefox as the helm UI")
+  (KasmVNC-based, so it never touches the host display - see "Deploying an
+  app: Firefox as the helm UI")
   pulled and ran successfully via `docker-compose up -d`.
 - ✅ `boat-docker-compose-plugin` (vendored static `docker compose` v2
   binary) — the only compose client meta-virtualization packages on this
@@ -536,7 +612,7 @@ Firefox as the helm UI" above.)
   NetworkManager. `ssh-server-openssh` also confirmed reachable.
 - ❓ `nvidia-container-toolkit` GPU access in containers — not yet tested;
   still the biggest open risk (see above).
-- ❌ `fake-hwclock`, `wvkbd`, `fail2ban`, `wavemon`, `bind-utils` — not
+- ❌ `fake-hwclock`, `fail2ban`, `wavemon`, `bind-utils` — not
   packaged in this project's fetched kirkstone-era layers.
 - ❌ RAUC A/B updates, the `/data` partition itself, and the interactive
   build-time user/SSH-key provisioning flow — later hardening, not started.

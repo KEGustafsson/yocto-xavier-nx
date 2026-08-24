@@ -1,15 +1,15 @@
 # Example - copy to /data/compose/ and adjust before use.
-# CONFIRMED ON HARDWARE, end-to-end: signalk-kiosk (Chromium via XWayland,
-# in normal windowed mode - tabs/address bar, not --kiosk) renders Signal
-# K's page maximized on the boat's HDMI screen, fully automatically on
-# every container (re)start. Getting here needed several hardware-specific
-# fixes, all documented inline below and worth reading if you're adapting
-# this to different hardware:
+# signalk-kiosk (Chromium in normal windowed mode - tabs/address bar, not
+# --kiosk) renders Signal K's page on the boat's HDMI screen, in the same X
+# session as the XFCE desktop, automatically on every container (re)start.
+# Two hardware-specific fixes are documented inline below and worth reading
+# if you are adapting this to different hardware:
 #   - shm_size (default 64MB caused a black-but-alive window)
 #   - overriding the image's own ENTRYPOINT (it defaults to --headless)
-#   - a synthetic-click workaround for maximizing (Weston's desktop-shell
-#     doesn't honor --start-maximized/--start-fullscreen or any window-
-#     state request from a process other than the window's own client)
+# Both were confirmed on hardware under the earlier Weston session and are
+# unaffected by the move to XFCE/Xorg; the third fix that session needed - a
+# synthetic-click workaround for maximizing - is gone, see the note on
+# --start-maximized further down.
 #
 # Use `docker compose` (v2, space-separated), NOT `docker-compose` (v1) -
 # see the ExecStart note in boat-compose.service / docs/06-troubleshooting.md;
@@ -19,7 +19,7 @@
 # This combines Signal K's own web admin UI with a Chromium container so
 # it shows directly on the boat's own HDMI screen, instead of needing a
 # browser on another device (see docs/05-phase2-boat-computer-layer.md
-# "Container GUI apps on the HDMI screen (X11 via XWayland)").
+# "Container GUI apps on the HDMI screen (X11)").
 #
 # zenika/alpine-chrome is a small, multi-arch (incl. linux/arm64) image with
 # a real (non-headless-only) Chromium build.
@@ -122,13 +122,10 @@ services:
     # baked-in ENTRYPOINT is "chromium-browser --headless" - a plain
     # `command:` only appends args after that, so leaving entrypoint alone
     # launches `chromium-browser --headless --kiosk ...`, which loads the
-    # page then exits immediately. Below, entrypoint is overridden with a
-    # full shell script instead (see command: below) for the maximize
-    # workaround - that also removes the --headless problem as a side
-    # effect, since the script's own `exec chromium-browser ...` line has
-    # no --headless in it.
+    # page then exits immediately. Overriding the entrypoint with a shell
+    # (which the readiness wait below needs anyway) drops the --headless as
+    # a side effect, since the script's own chromium-browser line has none.
     entrypoint: ["/bin/sh", "-c"]
-    user: "0"                # root - needed for the `apk add xdotool` below
     network_mode: host      # so "localhost:3000" inside the container reaches
                              # signalk-server above (host networking - actual
                              # container_name doesn't matter for reachability)
@@ -136,9 +133,6 @@ services:
       - DISPLAY=:0
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
-      - boat-chromium-apk-cache:/etc/apk/cache   # persist across recreates so
-                                                  # xdotool installs instantly
-                                                  # after the first time
     depends_on:
       - signalk-server
     # CONFIRMED ON HARDWARE: Docker's default /dev/shm (64MB) was exactly
@@ -152,25 +146,22 @@ services:
     # first tab. No lockdown at all; use --app or --kiosk instead (see git
     # history of this file) if you want to trade tabs/chrome back out.
     #
-    # CONFIRMED ON HARDWARE: --start-maximized/--start-fullscreen do NOT
-    # take effect here - Weston's minimal desktop-shell only honors
-    # maximize/move/resize requests that come from the window's own client
-    # at the moment they're made, not a startup flag processed before the
-    # window is fully mapped, and NOT a *different* process (e.g. xdotool)
-    # asking on the window's behalf after the fact either - manipulating
-    # _NET_WM_STATE or the window's geometry externally was silently
-    # ignored/reverted in testing. What DOES work: a synthetic mouse click
-    # on Chromium's own maximize button, sent from the same X connection,
-    # after the window has actually mapped - which is what this script
-    # does. The coordinates (1909,77) are specific to this window's
-    # CONFIRMED-consistent initial geometry (1920x1200 display, window
-    # opens at 38,91/1919x1199 every time) - they will be wrong on a
-    # different screen resolution or if Chromium's title bar layout
-    # changes; find new ones the same way this pair was found (position
-    # the pointer over the button by hand, `xdotool getmouselocation`).
+    # NOT RE-CONFIRMED ON HARDWARE SINCE THE WESTON -> XFCE SWITCH: the
+    # window should now come up maximized from --start-maximized alone.
+    # Under the old Weston session it did not - weston's minimal
+    # desktop-shell only honored maximize requests a client made for itself
+    # after mapping, so this file used to `apk add xdotool`, run as root to
+    # allow that, cache the apk in a named volume, poll for the window title
+    # and then send a synthetic mouse click on Chromium's own maximize
+    # button at coordinates hardcoded for a 1920x1200 screen. xfwm4 is a
+    # full EWMH window manager and honors both the startup flag and
+    # _NET_WM_STATE requests from other clients, so all of that is gone.
+    # If the window does come up unmaximized, reach for `wmctrl -r "Signal
+    # K" -b add,maximized_vert,maximized_horz` (or xdotool's
+    # windowstate --add MAXIMIZED_*) rather than the old coordinate click;
+    # git history has the removed version if you need it.
     command:
       - |
-        apk add --no-cache xdotool >/dev/null 2>&1
         # Wait for signalk-server to actually answer before loading the
         # page. CONFIRMED ON HARDWARE: `depends_on` only orders container
         # *start*, not readiness - Signal K's Node process takes a few
@@ -188,8 +179,10 @@ services:
         # Fast-start flags (same family Puppeteer/headless tooling uses to
         # cut Chromium's own boot time) - background-networking/sync/
         # translate/default-apps are all irrelevant for a fixed single-page
-        # kiosk anyway.
-        chromium-browser \
+        # kiosk anyway. --window-size/--window-position are kept as the
+        # fallback geometry for the case where --start-maximized is ignored;
+        # adjust them to your panel's resolution.
+        exec chromium-browser \
           --no-sandbox \
           --disable-gpu \
           --no-first-run \
@@ -200,32 +193,8 @@ services:
           --disable-translate \
           --disable-default-apps \
           --metrics-recording-only \
+          --start-maximized \
           --window-size=1920,1200 \
           --window-position=0,0 \
-          http://localhost:3000 &
-        CHROME_PID=$$!
-        # Poll for the window actually existing instead of a fixed sleep -
-        # CONFIRMED ON HARDWARE the fixed 3s was a worst-case guess; this
-        # clicks as soon as the window maps instead of always waiting the
-        # full 3s. 10s cap in case something's gone wrong with the launch.
-        #
-        # CONFIRMED ON HARDWARE: searching --name "Chromium" is too broad -
-        # Chromium creates several internal helper windows that also match
-        # ("Chromium clipboard", plus a couple of bare "chromium" utility
-        # windows) *before* the real top-level browser window is mapped, so
-        # the poll succeeded on one of those and clicked too early, missing
-        # the actual maximize button entirely. Match the page title instead
-        # ("Signal K Server - Chromium") - specific to this window, and
-        # also guarantees the page itself has actually loaded by the time
-        # we click, not just that some Chromium window exists.
-        i=0
-        until DISPLAY=:0 xdotool search --name "Signal K" >/dev/null 2>&1 || [ "$$i" -ge 50 ]; do
-            sleep 0.2
-            i=$$((i + 1))
-        done
-        DISPLAY=:0 xdotool mousemove 1909 77 click 1
-        wait $$CHROME_PID
+          http://localhost:3000
     restart: unless-stopped
-
-volumes:
-  boat-chromium-apk-cache: {}

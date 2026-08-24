@@ -35,6 +35,12 @@ repos:
       meta-python:
       meta-networking:
       meta-filesystems:
+      # meta-xfce is the Phase-2 helm desktop; meta-multimedia and meta-gnome
+      # are its declared LAYERDEPENDS, not something this project uses
+      # directly.
+      meta-multimedia:
+      meta-gnome:
+      meta-xfce:
 
   meta-tegra:
     url: https://github.com/OE4T/meta-tegra.git
@@ -52,6 +58,11 @@ local_conf_header:
   nvme-boot: |
     LICENSE_FLAGS_ACCEPTED += "commercial"
     INIT_MANAGER = "systemd"
+    # boat-image needs these; see the long explanation in
+    # scripts/02-configure-build.sh. "virtualization" gates Docker and
+    # nvidia-container-toolkit, "x11"/"opengl" the Xorg + XFCE helm desktop,
+    # "pam" the logind session that unprivileged Xorg needs.
+    DISTRO_FEATURES:append = " virtualization opengl pam x11"
     # Boot the rootfs from the first NVMe SSD:
     TNSPEC_BOOTDEV = "nvme0n1p1"
     ROOTFSPART_SIZE = "68719476736"

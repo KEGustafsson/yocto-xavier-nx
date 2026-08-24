@@ -1,10 +1,12 @@
 # Example - copy to /data/compose/ and adjust before use.
 # Confirmed working on real arm64 hardware (see docs/05-phase2-boat-computer-layer.md
 # "Example: Firefox as the helm UI") - linuxserver/firefox has official arm64v8
-# builds and doesn't need the fragile native-Wayland-socket-sharing approach
-# (UID matching, XDG_RUNTIME_DIR permissions, waiting for Weston's socket).
-# It runs its own browser-accessible desktop (KasmVNC) instead - view it from
-# ANY device's browser on the network, not just the boat's own HDMI screen.
+# builds and doesn't touch the host's display at all: it runs its own
+# browser-accessible desktop (KasmVNC), so you view it from ANY device's
+# browser on the network, not just the boat's own HDMI screen.
+#
+# Use x11-app.yml.example instead if you want a GUI app rendering directly on
+# the Jetson's HDMI screen alongside the XFCE desktop.
 services:
   firefox:
     image: lscr.io/linuxserver/firefox:latest

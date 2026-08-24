@@ -9,7 +9,7 @@ Two phases:
 1. **Phase 1** — a minimal image booting from NVMe. Prove the toolchain, flash
    and boot path first.
 2. **Phase 2** — add the [`meta-boat`](layers/meta-boat) layer: a Jetson
-   **container host** (Docker + Weston + Jetson tooling); Signal K, GNSS/CAN
+   **container host** (Docker + an XFCE desktop + Jetson tooling); Signal K, GNSS/CAN
    bridging, DeepStream and a browser HMI run as containers you compose
    yourself, not baked-in packages.
 
@@ -66,7 +66,7 @@ that writes both. Full explanation in
 scripts/     deps → fetch → configure → build → unpack → flash  (all read scripts/env.sh)
 config/      reference local.conf / bblayers.conf
 layers/
-  meta-boat/ the Phase-2 container-host layer (image, packagegroup, Docker/Weston config)
+  meta-boat/ the Phase-2 container-host layer (image, packagegroup, Docker/XFCE config)
 kas/         optional kas-based reproducible build
 docs/        the full guide (start at 01)
 ```
@@ -108,12 +108,16 @@ All knobs are in [`scripts/env.sh`](scripts/env.sh) and override from the shell:
   booting on real Xavier NX hardware with rootfs on `/dev/nvme0n1p1`. Phase 2
   (`boat-image`/`meta-boat`) is now the **Jetson container-host** design in
   [`docs/05-phase2-boat-computer-layer.md`](docs/05-phase2-boat-computer-layer.md)
-  (Docker + Weston + Jetson tooling on the host; Signal K/DeepStream/Firefox
-  run as containers) rather than the earlier "bake everything into the
-  rootfs" scaffold. It has been built successfully (0 errors) but not yet
-  flashed or booted on hardware, so treat it as unverified until that
-  happens. `scripts/01-fetch-layers.sh` now also fetches
-  `meta-virtualization` and `meta-tegra-community` for it.
+  (Docker + an XFCE desktop + Jetson tooling on the host;
+  Signal K/DeepStream/Firefox run as containers) rather than the earlier
+  "bake everything into the rootfs" scaffold. An earlier revision of it —
+  with a bare Weston session instead of XFCE — was built, flashed and booted
+  successfully; the XFCE desktop that replaced it has **not** been booted on
+  hardware yet, so treat the display side as unverified until that happens.
+  `scripts/01-fetch-layers.sh` fetches `meta-virtualization` and
+  `meta-tegra-community` for Phase 2, and `scripts/02-configure-build.sh`
+  additionally enables the `meta-xfce`, `meta-gnome` and `meta-multimedia`
+  sublayers of the `meta-openembedded` clone for the desktop.
 - Pin layer commits (`scripts/01-fetch-layers.sh` prints them) before treating
   a build as a product; `kirkstone` branches move.
 - Package names in `packagegroup-boat` target kirkstone; if one is missing on
