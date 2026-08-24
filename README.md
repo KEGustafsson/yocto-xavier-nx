@@ -64,7 +64,8 @@ that writes both. Full explanation in
 
 ```
 scripts/     deps → fetch → configure → build → unpack → flash  (all read scripts/env.sh)
-             plus lint.sh - fast local checks, also what CI runs
+             plus lint.sh - fast local checks, also what CI runs, and
+             wake-boat.sh - send a Wake-on-LAN magic packet to the boat
 config/      reference local.conf / bblayers.conf
 layers/
   meta-boat/ the Phase-2 container-host layer (image, packagegroup, Docker/XFCE config)
@@ -132,6 +133,13 @@ before you trust a change.
   `meta-tegra-community` for Phase 2, and `scripts/02-configure-build.sh`
   additionally enables the `meta-xfce`, `meta-gnome` and `meta-multimedia`
   sublayers of the `meta-openembedded` clone for the desktop.
+- Remote power control (`boat-power`: Wake-on-LAN + `boat-sleep` for SC7 deep
+  sleep, see [Phase 2](docs/05-phase2-boat-computer-layer.md#power-wake-on-lan-and-remote-sc7-suspend))
+  is written but **not yet booted on hardware** — whether this board's
+  Ethernet driver/PHY can wake from SC7 at all is a hardware question
+  `boat-sleep --status` answers on the bench in a second. `boat-sleep`
+  refuses to suspend when nothing can wake the board again, so an
+  unsupported board fails safe rather than needing a visit.
 - Pin layer commits (`scripts/01-fetch-layers.sh` prints them) before treating
   a build as a product; `kirkstone` branches move.
 - Package names in `packagegroup-boat` target kirkstone; if one is missing on

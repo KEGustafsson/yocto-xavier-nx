@@ -62,6 +62,24 @@ debugging on the console - the console *is* the thing that's broken.
 | Container GUI app: `cannot open display :0` / `Authorization required` | The container needs `DISPLAY=:0`, `/tmp/.X11-unix` bind-mounted, **and** the session cookie: `XAUTHORITY=/run/boat-x11/Xauthority` with `/run/boat-x11:/run/boat-x11:ro` mounted (see docs/05 "Container GUI apps on the HDMI screen (X11)"). Check the export exists and is current: `ls -l /run/boat-x11/Xauthority`, then `XAUTHORITY=/run/boat-x11/Xauthority DISPLAY=:0 xdpyinfo \| head -3` from the desktop session. If it is missing, `/tmp/boat-xfce-session.log` says why. Mount the **directory**, not the file - the session rewrites the file on every restart, and a file mount would leave the container on the old inode. |
 | Screen flickers between console and black, repeatedly | The session is crash-looping: `xfce4-session` (or Xorg) exits, the login shell ends, agetty autologins again. `/tmp/boat-xfce-session.log` names the failure; a missing package from `packagegroup-xfce-base` is the usual cause. |
 
+## Sleep / Wake-on-LAN (Phase 2)
+
+`boat-sleep --status` first, always - it reports the sleep state the kernel
+offers and whether an interface is armed, without changing anything. See
+[`05-phase2-boat-computer-layer.md`](05-phase2-boat-computer-layer.md)
+"Power: Wake-on-LAN and remote SC7 suspend".
+
+| Symptom | Fix |
+|---------|-----|
+| `boat-sleep` refuses: *no interface is armed for magic-packet wake* | Working as designed - it won't strand the board. `boat-wol-arm` prints the reason per interface: no such interface (wrong `BOAT_WOL_INTERFACES` in `/etc/default/boat-power`), driver reports no `g` in `Supports Wake-on`, or the flag didn't stick. `--force` suspends anyway, with no way back but a power cycle. |
+| `boat-sleep` refuses: *no 'deep' state offered* | `cat /sys/power/mem_sleep` shows only `s2idle`, so this kernel/BSP isn't giving you SC7. Check `CONFIG_SUSPEND`/`CONFIG_PM_SLEEP` really landed (`zcat /proc/config.gz \| grep -E 'CONFIG_(SUSPEND\|PM_SLEEP)='`) and that `boat-power.cfg` is in the kernel recipe's `SRC_URI`. |
+| `systemctl status boat-wol` is red at every boot | The interface can't be armed at all - same `boat-wol-arm` messages, in `journalctl -u boat-wol`. On a driver with no magic-packet support, no amount of config fixes it; the wake path has to be something else (a physical button, or a relay on the power feed). |
+| Board suspends, magic packet does nothing | Nothing acknowledges a magic packet, so work backwards. (1) Was it armed *before* the sleep? `journalctl -b -1 -u boat-wol` and the system-sleep hook's `pre` line. (2) Same layer-2 segment? `255.255.255.255` is never routed - from another subnet you need a directed broadcast *and* a router that forwards it; from ashore, use the WireGuard tunnel. (3) `tcpdump -i eth0 -n 'udp port 9'` from a third machine on the segment shows whether the packet is even on the wire. |
+| Board wakes by itself, or reboots a minute into every sleep | If it *reboots*, suspect the hardware watchdog still counting across SC7: set `BOAT_SLEEP_STOP_WATCHDOG=1` in `/etc/default/boat-power`. If it *wakes*, another device is a wake source - `grep enabled /sys/devices/*/power/wakeup` and disable the ones you don't want, or find the culprit in `journalctl -b` right after the resume. |
+| Resumes, but nothing on the network can reach it | The link came back without its address, or WoL wasn't re-armed. `journalctl -b \| grep boat-power` covers the hook's `post` run; `nmcli device status` covers the link. Containers keep running through a suspend but any connection they held (MQTT, a registry pull) drops and has to reconnect. |
+| `boat-sleep` exits non-zero with a logind message about inhibitors | Something holds an inhibitor lock (`systemd-inhibit --list` names it - the XFCE session is the usual one). `boat-sleep --force` goes past them. |
+| `boat-sleep`: *must run as root* | It writes `/sys`. There is no `sudo` in this image - `ssh root@<boat> boat-sleep`. |
+
 ## CAN / NMEA 2000 (Phase 2)
 
 | Symptom | Fix |

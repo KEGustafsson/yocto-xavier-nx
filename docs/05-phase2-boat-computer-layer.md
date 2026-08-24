@@ -103,7 +103,8 @@ the **network** rather than a local GPS.
 ## What you get
 
 `boat-image` = `core-image-base` + `packagegroup-boat` + the local
-`boat-docker-config`/`boat-hmi-autostart`/`boat-compose` recipes. Grouped so
+`boat-docker-config`/`boat-hmi-autostart`/`boat-compose`/`boat-power`
+recipes. Grouped so
 you can trim it — package names below were cross-checked against this
 project's actual fetched layers (kirkstone), not guessed:
 
@@ -170,6 +171,12 @@ pattern as meta-tegra's own `systemd.cfg`/`spiflash.cfg`) adding:
   (`/dev/i2c-*`), `SPI_SPIDEV` (`/dev/spidev*`), USB-serial (`ftdi_sio`,
   `cp210x`, `ch341`, `pl2303`, `cdc_acm`) for any container that talks to
   on-board sensors.
+- **Suspend-to-RAM** (`boat-power.cfg`): `CONFIG_SUSPEND`/`PM_SLEEP` — what
+  puts `mem` in `/sys/power/state` — plus `PM_DEBUG`/`PM_SLEEP_DEBUG` for
+  per-device suspend/resume timing when a board won't sleep or won't come
+  back. See [Power](#power-wake-on-lan-and-remote-sc7-suspend). Nothing is
+  needed for the Ethernet side of Wake-on-LAN: the NIC driver is already in
+  the BSP defconfig and carries its own magic-packet support.
 - The **GPU driver is already in the meta-tegra kernel** — no fragment
   needed for CUDA/DeepStream at the kernel level.
 
@@ -582,6 +589,145 @@ Ethernet, and cellular, with priority/failover. `wireguard-tools` is
 packaged for a VPN home; `avahi` for `*.local` discovery (shared into
 containers via the D-Bus mount above); `nftables` as the firewall.
 
+## Power: Wake-on-LAN and remote SC7 suspend
+
+A boat computer spends most of its life on the ship's battery with nobody at
+the helm. **SC7** is Tegra's deep-sleep state — the platform state Linux
+reaches through ordinary suspend-to-RAM (`mem` in `/sys/power/state` with
+`deep` selected in `/sys/power/mem_sleep`): DRAM in self-refresh, CPU
+clusters and the GPU off, wake handled by the always-on domain. RAM keeps
+its contents, so resume is seconds rather than a full boot, and every
+container comes back where it was instead of being pulled and restarted.
+
+The pair that makes that usable remotely is *sleep on command* and *wake
+over the network*, and the second one is the half that must never be
+assumed: a board asleep with no wake path is a board someone has to visit.
+
+[`boat-power`](../layers/meta-boat/recipes-boat/power/boat-power.bb) ships
+both:
+
+| What | Where |
+|---|---|
+| `boat-sleep` | `/usr/bin` — validate, then suspend to SC7. Meant to be run over SSH |
+| `boat-wol-arm` | `/usr/bin` — arm magic-packet wake on the configured interface(s) and report what the driver actually accepted |
+| `boat-wol.service` | arms it at boot (`multi-user.target`) |
+| system-sleep hook | `${systemd_unitdir}/system-sleep/boat-power` — re-arms around *every* suspend, whatever triggered it |
+| `90-boat-wol.conf` | `/etc/NetworkManager/conf.d/` — NM's own `ethernet.wake-on-lan=magic` default |
+| `/etc/default/boat-power` | the knobs (interfaces, the interlock, delay, watchdog) |
+
+Plus a `boat-power.cfg` kernel fragment (`CONFIG_SUSPEND`/`PM_SLEEP` and the
+PM debug knobs) alongside the Docker one, and
+[`../scripts/wake-boat.sh`](../scripts/wake-boat.sh) on the *build host* as
+the sender.
+
+### Putting it to sleep
+
+```bash
+ssh root@boat boat-sleep --status   # is SC7 reachable, is WoL armed, what MAC
+ssh root@boat boat-sleep            # suspend to SC7
+```
+
+`boat-sleep` refuses to suspend unless at least one interface reports
+magic-packet wake armed. That interlock is the point of the command
+existing at all — otherwise `systemctl suspend` over SSH is one keystroke
+away from a board that only a physical power cycle brings back.
+`--force` overrides it (and also selects a non-`deep` sleep state if that is
+all the kernel offers, and pushes past inhibitor locks);
+`BOAT_SLEEP_REQUIRE_WOL=0` in `/etc/default/boat-power` turns it off for
+good, which you want only on a board you can reach.
+
+Running it over SSH is safe: `systemctl suspend` hands the request to logind
+and returns, so the output and exit status reach you before the network goes
+away. The connection then drops when the board actually suspends — an
+expected disconnect, not a failure. It must run as **root** (arming WoL and
+selecting the sleep state are both `/sys` writes); there is no `sudo` on this
+image.
+
+### Waking it up
+
+```bash
+./scripts/wake-boat.sh 48:b0:2d:11:22:33          # from the build host
+BOAT_MAC=48:b0:2d:11:22:33 ./scripts/wake-boat.sh # or from the environment
+wakeonlan 48:b0:2d:11:22:33                       # any WoL tool does
+```
+
+A magic packet is one unacknowledged UDP datagram (port 9) carrying
+`ff:ff:ff:ff:ff:ff` followed by the target MAC sixteen times — nothing
+answers it, so "it did nothing" and "it never arrived" look identical from
+the sender. Two things decide whether it arrives:
+
+- **Same layer-2 segment.** `255.255.255.255` is never routed. From another
+  subnet you need that subnet's directed broadcast (`192.168.1.255`) *and* a
+  router willing to forward directed broadcasts — most aren't. From ashore,
+  wake through a **VPN endpoint on the boat's LAN** (`wireguard-tools` is on
+  the image for this) rather than by forwarding UDP 9 from the internet: a
+  port-forward to a broadcast address is both unreliable and an open wake
+  button for anyone who finds it.
+- **The switch still knows the port.** A board asleep for hours may have
+  aged out of the switch's MAC table, turning the "directed" broadcast into
+  a flood — which is fine — but a managed switch with port security may
+  drop it instead. `wake-boat.sh` sends three packets for the same reason.
+
+### Keeping the flag armed
+
+Wake-on-LAN is a per-interface flag that is easy to lose, so it is set in
+three places rather than one:
+
+1. **`boat-wol.service`** at boot, via `ethtool -s eth0 wol g`, plus
+   `/sys/class/net/eth0/device/power/wakeup` so the bus glue is allowed to
+   wake the system too.
+2. **NetworkManager's own default** (`90-boat-wol.conf`). NM re-applies the
+   connection profile's WoL setting on every activation — a cable replug, a
+   profile edit, a resume — so without this it would quietly clear what
+   `ethtool` set at boot. Both are set to magic-packet, so they agree
+   instead of fighting.
+3. **The system-sleep hook**, on both sides of every suspend: immediately
+   before (last chance) and immediately after (drivers that re-probe the MAC
+   on resume come back with `wol=d`).
+
+`boat-wol-arm` reads the flag *back* after setting it rather than trusting
+`ethtool`'s exit status, and exits non-zero when nothing could be armed —
+which is what makes `systemctl status boat-wol` red on hardware that cannot
+do magic-packet wake at all. That red is the useful signal; check it before
+trusting the first remote `boat-sleep`.
+
+### `/etc/default/boat-power`
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BOAT_WOL_INTERFACES` | `eth0` | interfaces to arm (space separated). Build-time default comes from `BOAT_WOL_INTERFACES` in the recipe, which also feeds the NM `match-device` line |
+| `BOAT_SLEEP_REQUIRE_WOL` | `1` | refuse to suspend with no wake path |
+| `BOAT_SLEEP_DELAY` | `3` | seconds before logind is asked, so an SSH session closes cleanly |
+| `BOAT_SLEEP_STOP_WATCHDOG` | `0` | stop/start `watchdog.service` around the sleep |
+
+### Not verified on hardware yet
+
+This is written, not yet booted — treat every line below as a thing to
+confirm on the bench before relying on it at sea:
+
+- **Does the devkit's Ethernet actually support magic-packet wake?** The
+  answer is entirely in the driver + PHY + carrier board, not in this layer:
+  the MAC must keep the `g` flag, the PHY must stay powered through SC7, and
+  the wake signal must be wired to the always-on domain. `ethtool -i eth0`
+  names the driver and `boat-wol-arm` reports what it offers — start there
+  and believe the board, not this document.
+- **Does SC7 come up at all?** `boat-sleep --status` should report a `deep`
+  state. If `/sys/power/mem_sleep` offers only `s2idle`, the BSP is not
+  giving you SC7 and suspend would be a shallow idle loop instead — worth
+  knowing *before* the boat is unattended.
+- **The hardware watchdog.** `watchdog` (in `-reliability`) feeds the Tegra
+  watchdog; whether that timer keeps counting across SC7 and resets the
+  board mid-sleep is untested. A board that reboots itself a minute into
+  every sleep is that symptom — set `BOAT_SLEEP_STOP_WATCHDOG=1`.
+- **Docker across suspend/resume.** Containers keep running through a
+  suspend, but anything holding a network connection (an MQTT bridge, a
+  registry pull) sees it drop and has to reconnect on resume.
+
+Deliberately not implemented: **no RTC wake alarm** (`rtcwake` needs a
+working RTC and the devkit has none — see [Time](#time-without-a-gps-or-rtc)),
+and **no scheduled sleep**. Both belong on a board that has an RTC fitted;
+until then the wake path is the network, and only the network.
+
 ## Updates (not implemented — future direction)
 
 Two tiers:
@@ -637,6 +783,17 @@ unresolved:
    of those two it was; running the same `startx` line as root from tty1 is
    the quick way to confirm it's a privilege problem rather than a driver one.
 
+6. **SC7 deep sleep and Wake-on-LAN.** Whether this board suspends to
+   `deep` at all, whether its Ethernet driver/PHY supports magic-packet wake
+   through that state, and whether the hardware watchdog keeps counting
+   across it. `boat-sleep --status` answers the first two on the bench in a
+   second; the third shows up as a board that reboots itself a minute into
+   every sleep. See
+   [Power](#power-wake-on-lan-and-remote-sc7-suspend) — the interlock in
+   `boat-sleep` means a failure here refuses to sleep rather than stranding
+   the board, but a remote-sleep workflow you can't use is still a
+   workflow you don't have.
+
 (The Firefox-in-container Wayland-socket-handshake risk from an earlier draft
 of this doc is gone — the deployed approach, `linuxserver/firefox`, doesn't
 touch the host's display at all. See "Deploying an app: Firefox as the helm
@@ -671,6 +828,12 @@ UI" above.)
   `docker-compose`); this adds the v2 `docker compose` space-separated form
   too. **Confirmed on hardware** (as a manual `~/.docker/cli-plugins`
   install first, then baked into the recipe).
+- ✅ `boat-power` (Wake-on-LAN armed at boot, on both sides of every
+  suspend and by NetworkManager itself; `boat-sleep` for remote SC7 suspend
+  with a refuse-to-sleep-without-a-wake-path interlock; `scripts/wake-boat.sh`
+  as the host-side sender). ❓ Written, **not booted** — the driver/PHY
+  question and the watchdog-across-SC7 question both need hardware, see
+  "Power".
 - ✅ `bash` installed and set as the default login shell for both `root`
   and `boat` (`packagegroup-boat-tools` + `EXTRA_USERS_PARAMS` in
   `boat-image.bb`).

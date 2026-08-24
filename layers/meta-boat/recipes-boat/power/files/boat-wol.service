@@ -1,0 +1,19 @@
+[Unit]
+Description=Arm Wake-on-LAN (magic packet) so this board can be woken from SC7
+Documentation=file:///etc/default/boat-power
+# The interface only has to exist, not be configured, for ethtool to arm it -
+# but ordering after the network manager keeps this unit's message in the
+# journal next to the link coming up, where anyone debugging a board that
+# didn't wake will look. NetworkManager re-applies its own wake-on-lan
+# setting on every activation (see /etc/NetworkManager/conf.d/90-boat-wol.conf),
+# which is what keeps the flag set long after this unit has run.
+After=network.target NetworkManager.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/boat-wol-arm
+
+[Install]
+WantedBy=multi-user.target
