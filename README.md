@@ -64,6 +64,7 @@ that writes both. Full explanation in
 
 ```
 scripts/     deps → fetch → configure → build → unpack → flash  (all read scripts/env.sh)
+             plus lint.sh - fast local checks, also what CI runs
 config/      reference local.conf / bblayers.conf
 layers/
   meta-boat/ the Phase-2 container-host layer (image, packagegroup, Docker/XFCE config)
@@ -85,6 +86,19 @@ All knobs are in [`scripts/env.sh`](scripts/env.sh) and override from the shell:
 | `ROOTFS_SIZE_BYTES` | `68719476736` | APP partition size (64 GiB) |
 | `IMAGE` | `core-image-base` | build target; `boat-image` for Phase 2 |
 | `YOCTO_BRANCH` | `kirkstone` | layer branch |
+
+## Checks
+
+`./scripts/lint.sh` runs the fast repository checks — shellcheck, YAML
+syntax, relative links in the docs, and that every recipe's `file://`
+reference actually exists. Seconds, no layers fetched, no bitbake.
+`.github/workflows/lint.yml` runs exactly this script on every push, so CI
+and your machine can't drift apart.
+
+It is **not** a build gate, and deliberately so: it cannot catch recipe
+parse errors, unresolvable `RDEPENDS`, or packaging QA failures. That last
+class needs a real image build — `bitbake -n` passes clean on it. Build
+before you trust a change.
 
 ## Documentation
 
