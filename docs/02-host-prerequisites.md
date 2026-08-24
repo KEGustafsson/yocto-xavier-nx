@@ -17,11 +17,33 @@
     change (3.14) that bitbake itself hits on hosts this new.
   - A `meta-boat` patch works around a glibc/GCC-version mismatch in
     `pseudo-native`'s `openat2` wrapper.
+  - `scripts/02-configure-build.sh` bumps **uninative** to 5.2 (glibc 2.44).
+    kirkstone pins 4.7 (glibc 2.41); when the *host* glibc is newer than the
+    tarball's, bitbake disables uninative rather than relocate native binaries
+    onto an older loader than they were linked against, and warns
+    `Your host glibc version (X) is newer than that in uninative (Y)`. The
+    bump keeps uninative working, so `-native`/`-cross` sstate stays portable
+    between build hosts. Bumping it is a one-time cost: `NATIVELSBSTRING`
+    changes from the host distro string to `universal-<gccver>`, and
+    native/cross sstate is keyed on that, so the next build rebuilds the
+    cross toolchain. Target-side sstate is unaffected.
+  - The same script appends `ubuntu-26.04` to `SANITY_TESTED_DISTROS`, whose
+    kirkstone-era list stops at `ubuntu-24.04` and otherwise warns
+    `Host distribution "..." has not been validated` on every build. It
+    appends rather than blanking the variable, so a host that genuinely
+    hasn't been tried here still warns. Add your own release the same way
+    if you build on something newer.
 
   None of this needs manual action beyond installing `gcc-12`/`g++-12` above —
   it's automatic in the scripts — but if you hit a build failure that looks
   like a compiler/Python-version issue rather than a real code bug, this is
   why, and the fix likely already exists in `scripts/`.
+
+  One warning class is **not** worth chasing: `do_fetch: Failed to fetch URL
+  ..., attempting MIRRORS if available`. Upstream project servers (x.org,
+  freedesktop.org) are frequently unreachable; bitbake falls back to the
+  Yocto mirror and the build continues. They only appear the first time a
+  source is downloaded and disappear once it is in `DL_DIR`.
 - **Disk:** ~**150 GB** free for the first build (downloads + sstate + tmp).
   `scripts/02-configure-build.sh` enables bitbake's `rm_work`, which deletes
   each recipe's `tmp/work/` right after it builds, so usage stays close to

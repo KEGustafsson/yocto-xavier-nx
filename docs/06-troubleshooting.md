@@ -27,6 +27,13 @@
 | Wrong `/dev/sdX` for `--host-drive` | Re-check `lsblk`; writing the wrong disk is irreversible. |
 | Rootfs write seems to hang | Not actually hung, just slow: 64 GiB over recovery-mode USB 2.0 realistically takes 20-30 minutes. Only worry if it's stalled well past that. |
 
+## bitbake itself
+
+| Symptom | Fix |
+|---------|-----|
+| `ERROR: Command '...buildTargets...' failed: Busy (buildTargets in progress)`, after a long series of `Retrying server connection` | Not a build failure. bitbake keeps a memory-resident server alive between runs; if a previous client was interrupted (Ctrl-C at the wrong moment, closed terminal, killed pid) the server survives and holds the build dir. `scripts/03-build.sh` now clears this automatically before building; to do it by hand, `bitbake -m` (`--kill-server`) from a configured shell. Cancel bitbake with `bitbake -m` rather than killing the client, and you won't hit it. |
+| A build you started elsewhere gets killed when you run `scripts/03-build.sh` | That is the cleanup above doing its job — only one bitbake can own a build directory. Re-run with `BOAT_KEEP_BITBAKE_SERVER=1` to leave the running server alone and get the `Busy` error instead. |
+
 ## Boot
 
 | Symptom | Fix |

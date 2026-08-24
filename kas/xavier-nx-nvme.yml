@@ -63,6 +63,22 @@ local_conf_header:
     # nvidia-container-toolkit, "x11"/"opengl" the Xorg + XFCE helm desktop,
     # "pam" the logind session that unprivileged Xorg needs.
     DISTRO_FEATURES:append = " virtualization opengl pam x11"
+    # ---- Newer-host accommodations (see docs/02 "Newer hosts") ----
+    # kirkstone's tested-distro list stops at ubuntu-24.04; sanity.bbclass splits
+    # this on the literal two-character sequence \n. Append your release rather
+    # than blanking the variable, so a genuinely untested host still warns.
+    SANITY_TESTED_DISTROS:append = " \n ubuntu-26.04 \n"
+    # kirkstone pins uninative 4.7 (glibc 2.41). When the host glibc is newer,
+    # bitbake disables uninative (and warns) rather than risk corrupting sstate;
+    # 5.2 ships glibc 2.44. Bumping relocates native/cross sstate
+    # (NATIVELSBSTRING becomes "universal-<gccver>"), so expect one cross-toolchain
+    # rebuild after changing it.
+    # ":forcevariable" is required: local.conf is parsed before the distro
+    # config that sets these with a plain "=", so a plain assignment loses.
+    UNINATIVE_VERSION:forcevariable = "5.2"
+    UNINATIVE_MAXGLIBCVERSION:forcevariable = "2.44"
+    UNINATIVE_CHECKSUM[x86_64] = "1a2749c1379fd9f60ea3c82f1bf4844924d5a99117b74a70c57036e94e2379d4"
+    UNINATIVE_CHECKSUM[aarch64] = "8cf46c7ba75ebb1863fd6b74cf7d7ab910a3e99de4f01b1e9490babf8e6b9e05"
     # Boot the rootfs from the first NVMe SSD:
     TNSPEC_BOOTDEV = "nvme0n1p1"
     ROOTFSPART_SIZE = "68719476736"

@@ -37,6 +37,15 @@ set -u
 export PYTHONPATH="${HERE}/pyfix${PYTHONPATH:+:${PYTHONPATH}}"
 export BB_ENV_PASSTHROUGH_ADDITIONS="PYTHONPATH${BB_ENV_PASSTHROUGH_ADDITIONS:+ ${BB_ENV_PASSTHROUGH_ADDITIONS}}"
 
+# Clear out any bitbake server left running by an interrupted earlier build
+# before starting this one - otherwise bitbake spends its whole retry budget
+# failing to connect and dies with "Busy (buildTargets in progress)", which
+# reads like a build failure but isn't one. See kill_stale_bitbake in lib.sh
+# (and BOAT_KEEP_BITBAKE_SERVER=1 to opt out). Deliberately placed after the
+# PYTHONPATH export above: the graceful path calls `bitbake -m`, which needs
+# the same Python workaround as any other bitbake invocation on this host.
+kill_stale_bitbake "${BUILD_DIR}"
+
 bitbake "${TARGET}"
 
 DEPLOY="${BUILD_DIR}/tmp/deploy/images/${MACHINE}"

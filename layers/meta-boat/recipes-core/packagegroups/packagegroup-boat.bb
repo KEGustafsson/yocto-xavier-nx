@@ -129,14 +129,19 @@ RDEPENDS:${PN}-connectivity = "\
 # xauth/xhost: boat-xfce-session runs `xhost +local:` so containerized GUI
 # apps can use the mounted /tmp/.X11-unix socket without a cookie - see
 # docs/05 "Container GUI apps on the HDMI screen (X11)".
-# dbus: dbus-run-session, which boat-xfce-session uses to give XFCE its
-# session bus. (poky's dbus package also RPROVIDES "dbus-x11", the name
-# xfce4-session's own RDEPENDS asks for.)
-# libinput/fontconfig deliberately NOT listed here: they are pulled in
-# transitively (xserver-xorg -> xf86-input-libinput; gtk+3 -> fontconfig)
-# under their correctly shlib-renamed package names. An allarch packagegroup
-# naming them directly breaks do_package_write_rpm once x11 support makes
-# them dynamically renamed.
+# dbus/libinput/fontconfig deliberately NOT listed here, even though the
+# session needs all three: they are pulled in transitively (xfce4-session
+# RDEPENDS "dbus-x11", which poky's dbus package RPROVIDES and which is also
+# where boat-xfce-session's dbus-run-session lives; xserver-xorg ->
+# xf86-input-libinput; gtk+3 -> fontconfig) under their correctly renamed
+# package names. CONFIRMED AT BUILD TIME: naming `dbus` here directly fails
+# do_package_write_rpm with "An allarch packagegroup shouldn't depend on
+# packages which are dynamically renamed (dbus to dbus-1)" - dbus sets
+# DEBIANNAME:${PN} = "dbus-1", and this packagegroup is allarch, so it has
+# no arch-specific pkgdata to resolve the rename against. The same trap
+# applies to libinput/fontconfig once x11 support makes them shlib-renamed.
+# boat-hmi-autostart, which is not allarch, RDEPENDS on `dbus` by name for
+# the same binary - that one resolves fine.
 RDEPENDS:${PN}-hmi = "\
     packagegroup-core-x11-xserver \
     packagegroup-xfce-base \
@@ -146,7 +151,6 @@ RDEPENDS:${PN}-hmi = "\
     xrandr \
     xset \
     xdpyinfo \
-    dbus \
     ttf-dejavu-sans \
 "
 

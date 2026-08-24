@@ -126,6 +126,48 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
   echo 'BUILD_CXX = "${CCACHE}/usr/bin/g++-12 ${BUILD_CC_ARCH}"'
   echo 'BUILD_CPP = "/usr/bin/gcc-12 ${BUILD_CC_ARCH} -E"'
   echo 'BUILD_CCLD = "/usr/bin/gcc-12 ${BUILD_CC_ARCH}"'
+  # --- Host-age accommodations (see docs/02 "Newer hosts") ------------
+  # kirkstone's SANITY_TESTED_DISTROS (meta-poky/conf/distro/poky.conf)
+  # stops at ubuntu-24.04, so anything newer warns "Host distribution ...
+  # has not been validated" on every single build. sanity.bbclass splits
+  # this variable on the literal two-character sequence \n and fnmatch()es
+  # each entry, hence the odd-looking separator below. Appending the
+  # specific newer releases this project is actually built on is
+  # deliberate - do NOT blank the variable out, or a genuinely untested
+  # host stops warning too. The warning is only being acknowledged here,
+  # not made untrue: the gcc-12 / pyfix / pseudo-openat2 workarounds
+  # elsewhere in this repo exist precisely because kirkstone predates
+  # these hosts.
+  echo 'SANITY_TESTED_DISTROS:append = " \n ubuntu-26.04 \n"'
+  # uninative ships a prebuilt glibc + loader so that -native/-cross sstate
+  # is portable between build hosts. bitbake refuses to use it when the
+  # host glibc is NEWER than the tarball's (uninative.bbclass would relocate
+  # native binaries onto an older loader than they were linked against,
+  # silently corrupting sstate) - it disables uninative and warns instead.
+  # kirkstone pins uninative 4.7 (glibc 2.41), which is older than current
+  # Ubuntu, so that is exactly what happens. 5.2 ships glibc 2.44 and covers
+  # it. Checksums below were taken from the tarballs on
+  # downloads.yoctoproject.org, and MAXGLIBCVERSION must be bumped with the
+  # version or the check still trips. Only BUILD_ARCH's checksum is ever
+  # read; i686 is not published for 5.2 and this project needs an x86-64
+  # host anyway (NVIDIA's flashing binaries are x86-64 only).
+  # NOTE: enabling uninative changes NATIVELSBSTRING from the host distro
+  # string to "universal-<gccver>", and native/cross sstate is stored under
+  # it (SSTATE_EXTRAPATH in sstate.bbclass) - so the first build after this
+  # change rebuilds the native/cross toolchain rather than reusing the
+  # existing sstate. Target-side sstate is unaffected.
+  # ":forcevariable" is load-bearing, CONFIRMED THE HARD WAY: local.conf is
+  # parsed BEFORE the distro config that pulls in yocto-uninative.inc, and
+  # that file sets UNINATIVE_VERSION/UNINATIVE_MAXGLIBCVERSION with a plain
+  # "=" (only the CHECKSUM flags are "?="). A plain assignment here is
+  # therefore silently overwritten by 4.7 again, while the checksums below
+  # DO stick - which fails as a checksum mismatch on the 4.7 tarball rather
+  # than as anything that names the real cause. forcevariable is the highest
+  # priority override and is applied at expansion time, so it wins.
+  echo 'UNINATIVE_VERSION:forcevariable = "5.2"'
+  echo 'UNINATIVE_MAXGLIBCVERSION:forcevariable = "2.44"'
+  echo 'UNINATIVE_CHECKSUM[x86_64] = "1a2749c1379fd9f60ea3c82f1bf4844924d5a99117b74a70c57036e94e2379d4"'
+  echo 'UNINATIVE_CHECKSUM[aarch64] = "8cf46c7ba75ebb1863fd6b74cf7d7ab910a3e99de4f01b1e9490babf8e6b9e05"'
   if [[ -n "${BOOTDEV}" ]]; then
     echo ""
     echo "# --- Boot rootfs from external NVMe storage ---"
