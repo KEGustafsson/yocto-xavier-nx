@@ -685,11 +685,19 @@ three places rather than one:
    before (last chance) and immediately after (drivers that re-probe the MAC
    on resume come back with `wol=d`).
 
-`boat-wol-arm` reads the flag *back* after setting it rather than trusting
-`ethtool`'s exit status, and exits non-zero when nothing could be armed —
+**"Armed" means both halves**, and `boat-wol-arm` reads both *back* from
+sysfs rather than trusting either write: the MAC's `Wake-on: g`, and — where
+the device exposes one — its bus wake source reading `enabled`. A NIC that
+took the magic-packet flag while its wake source stayed disabled does not
+count, because the packet would reach a NIC whose wake signal goes nowhere;
+a device with no such attribute is normal, and then the NIC flag is all
+there is to check. `boat-wol-arm` exits non-zero when nothing is armed,
 which is what makes `systemctl status boat-wol` red on hardware that cannot
-do magic-packet wake at all. That red is the useful signal; check it before
-trusting the first remote `boat-sleep`.
+do magic-packet wake at all, and what `boat-sleep`'s interlock reads — one
+definition of "armed", not two that drift. `boat-wol-arm --check` runs the
+same test writing nothing, which is how `--status` can promise it changes
+nothing. That red is the useful signal; check it before trusting the first
+remote `boat-sleep`.
 
 ### `/etc/default/boat-power`
 

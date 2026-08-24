@@ -49,11 +49,24 @@ import socket
 import sys
 import time
 
-mac, bcast, port, count = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+mac, bcast = sys.argv[1], sys.argv[2]
 
 hexmac = re.sub(r"[:.\-]", "", mac).lower()
 if not re.fullmatch(r"[0-9a-f]{12}", hexmac):
     sys.exit(f"'{mac}' is not a MAC address (expected 6 hex octets, e.g. 48:b0:2d:11:22:33)")
+
+# Validate before opening the socket: a count of 0 (or a negative one) would
+# make the send loop a no-op while the script still exited 0 and reported
+# "Magic packet sent." - the one outcome this script must never fake, since
+# nothing else in the wake path acknowledges anything.
+try:
+    port, count = int(sys.argv[3]), int(sys.argv[4])
+except ValueError:
+    sys.exit(f"BOAT_WOL_PORT ('{sys.argv[3]}') and BOAT_WOL_COUNT ('{sys.argv[4]}') must be whole numbers")
+if count < 1:
+    sys.exit(f"BOAT_WOL_COUNT must be at least 1, got {count}")
+if not 0 < port < 65536:
+    sys.exit(f"BOAT_WOL_PORT must be between 1 and 65535, got {port}")
 
 # Magic packet: 6 x 0xFF, then the target MAC repeated 16 times.
 payload = b"\xff" * 6 + bytes.fromhex(hexmac) * 16

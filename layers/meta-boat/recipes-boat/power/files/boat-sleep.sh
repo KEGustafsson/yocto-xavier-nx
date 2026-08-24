@@ -88,9 +88,15 @@ if [ -e /sys/power/mem_sleep ]; then
     case "$modes" in
         *"[deep]"*) ;;
         *deep*)
-            say "selecting deep sleep (was: $modes)"
-            echo deep > /sys/power/mem_sleep \
-                || die "could not select 'deep' in /sys/power/mem_sleep" ;;
+            if [ "$STATUS_ONLY" = "1" ]; then
+                # --status promises to change nothing, and selecting the
+                # sleep state is a change - report what a real run would do.
+                say "note: 'deep' is offered but not currently selected - a normal boat-sleep run would select it"
+            else
+                say "selecting deep sleep (was: $modes)"
+                echo deep > /sys/power/mem_sleep \
+                    || die "could not select 'deep' in /sys/power/mem_sleep"
+            fi ;;
         *)
             if [ "$FORCE" = "1" ]; then
                 say "WARNING: no 'deep' state offered (/sys/power/mem_sleep: $modes) - --force given, suspending to '$modes' anyway; this does NOT enter SC7"
@@ -102,26 +108,31 @@ if [ -e /sys/power/mem_sleep ]; then
 fi
 
 # --- Arm Wake-on-LAN before, not after, deciding to suspend ----------------
-# --status must not change anything, so it only reads the flags; every other
-# mode arms first. boat-wol-arm's own exit status is not what decides here -
-# the interfaces' read-back state is, so that "armed" always means "the NIC
-# says magic-packet wake is on right now", however it got that way (this
-# call, boat-wol.service at boot, or NetworkManager re-applying it). Its
-# messages are still what explain a failure to arm.
-if [ "$STATUS_ONLY" != "1" ]; then
-    /usr/bin/boat-wol-arm || true
+# boat-wol-arm is the single definition of "armed" - it requires the NIC's
+# magic-packet flag AND, where the device has one, its bus wake source, both
+# read back from sysfs. Duplicating half of that test here is exactly how
+# the two drift apart, so this consumes its exit status instead. --check is
+# the same test with no writes, which is what lets --status promise it
+# changes nothing; either way its per-interface messages explain a failure.
+wol_ok=0
+if [ "$STATUS_ONLY" = "1" ]; then
+    if /usr/bin/boat-wol-arm --check; then wol_ok=1; fi
+else
+    if /usr/bin/boat-wol-arm; then wol_ok=1; fi
 fi
 
-wol_ok=0
+# For display only - which MAC to send the packet to. The decision above is
+# already made; this just picks the interfaces worth naming.
 macs=""
-for ifc in $BOAT_WOL_INTERFACES; do
-    [ -r "/sys/class/net/$ifc/address" ] || continue
-    case "$(ethtool "$ifc" 2>/dev/null | sed -n 's/^[[:space:]]*Wake-on:[[:space:]]*//p')" in
-        *g*) wol_ok=1
-             macs="$macs $(cat "/sys/class/net/$ifc/address")" ;;
-    esac
-done
-macs="${macs# }"
+if [ "$wol_ok" = "1" ]; then
+    for ifc in $BOAT_WOL_INTERFACES; do
+        [ -r "/sys/class/net/$ifc/address" ] || continue
+        case "$(ethtool "$ifc" 2>/dev/null | sed -n 's/^[[:space:]]*Wake-on:[[:space:]]*//p')" in
+            *g*) macs="$macs $(cat "/sys/class/net/$ifc/address")" ;;
+        esac
+    done
+    macs="${macs# }"
+fi
 
 if [ "$STATUS_ONLY" = "1" ]; then
     say "sleep state:  $sleep_state"
@@ -129,7 +140,7 @@ if [ "$STATUS_ONLY" = "1" ]; then
         say "wake-on-lan:  armed on ${macs:-(unknown MAC)}"
         say "wake with:    wakeonlan ${macs%% *}   (or scripts/wake-boat.sh in the yocto-xavier-nx checkout)"
     else
-        say "wake-on-lan:  NOT armed - 'boat-wol-arm' says why; 'systemctl status boat-wol' has the boot-time attempt"
+        say "wake-on-lan:  NOT armed - the boat-wol lines above say why; 'journalctl -u boat-wol' has the boot-time attempt"
     fi
     say "suspend now:  boat-sleep"
     exit 0
