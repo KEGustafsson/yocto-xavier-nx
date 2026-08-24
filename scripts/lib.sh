@@ -19,6 +19,57 @@ confirm() {
 }
 
 # ---------------------------------------------------------------------------
+# One build directory can only ever have one bitbake in it, and the stale-
+# server cleanup below makes that stricter still: between _stale_bitbake_pids
+# finding no server and the `rm -f` of the leftover socket, a bitbake started
+# from another terminal can bind that very path - and then have its socket
+# unlinked out from under it, leaving a running server no client can reach.
+#
+# So take an exclusive lock on the build directory and hold it across BOTH the
+# cleanup and the build itself. Locking only the cleanup would close a window
+# of milliseconds and leave the hours-long one wide open.
+#
+# The lock lives on a file descriptor of the calling shell, deliberately:
+#   - it is held until this script exits, with no trap/cleanup to forget, so
+#     "hold it through bitbake" is automatic rather than something the caller
+#     has to remember;
+#   - the kernel releases it when the process dies, however it dies, so a
+#     Ctrl-C or a SIGKILL can never leave a lock nobody can clear (unlike a
+#     lock-file-exists scheme, which is exactly how stale bitbake sockets get
+#     left behind in the first place).
+#
+# fd 9 is this file's; nothing else in these scripts uses it.
+acquire_build_lock() {
+  local build_dir="$1"
+  local lock="${build_dir}/boat-build.lock"
+
+  [[ -d "${build_dir}" ]] || die "build directory does not exist: ${build_dir}"
+
+  # util-linux flock(1). Present on every distro these scripts support, but
+  # don't make the build hard-fail on a host that somehow lacks it - warn and
+  # run unserialized, which is exactly the old behaviour.
+  if ! command -v flock >/dev/null 2>&1; then
+    warn "flock(1) not found - running WITHOUT the build lock; do not start a"
+    warn "second build in ${build_dir} while this one runs."
+    return 0
+  fi
+
+  # >> not >: never truncate, so two shells opening it concurrently can't
+  # race over the (empty, unused) contents. The file is a lock handle only.
+  exec 9>>"${lock}" || die "cannot open build lock: ${lock}"
+
+  if flock -n 9; then
+    return 0
+  fi
+
+  warn "Another build already holds the lock on ${build_dir}."
+  warn "Waiting for it to finish (Ctrl-C to give up) ..."
+  flock 9 || die "failed to acquire build lock: ${lock}"
+  log "Build lock acquired"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # bitbake keeps a memory-resident "cooker" server alive between invocations so
 # the next command doesn't have to re-parse 3000+ recipes. That server outlives
 # its client: if a previous run's client went away without shutting it down -
@@ -37,7 +88,8 @@ confirm() {
 #
 # WARNING: if you deliberately have a build running in another terminal, this
 # kills it. Set BOAT_KEEP_BITBAKE_SERVER=1 to skip and get the "Busy" error
-# instead.
+# instead. Call it under acquire_build_lock (above) so a build starting in
+# parallel can't bind the socket this function is in the middle of removing.
 kill_stale_bitbake() {
   local build_dir="$1"
   local sock="${build_dir}/bitbake.sock"
@@ -99,7 +151,9 @@ kill_stale_bitbake() {
   #    itself. Needs the bitbake on PATH, i.e. oe-init-build-env already
   #    sourced, and it can itself hang against a wedged server - hence timeout.
   if command -v bitbake >/dev/null 2>&1; then
-    timeout 60 bitbake -m >/dev/null 2>&1 || true
+    # 9>&-: never let a bitbake inherit the build lock's file descriptor - see
+    # the same redirect on the main bitbake call in scripts/03-build.sh.
+    timeout 60 bitbake -m >/dev/null 2>&1 9>&- || true
     sleep 2
     pids="$(_stale_bitbake_pids || true)"
   fi

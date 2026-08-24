@@ -37,6 +37,15 @@ set -u
 export PYTHONPATH="${HERE}/pyfix${PYTHONPATH:+:${PYTHONPATH}}"
 export BB_ENV_PASSTHROUGH_ADDITIONS="PYTHONPATH${BB_ENV_PASSTHROUGH_ADDITIONS:+ ${BB_ENV_PASSTHROUGH_ADDITIONS}}"
 
+# Take the build-directory lock BEFORE touching anything in it, and keep it
+# for the whole build: the cleanup below removes a leftover bitbake socket,
+# and a build started concurrently from another terminal could otherwise bind
+# that path in between the check and the removal - losing its own socket. The
+# lock is held on a file descriptor, so it lasts until this script exits and
+# covers the bitbake run below without any further bookkeeping. See
+# acquire_build_lock in lib.sh.
+acquire_build_lock "${BUILD_DIR}"
+
 # Clear out any bitbake server left running by an interrupted earlier build
 # before starting this one - otherwise bitbake spends its whole retry budget
 # failing to connect and dies with "Busy (buildTargets in progress)", which
@@ -46,7 +55,15 @@ export BB_ENV_PASSTHROUGH_ADDITIONS="PYTHONPATH${BB_ENV_PASSTHROUGH_ADDITIONS:+ 
 # the same Python workaround as any other bitbake invocation on this host.
 kill_stale_bitbake "${BUILD_DIR}"
 
-bitbake "${TARGET}"
+# 9>&- closes the lock file descriptor for bitbake and everything it forks -
+# CONFIRMED NECESSARY, and not a detail: flock(2) locks belong to the open
+# file description, which fork()/exec() share. bitbake leaves a memory-
+# resident cooker server running after the client exits, so a server that
+# inherited fd 9 would go on holding this build directory's lock with no
+# script left to release it, and the NEXT build would wait for it forever.
+# The lock still covers this build: it is held by this shell, which does not
+# exit until bitbake returns.
+bitbake "${TARGET}" 9>&-
 
 DEPLOY="${BUILD_DIR}/tmp/deploy/images/${MACHINE}"
 log "Build finished. Artifacts in: ${DEPLOY}"
