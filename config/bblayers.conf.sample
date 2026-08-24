@@ -14,6 +14,13 @@ BBLAYERS ?= " \
   ${TOPDIR}/../layers/meta-openembedded/meta-python \
   ${TOPDIR}/../layers/meta-openembedded/meta-networking \
   ${TOPDIR}/../layers/meta-openembedded/meta-filesystems \
+  ${TOPDIR}/../layers/meta-openembedded/meta-multimedia \
+  ${TOPDIR}/../layers/meta-openembedded/meta-gnome \
+  ${TOPDIR}/../layers/meta-openembedded/meta-xfce \
   ${TOPDIR}/../layers/meta-tegra \
   /path/to/yocto-xavier-nx/layers/meta-boat \
   "
+
+# meta-multimedia/meta-gnome are here only because meta-xfce (the XFCE helm
+# desktop, Phase 2) declares them as LAYERDEPENDS. Drop all three for a
+# Phase-1 core-image-base build if you want a smaller layer set.

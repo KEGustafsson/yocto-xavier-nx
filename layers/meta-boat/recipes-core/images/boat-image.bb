@@ -29,15 +29,16 @@ MACHINE_ESSENTIAL_EXTRA_RRECOMMENDS += " \
 IMAGE_ROOTFS_EXTRA_SPACE = "4194304"
 
 # Reproducible, serviceable systemd system.
-# NOTE: "virtualization wayland opengl" (docker/nvidia-container-toolkit's
-# REQUIRED_DISTRO_FEATURES + Weston) live in local.conf, not here -
+# NOTE: "virtualization x11 opengl pam" (docker/nvidia-container-toolkit's
+# REQUIRED_DISTRO_FEATURES + the Xorg/XFCE helm desktop) live in local.conf,
+# not here -
 # DISTRO_FEATURES is evaluated per-recipe at parse time against the global
 # distro config, so an image-recipe-local append can't retroactively
 # unskip another recipe that already parsed as "missing required distro
 # feature". See scripts/02-configure-build.sh.
 DISTRO_FEATURES:append = " systemd"
 
-# Login user for the console/Weston session (docs/05 "Boot flow for the
+# Login user for the console/XFCE session (docs/05 "Boot flow for the
 # display"). Fixed scaffold user for now, locked password (console-autologin
 # + SSH key only) - replace with docs/05's interactive build-time user-
 # creation flow (not yet implemented in scripts/02-configure-build.sh) when

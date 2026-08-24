@@ -1,0 +1,39 @@
+# Tier 0 CI: fast repository checks. No Yocto layers are fetched and bitbake
+# is never run, so this finishes in well under a minute.
+#
+# SCOPE, deliberately: this cannot catch recipe parse errors, unresolvable
+# RDEPENDS, or packaging QA failures (e.g. "An allarch packagegroup shouldn't
+# depend on packages which are dynamically renamed") - the last of those needs
+# a real image build, because `bitbake -n` passes clean on it. Green here means
+# "nothing obviously broken", not "this builds".
+#
+# The job only installs tools and calls scripts/lint.sh, which is the same
+# thing you run locally - so CI and your machine can't drift apart.
+name: lint
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tier0:
+    name: Shell, YAML, docs and recipe references
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install check tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends shellcheck python3-yaml
+
+      # LINT_STRICT=1 turns "tool not installed" into a failure. Without it a
+      # missing tool is only a warning, which is right for a developer laptop
+      # and wrong for CI - a silently skipped check reads exactly like a
+      # passing one.
+      - name: Run checks
+        run: LINT_STRICT=1 ./scripts/lint.sh

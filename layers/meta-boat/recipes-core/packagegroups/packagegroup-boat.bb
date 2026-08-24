@@ -1,6 +1,6 @@
 SUMMARY = "Software for a boat / marine embedded computer (container host)"
 DESCRIPTION = "Turns the base Xavier NX image into a minimal, reliable Jetson \
-container host: Docker + the NVIDIA container runtime, HMI (Weston), \
+container host: Docker + the NVIDIA container runtime, HMI (XFCE on Xorg), \
 connectivity and reliability tooling. Applications (Signal K, DeepStream, \
 Firefox, ...) run as containers - see docs/05-phase2-boat-computer-layer.md."
 LICENSE = "MIT"
@@ -96,37 +96,64 @@ RDEPENDS:${PN}-connectivity = "\
     chrony \
 "
 
-# --- HMI: Weston compositor for a container'd browser as the helm UI -------
-# wvkbd (on-screen keyboard) is not packaged in the kirkstone-era layers this
-# project fetches - add it from a newer meta-oe snapshot if a touch-only helm
-# needs one; omitted here rather than left as a name that fails the build.
-# weston-xwayland: the actual xwayland.so compositor module weston.ini's
-# xwayland=true loads at startup - it's a SEPARATE package from plain
-# `weston` (FILES:${PN}-xwayland in weston_10.0.2.bb), not bundled in by
-# default even though weston's own PACKAGECONFIG built it once x11+wayland
-# DISTRO_FEATURES are both present. CONFIRMED ON HARDWARE: without this
-# package, weston fatally fails to load xwayland.so ("No such file or
-# directory") and crash-loops the whole session (repeated login-screen
-# flicker) - do not drop this. weston-xwayland itself RDEPENDS on
-# `xwayland` (the X server binary), so that's not listed separately here.
-# xauth/xhost: boat-hmi-autostart grants local X11 access via xhost once
-# XWayland's socket appears - see docs/05 "Container GUI apps on the HDMI
-# screen (X11 via XWayland)".
-# libinput/fontconfig deliberately NOT listed here: weston DEPENDS on both
-# (directly, and transitively via pango) so its own package already
-# RDEPENDS on the correctly shlib-renamed runtime packages. An allarch
-# packagegroup listing the plain names itself breaks once x11 support makes
-# them dynamically renamed (do_package_write_rpm QA error) - let weston
-# pull them in.
+# --- HMI: XFCE desktop on the HDMI screen ----------------------------------
+# The helm display is a full XFCE desktop on Xorg (this replaced the earlier
+# Weston/Wayland-only session - see docs/05 "HMI / XFCE autostart"). Marine
+# applications themselves still run as containers; the desktop is what shows
+# them, plus a file manager/terminal/settings for field work.
+#
+# packagegroup-core-x11-xserver (poky) rather than a hand-written list of X
+# packages: it expands the machine's own XSERVER variable, which meta-tegra
+# sets in conf/machine/include/tegra-common.inc to
+# "xserver-xorg xf86-input-evdev xserver-xorg-video-nvidia
+# xserver-xorg-module-libwfb" - i.e. NVIDIA's Tegra X driver, not the generic
+# modesetting one. Hardcoding those names here would silently drift from the
+# BSP. It pulls in tegra-configs-xorg (L4T's /etc/X11/xorg.conf for t194) via
+# xserver-xorg-video-nvidia's own RDEPENDS.
+#
+# NOT packagegroup-core-x11 (the superset): its -utils half drags in
+# xserver-nodm-init, which ships a display-manager.service alias that would
+# start a second, root-owned Xorg racing boat-hmi-autostart's session for the
+# same VT. The handful of X utilities actually wanted are listed individually
+# below instead.
+#
+# packagegroup-xfce-base = xfwm4, xfce4-session, xfconf, xfdesktop,
+# xfce4-panel + its standard plugins, xfce4-settings, xfce4-notifyd,
+# xfce4-terminal, thunar, thunar-volman. It needs meta-xfce in
+# bblayers.conf, which drags in meta-gnome and meta-multimedia as layer
+# dependencies (scripts/02-configure-build.sh adds all three).
+# packagegroup-xfce-extended is deliberately not used: it RRECOMMENDS ~40
+# more panel plugins, themes and desktop apps that just grow the rootfs on
+# an appliance.
+#
+# xauth: boat-xfce-session uses it to export a copy of the session's
+# MIT-MAGIC-COOKIE for containerized GUI apps, which present it over the
+# mounted /tmp/.X11-unix socket - see docs/05 "Container GUI apps on the HDMI
+# screen (X11)". `xhost` is deliberately NOT installed: the blanket
+# `xhost +local:` grant this image used to rely on disables cookie auth for
+# every local uid, and leaving the tool out keeps it from creeping back in.
+# dbus/libinput/fontconfig deliberately NOT listed here, even though the
+# session needs all three: they are pulled in transitively (xfce4-session
+# RDEPENDS "dbus-x11", which poky's dbus package RPROVIDES and which is also
+# where boat-xfce-session's dbus-run-session lives; xserver-xorg ->
+# xf86-input-libinput; gtk+3 -> fontconfig) under their correctly renamed
+# package names. CONFIRMED AT BUILD TIME: naming `dbus` here directly fails
+# do_package_write_rpm with "An allarch packagegroup shouldn't depend on
+# packages which are dynamically renamed (dbus to dbus-1)" - dbus sets
+# DEBIANNAME:${PN} = "dbus-1", and this packagegroup is allarch, so it has
+# no arch-specific pkgdata to resolve the rename against. The same trap
+# applies to libinput/fontconfig once x11 support makes them shlib-renamed.
+# boat-hmi-autostart, which is not allarch, RDEPENDS on `dbus` by name for
+# the same binary - that one resolves fine.
 RDEPENDS:${PN}-hmi = "\
-    weston \
-    weston-xwayland \
-    weston-init \
-    wayland \
-    wayland-protocols \
-    ttf-dejavu-sans \
+    packagegroup-core-x11-xserver \
+    packagegroup-xfce-base \
+    xinit \
     xauth \
-    xhost \
+    xrandr \
+    xset \
+    xdpyinfo \
+    ttf-dejavu-sans \
 "
 
 # --- Reliability for an unattended, power-cycled system ---------------------

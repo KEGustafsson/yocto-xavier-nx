@@ -1,0 +1,79 @@
+#!/bin/sh
+# Installed as /usr/bin/boat-xfce-session; run by startx (see
+# /etc/profile.d/boat-xfce-autostart.sh) as the X session's first and only
+# client. DISPLAY and XAUTHORITY are already set correctly here, and the X
+# server is already accepting connections - that is the whole reason the
+# cookie export below lives in this file rather than alongside the startx
+# call. (The Weston-era version of this image had to poll for XWayland's
+# socket from a backgrounded subshell instead; with startx there is nothing
+# to wait for, and a subshell forked before startx would not have the auth
+# cookie to export in the first place.)
+
+# --- X access for containerized GUI apps ----------------------------------
+# Signal K's Chromium kiosk, OpenCPN, ... connect over the /tmp/.X11-unix
+# socket bind-mounted into them, and X rejects them unless they can present
+# this session's MIT-MAGIC-COOKIE. Export a copy of that cookie to a fixed
+# path the compose files mount read-only.
+#
+# Deliberately NOT `xhost +local:`, which earlier versions of this image ran
+# here: that turns off cookie authentication for *every* same-machine client,
+# so any local process of any uid could then log keystrokes, screenshot the
+# helm display or inject input into it. A mounted cookie grants the same
+# access, but only to the containers that were actually given the mount.
+#
+# The export lives in /run/boat-x11, a 0700 directory owned by this user that
+# systemd-tmpfiles creates at boot (see boat-x11-cookie.conf in this recipe):
+# no other unprivileged uid can even traverse into it, so the cookie file
+# itself can stay readable to whatever uid a container image happens to run
+# its app as (many don't run as root). dockerd does the bind-mount as root, so
+# the 0700 directory is no obstacle to it.
+#
+# Note this is the session's own cookie, i.e. FULL X-server access for
+# anything holding it - input injection, screen capture and window
+# manipulation included. Mount it read-only, and only into containers that
+# are trusted with the display.
+#
+# `sed 's/^..../ffff/'` rewrites each entry's address family to
+# FamilyWildcard, so the cookie matches regardless of the hostname the client
+# sees. Containers get their own UTS namespace (a different hostname) even
+# under network_mode: host, and a plain family-Local entry would not match
+# there. See docs/05-phase2-boat-computer-layer.md "Container GUI apps on the
+# HDMI screen".
+BOAT_X11_DIR=/run/boat-x11
+BOAT_X11_COOKIE="${BOAT_X11_DIR}/Xauthority"
+if [ -w "$BOAT_X11_DIR" ]; then
+    # Fresh file per session: a cookie from a previous X server is dead
+    # weight, and xauth would otherwise accumulate entries across restarts.
+    rm -f "$BOAT_X11_COOKIE"
+    # -s as well as the exit status: `xauth nmerge` happily succeeds on empty
+    # input, so an X server that somehow handed out no cookie would otherwise
+    # leave an empty file here and every container would fail with the
+    # unhelpful "no protocol specified" instead of anything pointing back at
+    # this script.
+    if xauth nlist "$DISPLAY" 2>/dev/null \
+        | sed -e 's/^..../ffff/' \
+        | xauth -f "$BOAT_X11_COOKIE" nmerge - 2>/dev/null \
+        && [ -s "$BOAT_X11_COOKIE" ]
+    then
+        # Readable inside the container whatever uid it runs as; the 0700
+        # parent above is what keeps other local users out.
+        chmod 0644 "$BOAT_X11_COOKIE" 2>/dev/null || :
+    else
+        echo "boat-xfce-session: could not export X cookie to $BOAT_X11_COOKIE" >&2
+        echo "boat-xfce-session: containerized GUI apps will fail to open $DISPLAY" >&2
+    fi
+else
+    echo "boat-xfce-session: $BOAT_X11_DIR is missing or not writable - no X" >&2
+    echo "boat-xfce-session: cookie exported; is the tmpfiles.d entry from" >&2
+    echo "boat-xfce-session: boat-hmi-autostart installed? (systemd-tmpfiles" >&2
+    echo "boat-xfce-session: --create /usr/lib/tmpfiles.d/boat-x11.conf)" >&2
+fi
+
+# XFCE needs a D-Bus session bus (xfconf, xfsettingsd, thunar, notifyd all
+# talk over it). Under systemd+logind a user bus may already be running, in
+# which case reuse it rather than starting a second, competing one.
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    exec dbus-run-session -- xfce4-session
+fi
+
+exec xfce4-session

@@ -27,6 +27,13 @@
 | Wrong `/dev/sdX` for `--host-drive` | Re-check `lsblk`; writing the wrong disk is irreversible. |
 | Rootfs write seems to hang | Not actually hung, just slow: 64 GiB over recovery-mode USB 2.0 realistically takes 20-30 minutes. Only worry if it's stalled well past that. |
 
+## bitbake itself
+
+| Symptom | Fix |
+|---------|-----|
+| `ERROR: Command '...buildTargets...' failed: Busy (buildTargets in progress)`, after a long series of `Retrying server connection` | Not a build failure. bitbake keeps a memory-resident server alive between runs; if a previous client was interrupted (Ctrl-C at the wrong moment, closed terminal, killed pid) the server survives and holds the build dir. `scripts/03-build.sh` now clears this automatically before building; to do it by hand, `bitbake -m` (`--kill-server`) from a configured shell. Cancel bitbake with `bitbake -m` rather than killing the client, and you won't hit it. |
+| A build you started elsewhere gets killed when you run `scripts/03-build.sh` | That is the cleanup above doing its job — only one bitbake can own a build directory. Re-run with `BOAT_KEEP_BITBAKE_SERVER=1` to leave the running server alone and get the `Busy` error instead. |
+
 ## Boot
 
 | Symptom | Fix |
@@ -35,6 +42,25 @@
 | UEFI shows but no OS found | Rootfs not written to NVMe, or SSD not seated. Re-run rootfs flash; confirm the SSD enumerates in the UEFI device list. |
 | Boots but `mount \| grep ' / '` isn't `/dev/nvme0n1p1` (`findmnt` isn't installed on `core-image-base`) | `TNSPEC_BOOTDEV` wasn't set at build time. Rebuild with `TNSPEC_BOOTDEV = "nvme0n1p1"`, reflash. |
 | **Won't boot from NVMe on older firmware** | Insert a **blank** SD card (no ESP/APP partitions) as a fallback, or update the module firmware (`--qspi-only` flash) to the R35 UEFI build. |
+
+## Helm display / XFCE desktop (Phase 2)
+
+The desktop is Xorg + XFCE started from the `boat` user's tty1 autologin -
+see [`05-phase2-boat-computer-layer.md`](05-phase2-boat-computer-layer.md)
+"HMI / XFCE autostart". Two logs cover almost everything:
+`~boat/.local/share/xorg/Xorg.0.log` (the X server) and
+`/tmp/boat-xfce-session.log` (`startx` + the session). SSH in rather than
+debugging on the console - the console *is* the thing that's broken.
+
+| Symptom | Fix |
+|---------|-----|
+| Console autologins, screen stays black, nothing in `/tmp/boat-xfce-session.log` | The `/etc/profile.d` guard didn't fire. It requires UID 2000 (`BOAT_HMI_UID`), `$DISPLAY` unset and `tty` = `/dev/tty1`; check `id -u`, and that the login shell is bash (`profile.d` is not read by `sh`). |
+| `xf86OpenConsole: Cannot open virtual console` / `Cannot open /dev/dri/card0` in `Xorg.0.log` | The unprivileged Xorg has no logind session to get devices from. `loginctl` should list one session for `boat`, `seat0`, `tty1`; if not, `pam` is missing from `DISTRO_FEATURES` or `pam_systemd` isn't in `/etc/pam.d/login`. |
+| Xorg starts but fails loading the NVIDIA driver | Confirm `xserver-xorg-video-nvidia` and `tegra-configs-xorg` are installed (`/usr/lib/xorg/modules/drivers/nvidia_drv.so`, `/etc/X11/xorg.conf`) and that `boat` is in the `video` group - meta-tegra's udev rules give `/dev/nvhost-*` to that group. As a bisect, run `startx /usr/bin/boat-xfce-session -- :0 vt1` as root from tty1 (`su -`; `sudo` is not in this image): if root works and `boat` doesn't, it's a permissions/logind problem, not a driver one. |
+| Desktop comes up but the keyboard layout is wrong | `/etc/X11/xorg.conf.d/10-boat-keyboard.conf` (`XkbLayout`, from `BOAT_HMI_XKB_LAYOUT`, default `fi`). Read at X server start, so restart the session after changing it - or `setxkbmap <layout>` for a live test. |
+| Screen blanks after ~10 minutes | X's built-in screensaver; `xfce4-power-manager` isn't installed. `xset s off -dpms`, or add `-s 0 -dpms` to the `startx` server args in `boat-xfce-autostart.sh` to make it permanent. |
+| Container GUI app: `cannot open display :0` / `Authorization required` | The container needs `DISPLAY=:0`, `/tmp/.X11-unix` bind-mounted, **and** the session cookie: `XAUTHORITY=/run/boat-x11/Xauthority` with `/run/boat-x11:/run/boat-x11:ro` mounted (see docs/05 "Container GUI apps on the HDMI screen (X11)"). Check the export exists and is current: `ls -l /run/boat-x11/Xauthority`, then `XAUTHORITY=/run/boat-x11/Xauthority DISPLAY=:0 xdpyinfo \| head -3` from the desktop session. If it is missing, `/tmp/boat-xfce-session.log` says why. Mount the **directory**, not the file - the session rewrites the file on every restart, and a file mount would leave the container on the old inode. |
+| Screen flickers between console and black, repeatedly | The session is crash-looping: `xfce4-session` (or Xorg) exits, the login shell ends, agetty autologins again. `/tmp/boat-xfce-session.log` names the failure; a missing package from `packagegroup-xfce-base` is the usual cause. |
 
 ## CAN / NMEA 2000 (Phase 2)
 
