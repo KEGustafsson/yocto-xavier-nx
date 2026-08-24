@@ -132,18 +132,32 @@ recipes = sorted(glob.glob("layers/**/*.bb", recursive=True) +
 if not recipes:
     print("  no recipes found - has the layout changed?", file=sys.stderr)
     sys.exit(1)
+PV_ASSIGN = re.compile(r"(?m)^\s*PV\s*(?::\w+)?\s*[?:+]?=\s*[\"']([^\"']+)[\"']")
 for recipe in recipes:
     rdir = os.path.dirname(recipe)
-    pn = re.split(r"[_.]", os.path.basename(recipe))[0]
-    for name in SRC.findall(open(recipe, encoding="utf-8").read()):
+    stem = re.sub(r"\.bbappend$|\.bb$", "", os.path.basename(recipe))
+    pn, _, pv = stem.partition("_")
+    text = open(recipe, encoding="utf-8").read()
+    # ${BP} = ${BPN}-${PV}. PV comes from the recipe filename when it carries
+    # a version, else from an explicit assignment, else bitbake's own default
+    # of "1.0". A .bbappend's version may be a "%" wildcard, which names no
+    # directory - drop those.
+    if not pv:
+        m = PV_ASSIGN.search(text)
+        pv = m.group(1) if m else "1.0"
+    bp = f"{pn}-{pv}" if "%" not in pv and "${" not in pv else None
+    for name in SRC.findall(text):
         if "${" in name:
             continue
         checked += 1
-        # bitbake's default FILESPATH: <recipedir>/<pn>/, <recipedir>/files/,
-        # <recipedir>/ - plus the machine/distro dirs, which this layer
-        # doesn't use.
+        # bitbake's default FILESPATH: <recipedir>/<BP>/, <recipedir>/<BPN>/,
+        # <recipedir>/files/, <recipedir>/ - plus the machine/distro dirs,
+        # which this layer doesn't use. BP (name-version) is searched before
+        # BPN, so a versioned subdirectory is a legitimate place to put files
+        # and must not be reported as missing.
+        subs = ([bp] if bp else []) + [pn, "files", ""]
         if not any(os.path.exists(os.path.join(rdir, sub, name))
-                   for sub in (pn, "files", "")):
+                   for sub in subs):
             bad.append(f"  {recipe} -> file://{name}")
 print(f"  {checked} file:// reference(s) in {len(recipes)} recipe(s) checked")
 if bad:
