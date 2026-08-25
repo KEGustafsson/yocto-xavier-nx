@@ -11,6 +11,7 @@ IMAGE_INSTALL:append = " \
     boat-docker-config \
     boat-hmi-autostart \
     boat-compose \
+    boat-power \
     kernel-modules \
     "
 
