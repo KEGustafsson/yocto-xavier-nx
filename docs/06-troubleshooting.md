@@ -25,7 +25,7 @@
 | `initrd-flash` fails late for another reason | Read the named `log.initrd-flash.<timestamp>`; add `--debug` for verbose logs. |
 | Permissions errors | Run the flash under `sudo` (the scripts already do). |
 | Wrong `/dev/sdX` for `--host-drive` | Re-check `lsblk`; writing the wrong disk is irreversible. |
-| Rootfs write seems to hang | Not actually hung, just slow: 64 GiB over recovery-mode USB 2.0 realistically takes 20-30 minutes. Only worry if it's stalled well past that. |
+| Rootfs write seems to hang | Not actually hung, just slow: the flasher writes the whole `ROOTFSPART_SIZE` over recovery-mode USB 2.0, non-sparse. At the 16 GiB default that is roughly 5-8 minutes; at the old 64 GiB it was 20-30. Only worry if it's stalled well past that. |
 
 ## bitbake itself
 

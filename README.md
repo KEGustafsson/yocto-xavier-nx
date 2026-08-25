@@ -84,7 +84,7 @@ All knobs are in [`scripts/env.sh`](scripts/env.sh) and override from the shell:
 |----------|---------|---------|
 | `MACHINE` | `jetson-xavier-nx-devkit` | or `jetson-xavier-nx-devkit-emmc` |
 | `BOOTDEV` | `nvme0n1p1` | rootfs device; empty = stock SD layout |
-| `ROOTFS_SIZE_BYTES` | `68719476736` | APP partition size (64 GiB) |
+| `ROOTFS_SIZE_BYTES` | `17179869184` | APP partition size (16 GiB). Small on purpose — the flasher writes it non-sparse over USB 2.0. `boat-grow-rootfs --grow` claims the rest of the SSD on first boot |
 | `IMAGE` | `core-image-base` | build target; `boat-image` for Phase 2 |
 | `YOCTO_BRANCH` | `kirkstone` | layer branch |
 

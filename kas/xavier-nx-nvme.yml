@@ -81,4 +81,4 @@ local_conf_header:
     UNINATIVE_CHECKSUM[aarch64] = "8cf46c7ba75ebb1863fd6b74cf7d7ab910a3e99de4f01b1e9490babf8e6b9e05"
     # Boot the rootfs from the first NVMe SSD:
     TNSPEC_BOOTDEV = "nvme0n1p1"
-    ROOTFSPART_SIZE = "68719476736"
+    ROOTFSPART_SIZE = "17179869184"
