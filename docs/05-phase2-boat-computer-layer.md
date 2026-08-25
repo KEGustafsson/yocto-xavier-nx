@@ -103,7 +103,7 @@ the **network** rather than a local GPS.
 ## What you get
 
 `boat-image` = `core-image-base` + `packagegroup-boat` + the local
-`boat-docker-config`/`boat-hmi-autostart`/`boat-compose`/`boat-power`
+`boat-docker-config`/`boat-hmi-autostart`/`boat-compose`/`boat-power`/`boat-grow-rootfs`
 recipes. Grouped so
 you can trim it — package names below were cross-checked against this
 project's actual fetched layers (kirkstone), not guessed:
@@ -113,13 +113,14 @@ project's actual fetched layers (kirkstone), not guessed:
 | `-containers` | `docker-ce` (meta-virtualization's default `virtual/docker` provider — `docker-moby` is a valid alternative but gets skipped as a runtime target unless you override the preference), `python3-docker-compose`, `ca-certificates` |
 | `-nvidia-container` ⚠️ | `nvidia-container-toolkit` (pulls in `libnvidia-container-tools` + `tegra-configs-container-csv`) — **unproven on kirkstone, prototype first, see risks** |
 | `-nvidia-host` | `tegra-argus-daemon` (CSI cameras). Tegra userspace driver libs (`tegra-libraries-*`) are already pulled in by the BSP, not listed again |
+| `-cuda` | `cuda-toolkit` (CUDA 11.4 — `nvcc`, cudart, cuBLAS/cuFFT/cuRAND/cuSOLVER/cuSPARSE/NPP, nvrtc, cuDLA), `cudnn` (8.6.0), `tensorrt-core` + `tensorrt-plugins` + `tensorrt-trtexec` (8.5.2), `python3-tensorrt` — JetPack's "SDK Components" half, fetched from NVIDIA's public Jetson deb feed. Several GB; drop it, or swap `cuda-toolkit` for `cuda-libraries`, if the host only ever runs containers |
 | `-jetson` | `tegra-nvpmodel`, `tegra-nvfancontrol`, `tegra-tools` (`jetson_clocks`/`tegrastats`), `python3-jetson-stats` (jtop) |
-| `-connectivity` | `networkmanager`, `modemmanager`, `avahi-daemon`+`avahi-utils`, `bluez5`, `hostapd`, `dnsmasq`, `iw`, `wireless-regdb-static`, `wireguard-tools`, `chrony` |
-| `-hmi` | `packagegroup-core-x11-xserver` (expands to meta-tegra's own `XSERVER`: `xserver-xorg` + NVIDIA's `xserver-xorg-video-nvidia`), `packagegroup-xfce-base` (xfwm4, xfce4-session, xfce4-panel, xfdesktop, xfce4-settings, thunar, xfce4-terminal, …), `xinit`, `xauth`, `xrandr`, `xset`, `xdpyinfo`, `dbus`, `ttf-dejavu-sans` — browsers/apps themselves are containers, not packages |
+| `-connectivity` | `networkmanager` + `networkmanager-nmcli` + `networkmanager-nmtui` (the TUI is a separate package — without it there is no console Wi-Fi picker), `modemmanager`, `avahi-daemon`+`avahi-utils`, `bluez5`, `hostapd`, `dnsmasq`, `iw`, `wireless-regdb-static`, `wireguard-tools`, `chrony` |
+| `-hmi` | `packagegroup-core-x11-xserver` (expands to meta-tegra's own `XSERVER`: `xserver-xorg` + NVIDIA's `xserver-xorg-video-nvidia`), `packagegroup-xfce-base` (xfwm4, xfce4-session, xfce4-panel, xfdesktop, xfce4-settings, thunar, xfce4-terminal, …), `xinit`, `xauth`, `xrandr`, `xset`, `xdpyinfo`, `dbus`, `ttf-dejavu-sans`, `network-manager-applet` + `blueman` (the Wi-Fi and Bluetooth tray applets — both autostart via `/etc/xdg/autostart` into the panel systray) — browsers/apps themselves are containers, not packages |
 | `-reliability` | `watchdog` (not `watchdog-keepalive` too — upstream declares them mutually exclusive alternatives) |
 | `-security` | `openssh`, `nftables` |
 | `-nettools` | `iproute2`, `net-tools`, `iputils`, `bmon`, `tcpdump`, `mtr`, `traceroute`, `ethtool`, `iftop`, `curl`, `nmap`, `libqmi`/`libmbim` (cellular debug) |
-| `-tools` | `nvme-cli`, `i2c-tools`, `usbutils`, `pciutils`, `htop`, `tmux`, `rsync`, `nano`, `minicom`, `git` (for `/data/compose`, separate from the git inside any container), `iperf3` |
+| `-tools` | `nvme-cli`, `parted`, `gptfdisk`, `e2fsprogs-resize2fs` (see [Reclaiming the rest of the SSD](#reclaiming-the-rest-of-the-ssd)), `i2c-tools`, `usbutils`, `pciutils`, `htop`, `tmux`, `rsync`, `nano`, `minicom`, `git` (for `/data/compose`, separate from the git inside any container), `iperf3` |
 
 Not available in this project's fetched kirkstone-era layers, and
 deliberately **omitted** rather than left as names that fail the build:
@@ -755,6 +756,72 @@ Two tiers:
 RAUC needs the `meta-rauc` layer, not yet fetched by this project — a
 deliberate follow-up, not started.
 
+## Reclaiming the rest of the SSD
+
+The image is flashed with a **fixed-size** root filesystem —
+`ROOTFS_SIZE_BYTES` in [`../scripts/env.sh`](../scripts/env.sh), 16 GiB by
+default — because nothing at build time knows how big the boat's SSD is, and
+because `make-sdcard` writes that whole size over recovery-mode USB 2.0 with a
+plain non-sparse `dd`. Keeping it small is what makes flashing quick; this
+command is what makes the drive fully usable afterwards.
+NVIDIA's `initrd-flash` writes a GPT that describes only that much of the
+drive, so on anything larger the remaining space is unallocated and the
+GPT's backup header sits in the middle of the disk rather than at its end.
+
+`boat-grow-rootfs` (from the `boat-grow-rootfs` recipe) reclaims it, run
+once from a terminal on the desktop after the first boot:
+
+```bash
+sudo boat-grow-rootfs            # report only — this is the default
+sudo boat-grow-rootfs --grow     # actually grow (asks to confirm)
+```
+
+**There are two different gaps, and normally only one of them applies.**
+`make-sdcard` creates the last partition with a "fill to end" flag, so after
+a flash the APP *partition* already spans the whole SSD — what is undersized
+is the *filesystem inside it*. On a 233 GiB drive that means a 231.8 GiB
+partition holding a 16 GiB ext4, and the entire job is one online
+`resize2fs`, with no partition table change at all.
+
+The other gap — unallocated space *after* the partition — only shows up if
+the partition itself is short (a hand-made layout, a restored image). For
+that case the command moves the GPT backup header to the true end of the disk
+(`sgdisk --move-second-header`), extends the partition (`sfdisk -N`, which
+keeps its type GUID, PARTUUID and name — the bootloader depends on those),
+re-reads just that partition's size (`partx -u`), and only then resizes the
+filesystem. It reports both gaps separately so it is obvious which one you
+have. `/` stays mounted throughout either way.
+
+This is safe because **`APP` is the last partition** in the NVMe layout
+meta-tegra flashes — `kernel`, `kernel-dtb`, the A/B chain reserves,
+`recovery`, `RECROOTFS`, `esp`/`esp_alt`, `UDA`, then `APP` (see
+`yocto/flash/external-flash.xml.in` after an unpack). Growing it therefore
+only ever claims space that is already free: nothing is moved and no file
+data is rewritten. The script verifies that itself rather than trusting the
+layout, and refuses if any partition is allocated past the rootfs — which is
+exactly what a hand-added `/data` partition would be. It also saves the
+original partition table to `/var/lib/boat/gpt-backup-<disk>.bin` before
+touching anything.
+
+Deliberately **not** a first-boot systemd unit: rewriting a partition table
+is the one operation on this image that can lose the whole rootfs if the
+disk isn't what was expected, and doing it unattended before anyone has
+looked at the machine buys nothing.
+
+**Verified on hardware** (Xavier NX devkit, 233 GiB NVMe, R35.6.4):
+
+```
+partition   /dev/nvme0n1p1 (no. 1)  231.8 GiB
+filesystem  ext4, 16.0 GiB - 4.3G used of 14.8G
+unallocated after the partition:      0.0 B
+filesystem short of its partition by: 215.8 GiB
+...
+resize2fs 1.46.5 — The filesystem on /dev/nvme0n1p1 is now 60764713 (4k) blocks long.
+done - / is now 217.1G
+```
+
+Re-running afterwards correctly reports "nothing to do".
+
 ## Reliability
 
 - `watchdog` tied to the Tegra hardware watchdog.
@@ -763,7 +830,9 @@ deliberate follow-up, not started.
   volumes and Docker's `data-root` are meant to live on `/data` — but that
   partition isn't provisioned by any recipe here yet, so until it is,
   `boat-image`'s rootfs has extra headroom
-  (`IMAGE_ROOTFS_EXTRA_SPACE = "4194304"`) as a stopgap.
+  (`IMAGE_ROOTFS_EXTRA_SPACE = "4194304"`) as a stopgap — and on an SSD
+  larger than 16 GiB, [`boat-grow-rootfs`](#reclaiming-the-rest-of-the-ssd)
+  turns the unallocated remainder into rootfs space.
 - Periodic `fstrim` on the NVMe; size-cap persistent journald.
 
 ## Open risks — prototype these first

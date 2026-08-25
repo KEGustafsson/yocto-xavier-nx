@@ -12,6 +12,7 @@ IMAGE_INSTALL:append = " \
     boat-hmi-autostart \
     boat-compose \
     boat-power \
+    boat-grow-rootfs \
     kernel-modules \
     "
 
@@ -66,6 +67,47 @@ EXTRA_USERS_PARAMS = "\
 # the "docker" group above, "jtop" itself is created by its owning
 # package's (python3-jetson-stats) own postinstall, not by this recipe -
 # it already exists by the time this usermod runs.
+
+# Let the console/desktop user reach root. Without this the image is a dead
+# end: "boat" has a locked password ('*' above), so `su` cannot be satisfied
+# either, and the only reason root is reachable at all today is that
+# EXTRA_IMAGE_FEATURES still carries poky's stock "debug-tweaks" - which
+# leaves root with an EMPTY password and, via ssh_allow_empty_password +
+# ssh_allow_root_login, lets that empty password in over SSH as well. That is
+# fine on a bench and wrong on a boat; this rule is what makes it safe to drop
+# debug-tweaks.
+#
+# NOPASSWD is not laziness - it is forced: the account's password is locked,
+# so any password prompt would be unsatisfiable. The grant is no wider than
+# what the login already implies, since tty1 autologs "boat" in and that user
+# is in the "docker" group, which is root-equivalent by design (a container
+# can bind-mount /). Physical access to the helm display is already root.
+#
+# Written here rather than in a recipe of its own because the user this
+# grants to is created here, a few lines up - the two want to stay together.
+# The @includedir line is appended only if sudo's own /etc/sudoers does not
+# already have one, so this works whether or not the shipped default carries
+# it.
+BOAT_HMI_USER ?= "boat"
+install_boat_sudoers() {
+    install -d -m 0750 ${IMAGE_ROOTFS}${sysconfdir}/sudoers.d
+    # Remove first: the file is left mode 0440 below, so a second pass over
+    # an existing rootfs would fail to rewrite it - silently, since a failed
+    # redirection here would not stop the rest of the postprocess.
+    rm -f ${IMAGE_ROOTFS}${sysconfdir}/sudoers.d/boat
+    cat > ${IMAGE_ROOTFS}${sysconfdir}/sudoers.d/boat <<EOF
+# Installed by boat-image.bb. The account's password is locked, so this has
+# to be NOPASSWD to be usable at all.
+${BOAT_HMI_USER} ALL=(ALL) NOPASSWD: ALL
+EOF
+    # sudo refuses to read a drop-in that is group- or world-writable.
+    chmod 0440 ${IMAGE_ROOTFS}${sysconfdir}/sudoers.d/boat
+    if ! grep -qE '^[@#]includedir[[:space:]]+/etc/sudoers\.d' \
+        ${IMAGE_ROOTFS}${sysconfdir}/sudoers 2>/dev/null; then
+        echo '@includedir /etc/sudoers.d' >> ${IMAGE_ROOTFS}${sysconfdir}/sudoers
+    fi
+}
+ROOTFS_POSTPROCESS_COMMAND += "install_boat_sudoers; "
 
 # NetworkManager (packagegroup-boat-connectivity) is this image's network
 # manager, not systemd-networkd - but the base systemd package still ships
