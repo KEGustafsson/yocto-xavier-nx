@@ -12,17 +12,30 @@
 name: lint
 
 on:
+  # Branch-filtered on push so a pull request from a branch in this repo runs
+  # the job once, not twice (push + pull_request both fire otherwise).
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A new push supersedes the run in flight for the same ref; nothing here is
+# worth finishing for a commit that has already been replaced.
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   tier0:
     name: Shell, YAML, docs and recipe references
     runs-on: ubuntu-latest
+    # The whole job is seconds of work; anything past this is a hung apt
+    # mirror or a runner problem, and a 6-hour default timeout just holds a
+    # slot while saying nothing.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

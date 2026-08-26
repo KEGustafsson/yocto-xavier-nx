@@ -2,17 +2,20 @@
 
 **Status: `boat-image` has been built, flashed, and booted on real Xavier NX
 hardware.** Confirmed working on that build: `boat-hmi-autostart` (autologin
-+ a graphical session on tty1), `dockerd` (`docker ps` responds), and
-networking (internet reachable). Not yet confirmed: GPU access in containers
-via `nvidia-container-toolkit` — still the biggest open risk, see "Open
-risks" and "What's built vs deferred" at the end.
++ the XFCE session on tty1), `dockerd` (`docker ps` responds), networking
+(internet reachable), `docker compose` v2 running a real stack, SC7 sleep and
+magic-packet wake, and `boat-grow-rootfs` reclaiming a 233 GiB SSD. Not yet
+confirmed: GPU access in containers via `nvidia-container-toolkit` — still
+the biggest open risk, see "Open risks" and "What's built vs deferred" at the
+end.
 
-> **The helm display changed: Weston/Wayland → XFCE on Xorg.** The confirmed
-> boot above was the old Weston session. The desktop is now a full XFCE
-> desktop started on an Xorg server (see "HMI / XFCE autostart"), which has
-> **not** been re-validated on hardware yet. Everything else in this document
-> — Docker, the container design, networking, `/data` — is unchanged. If you
-> are reading this after a successful XFCE boot, please update this note.
+> **The helm display changed: Weston/Wayland → XFCE on Xorg.** The desktop is
+> now a full XFCE desktop started on an Xorg server (see "HMI / XFCE
+> autostart"), and it has since been booted: the greyed-out Shut Down /
+> Restart / Suspend buttons that `polkit` fixed, the `jtop` group membership,
+> and the container file-ownership finding behind the i2c/spi gid pinning all
+> came out of running it. Everything else in this document — Docker, the
+> container design, networking, `/data` — is unchanged.
 
 `meta-boat` turns the plain NVMe-booting image from Phase 1 into a **minimal,
 reliable Jetson container host**, not a box with Signal K/GNSS/CAN tooling
@@ -103,24 +106,24 @@ the **network** rather than a local GPS.
 ## What you get
 
 `boat-image` = `core-image-base` + `packagegroup-boat` + the local
-`boat-docker-config`/`boat-hmi-autostart`/`boat-compose`/`boat-power`/`boat-grow-rootfs`
+`boat-docker-config`/`boat-hmi-autostart`/`boat-compose`/`boat-power`/`boat-grow-rootfs`/`boat-firefox`/`boat-docker-compose-plugin`
 recipes. Grouped so
 you can trim it — package names below were cross-checked against this
 project's actual fetched layers (kirkstone), not guessed:
 
 | Sub-group | Packages |
 |-----------|----------|
-| `-containers` | `docker-ce` (meta-virtualization's default `virtual/docker` provider — `docker-moby` is a valid alternative but gets skipped as a runtime target unless you override the preference), `python3-docker-compose`, `ca-certificates` |
+| `-containers` | `docker-ce` (meta-virtualization's default `virtual/docker` provider — `docker-moby` is a valid alternative but gets skipped as a runtime target unless you override the preference), `boat-docker-compose-plugin` (the **v2** `docker compose` CLI plugin — this is the one to use), `python3-docker-compose` (the v1 hyphenated client, kept only because meta-virtualization packages it; it is broken on this image, see below), `ca-certificates` |
 | `-nvidia-container` ⚠️ | `nvidia-container-toolkit` (pulls in `libnvidia-container-tools` + `tegra-configs-container-csv`) — **unproven on kirkstone, prototype first, see risks** |
 | `-nvidia-host` | `tegra-argus-daemon` (CSI cameras). Tegra userspace driver libs (`tegra-libraries-*`) are already pulled in by the BSP, not listed again |
-| `-cuda` | `cuda-toolkit` (CUDA 11.4 — `nvcc`, cudart, cuBLAS/cuFFT/cuRAND/cuSOLVER/cuSPARSE/NPP, nvrtc, cuDLA), `cudnn` (8.6.0), `tensorrt-core` + `tensorrt-plugins` + `tensorrt-trtexec` (8.5.2), `python3-tensorrt` — JetPack's "SDK Components" half, fetched from NVIDIA's public Jetson deb feed. Several GB; drop it, or swap `cuda-toolkit` for `cuda-libraries`, if the host only ever runs containers |
+| `-cuda` | `cuda-toolkit` (CUDA 11.4 — `nvcc`, cudart, cuBLAS/cuFFT/cuRAND/cuSOLVER/cuSPARSE/NPP, nvrtc, cuDLA), `cudnn` (8.6.0), `tensorrt-core` + `tensorrt-plugins` + `tensorrt-trtexec` (8.5.2), `python3-tensorrt`, `opencv` + `python3-opencv` (CUDA-accelerated — see the recipe's comment on why this beats JetPack's own build), `libnvvpi2` (VPI 2, the only route to the PVA/VIC engines), `tegra-mmapi-dev` — JetPack's "SDK Components" half, fetched from NVIDIA's public Jetson deb feed. Several GB; drop it, or swap `cuda-toolkit` for `cuda-libraries`, if the host only ever runs containers |
 | `-jetson` | `tegra-nvpmodel`, `tegra-nvfancontrol`, `tegra-tools` (`jetson_clocks`/`tegrastats`), `python3-jetson-stats` (jtop) |
-| `-connectivity` | `networkmanager` + `networkmanager-nmcli` + `networkmanager-nmtui` (the TUI is a separate package — without it there is no console Wi-Fi picker), `modemmanager`, `avahi-daemon`+`avahi-utils`, `bluez5`, `hostapd`, `dnsmasq`, `iw`, `wireless-regdb-static`, `wireguard-tools`, `chrony` |
-| `-hmi` | `packagegroup-core-x11-xserver` (expands to meta-tegra's own `XSERVER`: `xserver-xorg` + NVIDIA's `xserver-xorg-video-nvidia`), `packagegroup-xfce-base` (xfwm4, xfce4-session, xfce4-panel, xfdesktop, xfce4-settings, thunar, xfce4-terminal, …), `xinit`, `xauth`, `xrandr`, `xset`, `xdpyinfo`, `dbus`, `ttf-dejavu-sans`, `network-manager-applet` + `blueman` (the Wi-Fi and Bluetooth tray applets — both autostart via `/etc/xdg/autostart` into the panel systray) — browsers/apps themselves are containers, not packages |
+| `-connectivity` | `networkmanager` (`nmcli` comes with it) + `networkmanager-nmtui` (the TUI *is* a separate package — without it there is no console Wi-Fi picker), `modemmanager`, `avahi-daemon`+`avahi-utils`, `bluez5`, `hostapd`, `dnsmasq`, `iw`, `wireless-regdb-static`, `wireguard-tools`, `chrony` |
+| `-hmi` | `packagegroup-core-x11-xserver` (expands to meta-tegra's own `XSERVER`: `xserver-xorg` + NVIDIA's `xserver-xorg-video-nvidia`), `packagegroup-xfce-base` (xfwm4, xfce4-session, xfce4-panel, xfdesktop, xfce4-settings, thunar, xfce4-terminal, …), `xinit`, `xauth`, `xrandr`, `xset`, `xdpyinfo`, `ttf-dejavu-sans`, `polkit` (what lets the desktop user reboot/shut down/suspend), `network-manager-applet` + `blueman` (the Wi-Fi and Bluetooth tray applets — both autostart via `/etc/xdg/autostart` into the panel systray) — browsers/apps themselves are containers, not packages |
 | `-reliability` | `watchdog` (not `watchdog-keepalive` too — upstream declares them mutually exclusive alternatives) |
-| `-security` | `openssh`, `nftables` |
+| `-security` | `openssh`, `nftables`, `sudo` |
 | `-nettools` | `iproute2`, `net-tools`, `iputils`, `bmon`, `tcpdump`, `mtr`, `traceroute`, `ethtool`, `iftop`, `curl`, `nmap`, `libqmi`/`libmbim` (cellular debug) |
-| `-tools` | `nvme-cli`, `parted`, `gptfdisk`, `e2fsprogs-resize2fs` (see [Reclaiming the rest of the SSD](#reclaiming-the-rest-of-the-ssd)), `i2c-tools`, `usbutils`, `pciutils`, `htop`, `tmux`, `rsync`, `nano`, `minicom`, `git` (for `/data/compose`, separate from the git inside any container), `iperf3` |
+| `-tools` | `nvme-cli`, `parted`, `gptfdisk`, `e2fsprogs-resize2fs` (see [Reclaiming the rest of the SSD](#reclaiming-the-rest-of-the-ssd)), `i2c-tools`, `usbutils`, `pciutils`, `htop`, `tmux`, `rsync`, `nano`, `minicom`, `git` (for `/data/compose`, separate from the git inside any container), `iperf3`, `bash` |
 
 Not available in this project's fetched kirkstone-era layers, and
 deliberately **omitted** rather than left as names that fail the build:
@@ -143,7 +146,7 @@ for the authoritative, commented list.
   `scripts/01-fetch-layers.sh` already makes, so nothing extra is fetched;
   `scripts/02-configure-build.sh` just adds them to `bblayers.conf`.
 - `scripts/02-configure-build.sh` sets
-  `DISTRO_FEATURES:append = " virtualization opengl pam x11"` in
+  `DISTRO_FEATURES:append = " virtualization opengl pam x11 polkit"` in
   `local.conf` (build-wide, not per-image — `DISTRO_FEATURES` gates other
   recipes' `REQUIRED_DISTRO_FEATURES` at parse time, so an image-recipe-local
   append can't retroactively unskip them). `x11` gates `xserver-xorg`,
@@ -239,19 +242,33 @@ stack from `/data/compose` if one has been seeded there:
 ```bash
 mkdir -p /data/compose
 cp /usr/share/boat/compose-examples/signalk.yml.example /data/compose/docker-compose.yml
-# edit: pin the image digest, point /dev/ttyUSB0 at your GNSS/NMEA adapter
-systemctl start boat-compose        # or: docker-compose -f /data/compose/docker-compose.yml up -d
+# read its header first, then edit: pin the image digest, and decide whether
+# you really want the privileged/docker.sock grants it ships with
+systemctl start boat-compose        # or: docker compose -f /data/compose/docker-compose.yml up -d
 ```
 
 Put `/data/compose` under git for versioned, pull-to-update config. Note the
-CLI verb: this project's kirkstone-era meta-virtualization only packages the
-Python-based **v1** compose client (`python3-docker-compose`), so it's
-`docker-compose up -d` (hyphenated), not the `docker compose up -d` v2
-plugin syntax used in some upstream docs.
+CLI verb: it is `docker compose` (a **space**, the v2 plugin), not the
+hyphenated v1 `docker-compose`. This project's kirkstone-era
+meta-virtualization only packages the Python-based v1 client, and CONFIRMED ON
+HARDWARE it fails on this image with `ModuleNotFoundError: No module named
+'distutils'` — so `boat-docker-compose-plugin` vendors the official static v2
+binary, and that is what `boat-compose-up` runs. The examples shipped under
+`/usr/share/boat/compose-examples/` are written for v2 as well: none of them
+carries a `version:` key, which v1 would reject outright.
 
 The Signal K image expects the **host** to provide dbus/avahi/bluez, time,
 and device access (it detects a mounted host D-Bus socket and then skips its
-own avahi — see the `startup.sh` in `signalk-server-dockers`):
+own avahi — see the `startup.sh` in `signalk-server-dockers`).
+
+The block below is a **minimal illustration** of that contract, not the file
+you copied. `signalk.yml.example` is the operator's own running stack, and it
+is considerably wider: `privileged: true`, `/dev:/dev/hostdev`, and
+`/var/run/docker.sock` mounted in — which together give the container
+root-equivalent control of the host. Its header explains why (it manages
+sibling containers) and what to drop if yours does not. Read that header
+before deploying it; Signal K itself needs none of those to read sensors over
+the mounts shown here.
 
 ```yaml
 services:
@@ -267,6 +284,9 @@ services:
     group_add: ["990", "989"]                 # NUMERIC host GIDs (i2c, spi) — see note
     restart: unless-stopped
 ```
+
+Note there is no `version:` key, deliberately: Compose v2 does not want one,
+and this image's compose client is v2.
 
 - **Pin images by digest**, not mutable tags (`latest-*`, `6.3-samples`).
   Record the deployed digest in the git-tracked compose, keep the previous
@@ -288,16 +308,27 @@ services:
 ```yaml
 services:
   vision-ai:
-    image: nvcr.io/nvidia/deepstream-l4t:6.3-samples   # JP5.1 / R35
+    image: nvcr.io/nvidia/deepstream:6.3-samples-multiarch   # CHECK THIS TAG
     runtime: nvidia                # or rely on Docker's default-runtime
     network_mode: host
     volumes:
       - /tmp/argus_socket:/tmp/argus_socket             # CSI camera (Argus)
       - /data/models:/models
-    devices:
-      - /dev/video0                                     # USB camera (optional)
+    # Uncomment only if a USB camera is actually attached - an unconditional
+    # `devices:` entry makes `docker compose up` fail outright on a board
+    # without one.
+    # devices:
+    #   - /dev/video0
     restart: unless-stopped
 ```
+
+**Check the image tag against NGC before using it.** NVIDIA retired the
+separate `deepstream-l4t` repository after 6.2 in favour of multi-arch tags on
+`nvcr.io/nvidia/deepstream`, and the DeepStream release has to match the L4T
+the host runs — this project builds **R35.6.4 / JetPack 5.1.6**, while the 6.3
+images were cut against JetPack 5.1.2 (R35.4.1). Browse
+<https://catalog.ngc.nvidia.com/> for the tag that matches, rather than
+trusting the one written here.
 
 **OPEN RISK:** validate `docker run --runtime nvidia ...` sees the GPU on
 this machine/L4T combo before relying on this — `nvidia-container-toolkit`
@@ -377,7 +408,15 @@ meta-clang plus `python2.7` on the build host. A browser with six years of
 unpatched CVEs is the wrong thing to put on a boat that sits on marina wifi.
 
 The trade: the browser is a prebuilt binary Yocto did not build, so it sits
-outside the image's reproducibility and license manifests.
+outside the image's reproducibility and license manifests. And be precise
+about what the checksum buys — `SHA256SUMS` is fetched from the same host,
+over the same TLS connection, as the tarball, so it catches a corrupt or
+truncated download and a stale CDN edge, but not anyone who can serve content
+for that host. Mozilla also publishes `SHA256SUMS.asc`, signed with the
+Mozilla Software Release key; verifying that with `gpgv` against a pubkey
+shipped in the recipe is what would turn this into an authenticity check, and
+is the obvious next step. Today the trust anchor is TLS to mozilla.net and
+nothing more.
 
 There are also two container answers, useful for different reasons:
 
@@ -400,6 +439,13 @@ the HDMI screen (X11)". Build the image once from the shipped Dockerfile:
 mkdir -p /data/browser
 cp /usr/share/boat/compose-examples/Dockerfile.firefox.example /data/browser/Dockerfile
 docker build -t boat-firefox /data/browser
+
+# The profile directory has to exist AND be owned by uid 2000 before the
+# container starts. Docker creates a missing bind-mount source itself, as
+# root - and the container runs Firefox as uid 2000, which then cannot write
+# its own profile. This chown is not optional.
+mkdir -p /data/browser/profile
+chown 2000:2000 /data/browser/profile
 
 cp /usr/share/boat/compose-examples/browser.yml.example /data/compose/docker-compose.yml
 systemctl start boat-compose
@@ -483,7 +529,7 @@ session for vt1. That is why `packagegroup-boat-hmi` pulls
 | What | Where |
 |------|-------|
 | Xorg's own log | `~boat/.local/share/xorg/Xorg.0.log` (a non-root Xorg redirects there by itself; `/var/log` isn't writable) |
-| `startx` + XFCE output | `/tmp/boat-xfce-session.log` |
+| `startx` + XFCE output | `~boat/.local/share/boat-xfce-session.log` |
 | Is the session even up? | `loginctl` — expect one session for `boat` on `seat0`, `tty1` |
 
 **Keyboard layout** is set by `/etc/X11/xorg.conf.d/10-boat-keyboard.conf`
@@ -495,14 +541,23 @@ driver config itself is L4T's own `/etc/X11/xorg.conf`, shipped by
 meta-tegra's `tegra-configs-xorg` (pulled in by `xserver-xorg-video-nvidia`)
 — don't hand-write one.
 
-**Shut down / reboot from the panel menu will not work** as the `boat` user:
-`polkit` is not in `DISTRO_FEATURES`, so `systemd-logind` only grants
-power-off/reboot to root. Log Out works (that's `xfce4-session`'s own D-Bus
-call, no privilege involved). Run `poweroff` as root instead (`su -` in
-`xfce4-terminal`, or over SSH — `sudo` is not in this image), or add
-`polkit` to the `DISTRO_FEATURES:append` line in
-`scripts/02-configure-build.sh` — that also switches on `xfce4-session`'s own
-`polkit` PACKAGECONFIG.
+**Shut down / reboot / suspend from the panel menu work**, and it took two
+things to get there. `polkit` has to be installed (it is, via
+`packagegroup-boat-hmi`) *and* be in `DISTRO_FEATURES` (it is, via
+`scripts/02-configure-build.sh`) — poky gates systemd's own polkit support on
+that distro feature, so without it `logind` is built `-Dpolkit=false` and has
+no mechanism to say yes to an unprivileged caller at all. CONFIRMED ON
+HARDWARE: before that, the XFCE Log Out dialog came up with Shut Down /
+Restart / Suspend greyed out and only Log Out usable, and `sudo systemctl
+reboot` was the only way to restart the machine. polkit's stock rules for
+`org.freedesktop.login1.*` allow an *active local session* — which the tty1
+autologin session is — to do all three without a password.
+
+One thing to re-test after any change here: enabling the feature also moves
+NetworkManager from `-Dpolkit=false` (no authorization checks at all) to real
+per-action checks. Its defaults also allow active sessions, so `nm-applet`
+keeps working, but that is the part that depends on the session being on
+`seat0`.
 
 **Screen blanking** is X's default (blank after ~10 min, DPMS off after
 ~20/30 min); `xfce4-power-manager` is not installed. For an always-on helm
@@ -709,7 +764,8 @@ both:
 | `boat-wol-arm` | `/usr/bin` — arm magic-packet wake on the configured interface(s) and report what the driver actually accepted |
 | `boat-wol.service` | arms it at boot (`multi-user.target`) |
 | system-sleep hook | `${systemd_unitdir}/system-sleep/boat-power` — re-arms around *every* suspend, whatever triggered it |
-| `90-boat-wol.conf` | `/etc/NetworkManager/conf.d/` — NM's own `ethernet.wake-on-lan=magic` default |
+| `90-boat-wol.conf` | `/etc/NetworkManager/conf.d/` — NM's own `ethernet.wake-on-lan` connection default (the value is `64`, the numeric MAGIC flag: NM parses connection defaults for this property as an integer, so the keyword `magic` silently fails to parse and leaves the flag alone) |
+| `90-boat-wol` dispatcher | `/etc/NetworkManager/dispatcher.d/` — **the mechanism this actually relies on**; see "Keeping the flag armed" |
 | `/etc/default/boat-power` | the knobs (interfaces, the interlock, delay, watchdog) |
 
 Plus a `boat-power.cfg` kernel fragment (`CONFIG_SUSPEND`/`PM_SLEEP` and the
@@ -737,16 +793,28 @@ Running it over SSH is safe: `systemctl suspend` hands the request to logind
 and returns, so the output and exit status reach you before the network goes
 away. The connection then drops when the board actually suspends — an
 expected disconnect, not a failure. It must run as **root** (arming WoL and
-selecting the sleep state are both `/sys` writes); there is no `sudo` on this
-image.
+selecting the sleep state are both `/sys` writes) — either `ssh root@<boat>`,
+or `sudo boat-sleep` as the `boat` user, which has passwordless sudo.
+`boat-sleep --status` is the exception: it reads only world-readable state and
+needs no privileges at all.
 
 ### Waking it up
 
 ```bash
-./scripts/wake-boat.sh 48:b0:2d:11:22:33          # from the build host
+wol/boat-wake.sh                                  # send, then wait for it to answer
+./scripts/wake-boat.sh 48:b0:2d:11:22:33          # just send the packet
 BOAT_MAC=48:b0:2d:11:22:33 ./scripts/wake-boat.sh # or from the environment
 wakeonlan 48:b0:2d:11:22:33                       # any WoL tool does
 ```
+
+Prefer [`wol/boat-wake.sh`](../wol/boat-wake.sh). It sends the same packet —
+it calls `scripts/wake-boat.sh` to build it, so there is one sender to keep
+correct — and then adds the half that matters: waiting until the board
+actually answers, and telling you when it does not. `wol/boat-sleep.sh` is
+its counterpart for the sleep side. Both read the boat's MAC and address from
+`wol/boat.conf` (git-ignored; copy `wol/boat.conf.example`), and so does
+`scripts/wake-boat.sh` when run on its own. See
+[`wol/README.md`](../wol/README.md).
 
 A magic packet is one unacknowledged UDP datagram (port 9) carrying
 `ff:ff:ff:ff:ff:ff` followed by the target MAC sixteen times — nothing
@@ -768,19 +836,34 @@ the sender. Two things decide whether it arrives:
 ### Keeping the flag armed
 
 Wake-on-LAN is a per-interface flag that is easy to lose, so it is set in
-three places rather than one:
+four places rather than one — and the fourth is the one that makes it stick:
 
 1. **`boat-wol.service`** at boot, via `ethtool -s eth0 wol g`, plus
    `/sys/class/net/eth0/device/power/wakeup` so the bus glue is allowed to
-   wake the system too.
+   wake the system too. Ordered `After=network-online.target`: CONFIRMED ON
+   HARDWARE, the `nvethernet` driver reports no Wake-on-LAN support at all
+   until the PHY attaches at link-up, which on a real boot was 4.4 seconds
+   after this unit first ran and failed.
 2. **NetworkManager's own default** (`90-boat-wol.conf`). NM re-applies the
    connection profile's WoL setting on every activation — a cable replug, a
    profile edit, a resume — so without this it would quietly clear what
-   `ethtool` set at boot. Both are set to magic-packet, so they agree
-   instead of fighting.
+   `ethtool` set at boot. Note it is written as `ethernet.wake-on-lan=64`,
+   not `magic`: NM reads *connection defaults* for this property with an
+   integer parser, and an unparseable value makes it leave the flag alone.
 3. **The system-sleep hook**, on both sides of every suspend: immediately
    before (last chance) and immediately after (drivers that re-probe the MAC
    on resume come back with `wol=d`).
+4. **The NetworkManager dispatcher script**
+   (`/etc/NetworkManager/dispatcher.d/90-boat-wol`) — and this is the durable
+   fix, not a belt-and-braces extra. CONFIRMED ON HARDWARE: on a real
+   suspend/resume cycle NM tore the interface down **41 milliseconds** after
+   the sleep hook armed it, then brought it back applying the profile's own
+   setting and cleared the flag. Anything that arms WoL *before* NM finishes
+   is racing a fight it will lose. A dispatcher script cannot lose that race,
+   because NM calls it after the activation it would otherwise clobber — which
+   covers boot, resume from SC7, and a cable replugged mid-voyage in one
+   mechanism. Items 1-3 are the early-boot and belt-and-braces effort;
+   this is what keeps the flag set.
 
 **"Armed" means both halves**, and `boat-wol-arm` reads both *back* from
 sysfs rather than trusting either write: the MAC's `Wake-on: g`, and — where
@@ -805,21 +888,28 @@ remote `boat-sleep`.
 | `BOAT_SLEEP_DELAY` | `3` | seconds before logind is asked, so an SSH session closes cleanly |
 | `BOAT_SLEEP_STOP_WATCHDOG` | `0` | stop/start `watchdog.service` around the sleep |
 
-### Not verified on hardware yet
+### What has and has not been verified on hardware
 
-This is written, not yet booted — treat every line below as a thing to
-confirm on the bench before relying on it at sea:
+Verified on a Xavier NX devkit: the board sleeps to SC7 and comes back on a
+magic packet. The specifics that came out of those runs are recorded where
+they matter rather than here — the 4.4 s PHY-attach gap in
+`boat-wol.service`, the 41 ms NetworkManager teardown in
+`boat-wol-dispatcher.sh`, and the driver name (`nvethernet`) in
+`boat-wol-arm.sh`. `wol/README.md` has a timestamped trace of a full
+sleep-and-wake cycle.
 
-- **Does the devkit's Ethernet actually support magic-packet wake?** The
-  answer is entirely in the driver + PHY + carrier board, not in this layer:
-  the MAC must keep the `g` flag, the PHY must stay powered through SC7, and
-  the wake signal must be wired to the always-on domain. `ethtool -i eth0`
-  names the driver and `boat-wol-arm` reports what it offers — start there
-  and believe the board, not this document.
-- **Does SC7 come up at all?** `boat-sleep --status` should report a `deep`
-  state. If `/sys/power/mem_sleep` offers only `s2idle`, the BSP is not
-  giving you SC7 and suspend would be a shallow idle loop instead — worth
-  knowing *before* the boat is unattended.
+Still to confirm on your own bench, because they are properties of the board
+and its wiring rather than of this layer:
+
+- **Your** devkit's Ethernet. The answer is in the driver + PHY + carrier
+  board: the MAC must keep the `g` flag, the PHY must stay powered through
+  SC7, and the wake signal must be wired to the always-on domain. `ethtool -i
+  eth0` names the driver and `boat-wol-arm` reports what it offers — believe
+  the board, not this document.
+- **That SC7 comes up on your BSP.** `boat-sleep --status` should report a
+  `deep` state. If `/sys/power/mem_sleep` offers only `s2idle`, suspend would
+  be a shallow idle loop instead — worth knowing *before* the boat is
+  unattended.
 - **The hardware watchdog.** `watchdog` (in `-reliability`) feeds the Tegra
   watchdog; whether that timer keeps counting across SC7 and resets the
   board mid-sleep is untested. A board that reboots itself a minute into
@@ -898,6 +988,22 @@ exactly what a hand-added `/data` partition would be. It also saves the
 original partition table to `/var/lib/boat/gpt-backup-<disk>.bin` before
 touching anything.
 
+**Decide about `/data` first.** `--grow` extends the rootfs partition to the
+last usable sector, so once it has run there is no unallocated space left to
+carve a separate `/data` partition out of — and `/data` is where
+`daemon.json` points Docker's `data-root` and where `boat-compose` looks for
+your stack. The two shipped features are in tension and this is the moment
+that decides between them:
+
+- **Everything on one filesystem** (what happens today if you just run
+  `--grow`): `/data` stays a directory on the grown rootfs. Simple, and fine
+  for a bench or a boat you reflash rarely. A read-only root is then off the
+  table.
+- **A separate `/data`**: create that partition *before* growing, then run
+  `boat-grow-rootfs` — it will refuse to extend the partition (correctly: a
+  partition is now allocated past the rootfs) and do the filesystem-only half
+  of the job, which is the half that matters after a normal flash anyway.
+
 Deliberately **not** a first-boot systemd unit: rewriting a partition table
 is the one operation on this image that can lose the whole rootfs if the
 disk isn't what was expected, and doing it unattended before anyone has
@@ -932,21 +1038,21 @@ Re-running afterwards correctly reports "nothing to do".
 
 ## Open risks — prototype these first
 
-None of this has been built or flashed yet, so all of the following are
-unresolved:
+The image builds, flashes and boots (see the status note at the top). What is
+listed here is what those boots did *not* settle:
 
 1. **`nvidia-container-toolkit` on meta-tegra kirkstone.** This is the
    linchpin for GPU-in-container and the least certain piece. Validate a
-   `deepstream-l4t` container seeing the GPU **before** committing to the
-   rest.
+   DeepStream container seeing the GPU **before** committing to the rest.
 2. **DLA / ISP exposure into the container** (accelerator visibility, not
    just the GPU).
 3. **CSI camera via `nvargus-daemon` socket** across the container boundary.
 4. **Image size / partition growth** — Docker `data-root` on NVMe, and the
    `/data` partition itself doesn't exist yet.
 
-5. **Unprivileged Xorg on the Tegra X driver** — new with the XFCE switch and
-   not yet booted. `boat-hmi-autostart` starts Xorg as the `boat` user,
+5. **Unprivileged Xorg on the Tegra X driver** — it comes up, but it is the
+   least conventional part of this image and worth understanding before you
+   change anything around it. `boat-hmi-autostart` starts Xorg as the `boat` user,
    relying on `systemd-logind` for DRM master and input devices; L4T's own
    Ubuntu images run X as root under a display manager instead. The
    NVIDIA `nvidia_drv.so` also wants `/dev/nvhost-*` and `/dev/nvmap`, which
@@ -955,16 +1061,28 @@ unresolved:
    of those two it was; running the same `startx` line as root from tty1 is
    the quick way to confirm it's a privilege problem rather than a driver one.
 
-6. **SC7 deep sleep and Wake-on-LAN.** Whether this board suspends to
-   `deep` at all, whether its Ethernet driver/PHY supports magic-packet wake
-   through that state, and whether the hardware watchdog keeps counting
-   across it. `boat-sleep --status` answers the first two on the bench in a
-   second; the third shows up as a board that reboots itself a minute into
-   every sleep. See
-   [Power](#power-wake-on-lan-and-remote-sc7-suspend) — the interlock in
-   `boat-sleep` means a failure here refuses to sleep rather than stranding
-   the board, but a remote-sleep workflow you can't use is still a
+6. **The hardware watchdog across SC7.** Sleep and magic-packet wake both
+   work on this board (see
+   [Power](#power-wake-on-lan-and-remote-sc7-suspend)); what is still untested
+   is whether the Tegra watchdog keeps counting through SC7 and resets the
+   board mid-sleep. The symptom is a board that reboots itself a minute into
+   every sleep — set `BOAT_SLEEP_STOP_WATCHDOG=1` if you see it. On a
+   *different* board, re-check the first two as well: the interlock in
+   `boat-sleep` means an unsupported PHY refuses to sleep rather than
+   stranding the machine, but a remote-sleep workflow you can't use is still a
    workflow you don't have.
+
+7. **`/data` is not provisioned by anything.** `daemon.json` points Docker's
+   `data-root` at `/data/docker` and `boat-compose` reads `/data/compose`, but
+   no recipe creates that partition or mount. Today dockerd simply creates the
+   directory on the rootfs, which works and quietly spends the space the
+   16 GiB flashed rootfs was meant to keep clear — hence
+   `IMAGE_ROOTFS_EXTRA_SPACE` and the log-size caps in `daemon.json`.
+   `boat-docker-config` ships a `docker.service` drop-in with
+   `RequiresMountsFor=/data` so dockerd waits for the mount rather than
+   racing it on the day it appears; and see
+   [Reclaiming the rest of the SSD](#reclaiming-the-rest-of-the-ssd), because
+   `boat-grow-rootfs --grow` takes the space a `/data` partition would need.
 
 (The Firefox-in-container Wayland-socket-handshake risk from an earlier draft
 of this doc is gone — the deployed approach, `linuxserver/firefox`, doesn't
@@ -978,34 +1096,40 @@ UI" above.)
   `-security`, `-nettools`, updated `-connectivity`/`-reliability`/`-tools`).
 - ✅ Kernel `.bbappend` with the Docker + i2c/spi/usb-serial fragment.
 - ✅ `boat-docker-config` (`daemon.json`: nvidia default-runtime, data-root
-  on `/data` — the `/data` mount itself is not provisioned). **Confirmed on
-  hardware:** `dockerd` starts and `docker ps` responds.
+  on `/data`, json-file logs capped at 3 × 10 MB; plus a `docker.service`
+  drop-in with `RequiresMountsFor=/data`). The `/data` mount itself is still
+  not provisioned. **Confirmed on hardware:** `dockerd` starts and `docker ps`
+  responds.
 - ✅ `boat-hmi-autostart` (fixed `boat`/UID 2000 autologin on tty1, then
   `startx` → `xfce4-session`, see "HMI / XFCE autostart"). No
-  touchscreen-specific calibration wired up. **Confirmed on hardware:** the
-  autologin-and-launch-a-session-from-tty1 mechanism, in its Weston form.
-  ❓ The XFCE/Xorg form of it is written but not yet flashed and booted.
+  touchscreen-specific calibration wired up. **Confirmed on hardware** in its
+  XFCE/Xorg form — the `polkit` and `jtop`-group findings recorded elsewhere
+  in this document both came out of running it.
 - ✅ X11 for containerized GUI apps — now the desktop's own X server rather
   than XWayland, and with a per-container mounted MIT-MAGIC-COOKIE instead of
   the Weston-era blanket `xhost +local:` grant. See "Container GUI apps on
-  the HDMI screen (X11)". ❓ Not yet re-confirmed on hardware.
+  the HDMI screen (X11)".
 - ✅ `boat-compose` (example compose files including `x11-app.yml.example` +
   `boat-compose.service`). **Confirmed on hardware:** `linuxserver/firefox`
   (KasmVNC-based, so it never touches the host display - see "Deploying an
   app: Firefox as the helm UI")
-  pulled and ran successfully via `docker-compose up -d`.
+  pulled and ran successfully via `docker compose up -d`.
 - ✅ `boat-docker-compose-plugin` (vendored static `docker compose` v2
   binary) — the only compose client meta-virtualization packages on this
   kirkstone snapshot is v1 (`python3-docker-compose`, hyphenated
-  `docker-compose`); this adds the v2 `docker compose` space-separated form
-  too. **Confirmed on hardware** (as a manual `~/.docker/cli-plugins`
-  install first, then baked into the recipe).
+  `docker-compose`), and CONFIRMED ON HARDWARE that one fails on this image
+  with `ModuleNotFoundError: No module named 'distutils'`. This is therefore
+  the compose client to use, not an alternative: `boat-compose` depends on it
+  and `boat-compose-up` execs it. **Confirmed on hardware** (as a manual
+  `~/.docker/cli-plugins` install first, then baked into the recipe).
 - ✅ `boat-power` (Wake-on-LAN armed at boot, on both sides of every
-  suspend and by NetworkManager itself; `boat-sleep` for remote SC7 suspend
-  with a refuse-to-sleep-without-a-wake-path interlock; `scripts/wake-boat.sh`
-  as the host-side sender). ❓ Written, **not booted** — the driver/PHY
-  question and the watchdog-across-SC7 question both need hardware, see
-  "Power".
+  suspend, by NetworkManager's own default and — the mechanism that actually
+  holds — by a NetworkManager dispatcher script; `boat-sleep` for remote SC7
+  suspend with a refuse-to-sleep-without-a-wake-path interlock;
+  `wol/boat-sleep.sh` / `wol/boat-wake.sh` on the host, over
+  `scripts/wake-boat.sh` as the sender). **Confirmed on hardware:** a full
+  sleep and magic-packet wake. ❓ Still open: whether the hardware watchdog
+  keeps counting across SC7, see "Power".
 - ✅ `bash` installed and set as the default login shell for both `root`
   and `boat` (`packagegroup-boat-tools` + `EXTRA_USERS_PARAMS` in
   `boat-image.bb`).
@@ -1017,5 +1141,12 @@ UI" above.)
   packaged in this project's fetched kirkstone-era layers.
 - ❌ RAUC A/B updates, the `/data` partition itself, and the interactive
   build-time user/SSH-key provisioning flow — later hardening, not started.
+- ⚠️ **Credentials.** Root and `boat` both have an *empty* password, sshd
+  accepts root logins and empty passwords, and `boat` has passwordless sudo
+  and `docker` group membership (root-equivalent). Anyone who can reach port
+  22 has root with no credential. Deliberate for a bench image, declared
+  explicitly in `boat-image.bb` rather than inherited from `debug-tweaks` —
+  and the thing to reverse first before this goes near an untrusted network.
+  See "Build-time user & SSH" above.
 
 Next: [`06-troubleshooting.md`](06-troubleshooting.md)

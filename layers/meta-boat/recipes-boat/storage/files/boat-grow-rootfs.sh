@@ -45,6 +45,16 @@
 # The script re-checks that "APP is last" itself rather than trusting the
 # layout, and refuses if anything is allocated past the rootfs.
 #
+# IT COMPETES WITH A SEPARATE /data PARTITION, AND ONLY ONE OF YOU CAN WIN
+# --grow extends the rootfs to the last usable sector, so afterwards there is
+# no unallocated space left to carve /data out of - and /data is where
+# daemon.json points Docker's data-root and where boat-compose looks for the
+# operator's stack. If you want /data on its own partition, create it FIRST:
+# this script then correctly refuses the partition half of the job (something
+# is allocated past the rootfs) and does the filesystem-only half, which is
+# the half that matters after a normal flash anyway. See
+# docs/05-phase2-boat-computer-layer.md "Reclaiming the rest of the SSD".
+#
 # If power is lost between the partition edit and resize2fs, just run it
 # again - it picks up wherever it stopped.
 set -eu

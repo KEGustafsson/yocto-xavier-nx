@@ -17,6 +17,12 @@ also be overridden per-invocation:
 BOAT_HOST=192.168.0.99 wol/boat-wake.sh
 ```
 
+The environment always wins over the file, including for the `BOAT_WOL_*`
+sender knobs and including when you deliberately pass an empty value.
+`scripts/wake-boat.sh` reads the same `wol/boat.conf`, so running the sender
+on its own honours the broadcast address you configured rather than falling
+back to `255.255.255.255`.
+
 ## What each one does
 
 | | |
@@ -34,9 +40,23 @@ watching from outside to find out whether it *actually* slept, and whether it
 *actually* came back. `boat-sleep`'s own SSH connection dies either way, so
 its exit status cannot tell you, and nothing acknowledges a magic packet.
 
-Useful flags: `--status` (report readiness, suspend nothing), `--force`
-(sleep even with Wake-on-LAN unarmed — it will not wake over Ethernet),
-`--no-wait` on either script.
+Useful flags, all passed straight through to `boat-sleep` on the board:
+`--status` (report readiness, suspend nothing), `--dry-run` (run every check,
+stop before suspending), `--force` (sleep even with Wake-on-LAN unarmed — it
+will not wake over Ethernet), `--delay N`. Plus `--no-wait` on either script,
+which is local: send the request and return rather than watching what happens.
+
+`--status` and `--dry-run` skip the "did it go quiet?" wait, because nothing
+was asked to go down — and `--status` also skips the liveness check that the
+other modes do first, so it is usable on precisely the board you need it for:
+one that is not answering.
+
+`BOAT_SSH_USER` may be `root` or `boat`; for anything other than root the
+wrapper prefixes `sudo -n`, which works because the `boat` account has
+passwordless sudo. SSH runs with `BatchMode=yes`, so a changed host key (which
+reflashing guarantees) fails immediately instead of hanging on a prompt — set
+`BOAT_SSH_OPTS` to point at a separate `known_hosts` while a board is being
+reflashed.
 
 ## Measured behaviour
 

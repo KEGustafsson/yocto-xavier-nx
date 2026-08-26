@@ -95,6 +95,11 @@ services:
       - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket
     # See note 1 at the top before keeping these.
     privileged: true
+    # NOT a hardening setting - "no-new-privileges:false" is the Docker
+    # default, so this line changes nothing, and next to `privileged: true`
+    # above it would be meaningless even if it did. Kept only because it is in
+    # the stack this file was taken from verbatim; delete it along with
+    # privileged when you drop the sibling-container management.
     security_opt:
       - no-new-privileges:false
     cap_add:

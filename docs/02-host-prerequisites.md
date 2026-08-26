@@ -9,9 +9,14 @@
   ~2022) predates their toolchains and the build scripts compensate for it:
   - `scripts/02-configure-build.sh` points `-native` builds at `gcc-12`/`g++-12`
     instead of the system compiler, because newer GCC defaults (C23) break old
-    gnulib/K&R code bundled in several `-native` recipes. **Install these
-    yourself first** — the dep script doesn't, since only very new hosts need
-    them: `sudo apt-get install gcc-12 g++-12`.
+    gnulib/K&R code bundled in several `-native` recipes.
+    `scripts/00-install-host-deps.sh` installs them, and the configure script
+    only writes the `BUILD_CC`/`BUILD_CXX` lines when both binaries actually
+    exist — it used to write them unconditionally, so a host without gcc-12
+    failed twenty minutes into a build with `/usr/bin/gcc-12: No such file or
+    directory` from some unrelated recipe. If your archive has no `gcc-12`
+    (Ubuntu 20.04), the dep script says so and the build uses the host
+    compiler, which is correct there because it is already GCC 9.
   - `scripts/pyfix/sitecustomize.py` patches around Python-version removals
     (e.g. `ast.Str`, gone since 3.12) and a `multiprocessing` default-method
     change (3.14) that bitbake itself hits on hosts this new.
@@ -34,8 +39,8 @@
     hasn't been tried here still warns. Add your own release the same way
     if you build on something newer.
 
-  None of this needs manual action beyond installing `gcc-12`/`g++-12` above —
-  it's automatic in the scripts — but if you hit a build failure that looks
+  None of this needs manual action — it's automatic in the scripts — but if
+  you hit a build failure that looks
   like a compiler/Python-version issue rather than a real code bug, this is
   why, and the fix likely already exists in `scripts/`.
 

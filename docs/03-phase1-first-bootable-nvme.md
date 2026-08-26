@@ -17,8 +17,8 @@ IMAGE=core-image-base ./scripts/03-build.sh
 All tunables live in [`scripts/env.sh`](../scripts/env.sh) and can be overridden
 from the shell (e.g. `MACHINE=jetson-xavier-nx-devkit-emmc`).
 
-> On a host newer than Ubuntu 22.04 (24.04, 26.04, …)? Install `gcc-12 g++-12`
-> first (`sudo apt-get install gcc-12 g++-12`) — see
+> On a host newer than Ubuntu 22.04 (24.04, 26.04, …)? `scripts/00-install-host-deps.sh`
+> installs `gcc-12 g++-12` for you — see
 > [`02-host-prerequisites.md`](02-host-prerequisites.md) for why.
 
 ## Step by step
@@ -98,8 +98,10 @@ Runs `sudo ./initrd-flash`, which RCM-boots a helper Linux over USB, writes the
 of the firmware step. Writing the rootfs itself is also not fast: it's a raw
 block write of the full `ROOTFSPART_SIZE` (not sparse-aware), so a 16 GiB
 partition over USB 2.0 (recovery mode negotiates at USB 2.0 speeds regardless
-of your cable/port) realistically takes **20-30 minutes**, not a few. Let it run;
-don't disconnect mid-write.
+of your cable/port) realistically takes **5-8 minutes** — it was 20-30 when
+`ROOTFS_SIZE_BYTES` defaulted to 64 GiB. Let it run; don't disconnect
+mid-write. See [04 — Flashing to NVMe](04-flashing-nvme.md) for what it is
+doing.
 
 - Re-flashing only the rootfs later? `./scripts/05-flash-nvme.sh --skip-bootloader`
   (skips QSPI).

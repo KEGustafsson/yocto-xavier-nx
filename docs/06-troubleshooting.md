@@ -10,7 +10,7 @@
 | `LICENSE_FLAGS_ACCEPTED` errors on NVIDIA components | Keep `LICENSE_FLAGS_ACCEPTED += "commercial"` in `local.conf`. |
 | Out of disk during build | `scripts/02-configure-build.sh` already enables `rm_work`; if you're still tight, free more disk or move `WORKROOT` to a bigger volume. |
 | Layer parse/compat error | All layers must be on the **same** `kirkstone` branch. Re-run `scripts/01-fetch-layers.sh`. |
-| `-native` recipe fails to compile (gnulib/`__has_builtin`/K&R errors, GCC-version-looking messages) | Host GCC is too new for kirkstone. Install `gcc-12 g++-12` (`scripts/02-configure-build.sh` points `-native` builds at them automatically once installed) - see `02-host-prerequisites.md`. |
+| `-native` recipe fails to compile (gnulib/`__has_builtin`/K&R errors, GCC-version-looking messages) | Host GCC is too new for kirkstone. `scripts/00-install-host-deps.sh` installs `gcc-12 g++-12` and `scripts/02-configure-build.sh` points `-native` builds at them when both are present. If they are missing, the configure script leaves `BUILD_CC` alone - install them and re-run `02-configure-build.sh`. See `02-host-prerequisites.md`. |
 | `AttributeError: module 'ast' has no attribute 'Str'` (usually during `do_rootfs`/`do_populate_lic`) | Python 3.12+ removed `ast.Str`; bitbake's own `oe.license` still uses it. `scripts/pyfix/sitecustomize.py` shims this automatically via `PYTHONPATH` - make sure `scripts/03-build.sh` is what you're using to invoke bitbake (not a bare `bitbake` in a differently-set-up shell). |
 | `_pickle.PicklingError` from bitbake's hash-equivalence server on startup | Python 3.14 changed `multiprocessing`'s default start method; also handled by `scripts/pyfix/sitecustomize.py`. Same fix as above. |
 
@@ -49,18 +49,18 @@ The desktop is Xorg + XFCE started from the `boat` user's tty1 autologin -
 see [`05-phase2-boat-computer-layer.md`](05-phase2-boat-computer-layer.md)
 "HMI / XFCE autostart". Two logs cover almost everything:
 `~boat/.local/share/xorg/Xorg.0.log` (the X server) and
-`/tmp/boat-xfce-session.log` (`startx` + the session). SSH in rather than
+`~boat/.local/share/boat-xfce-session.log` (`startx` + the session). SSH in rather than
 debugging on the console - the console *is* the thing that's broken.
 
 | Symptom | Fix |
 |---------|-----|
-| Console autologins, screen stays black, nothing in `/tmp/boat-xfce-session.log` | The `/etc/profile.d` guard didn't fire. It requires UID 2000 (`BOAT_HMI_UID`), `$DISPLAY` unset and `tty` = `/dev/tty1`; check `id -u`, and that the login shell is bash (`profile.d` is not read by `sh`). |
+| Console autologins, screen stays black, nothing in `~boat/.local/share/boat-xfce-session.log` | The `/etc/profile.d` guard didn't fire. It requires UID 2000 (`BOAT_HMI_UID`), `$DISPLAY` unset and `tty` = `/dev/tty1`; check `id -u`, and that the login shell is bash (`profile.d` is not read by `sh`). |
 | `xf86OpenConsole: Cannot open virtual console` / `Cannot open /dev/dri/card0` in `Xorg.0.log` | The unprivileged Xorg has no logind session to get devices from. `loginctl` should list one session for `boat`, `seat0`, `tty1`; if not, `pam` is missing from `DISTRO_FEATURES` or `pam_systemd` isn't in `/etc/pam.d/login`. |
-| Xorg starts but fails loading the NVIDIA driver | Confirm `xserver-xorg-video-nvidia` and `tegra-configs-xorg` are installed (`/usr/lib/xorg/modules/drivers/nvidia_drv.so`, `/etc/X11/xorg.conf`) and that `boat` is in the `video` group - meta-tegra's udev rules give `/dev/nvhost-*` to that group. As a bisect, run `startx /usr/bin/boat-xfce-session -- :0 vt1` as root from tty1 (`su -`; `sudo` is not in this image): if root works and `boat` doesn't, it's a permissions/logind problem, not a driver one. |
+| Xorg starts but fails loading the NVIDIA driver | Confirm `xserver-xorg-video-nvidia` and `tegra-configs-xorg` are installed (`/usr/lib/xorg/modules/drivers/nvidia_drv.so`, `/etc/X11/xorg.conf`) and that `boat` is in the `video` group - meta-tegra's udev rules give `/dev/nvhost-*` to that group. As a bisect, run `sudo startx /usr/bin/boat-xfce-session -- :0 vt1` from tty1: if root works and `boat` doesn't, it's a permissions/logind problem, not a driver one. |
 | Desktop comes up but the keyboard layout is wrong | `/etc/X11/xorg.conf.d/10-boat-keyboard.conf` (`XkbLayout`, from `BOAT_HMI_XKB_LAYOUT`, default `fi`). Read at X server start, so restart the session after changing it - or `setxkbmap <layout>` for a live test. |
 | Screen blanks after ~10 minutes | X's built-in screensaver; `xfce4-power-manager` isn't installed. `xset s off -dpms`, or add `-s 0 -dpms` to the `startx` server args in `boat-xfce-autostart.sh` to make it permanent. |
-| Container GUI app: `cannot open display :0` / `Authorization required` | The container needs `DISPLAY=:0`, `/tmp/.X11-unix` bind-mounted, **and** the session cookie: `XAUTHORITY=/run/boat-x11/Xauthority` with `/run/boat-x11:/run/boat-x11:ro` mounted (see docs/05 "Container GUI apps on the HDMI screen (X11)"). Check the export exists and is current: `ls -l /run/boat-x11/Xauthority`, then `XAUTHORITY=/run/boat-x11/Xauthority DISPLAY=:0 xdpyinfo \| head -3` from the desktop session. If it is missing, `/tmp/boat-xfce-session.log` says why. Mount the **directory**, not the file - the session rewrites the file on every restart, and a file mount would leave the container on the old inode. |
-| Screen flickers between console and black, repeatedly | The session is crash-looping: `xfce4-session` (or Xorg) exits, the login shell ends, agetty autologins again. `/tmp/boat-xfce-session.log` names the failure; a missing package from `packagegroup-xfce-base` is the usual cause. |
+| Container GUI app: `cannot open display :0` / `Authorization required` | The container needs `DISPLAY=:0`, `/tmp/.X11-unix` bind-mounted, **and** the session cookie: `XAUTHORITY=/run/boat-x11/Xauthority` with `/run/boat-x11:/run/boat-x11:ro` mounted (see docs/05 "Container GUI apps on the HDMI screen (X11)"). Check the export exists and is current: `ls -l /run/boat-x11/Xauthority`, then `XAUTHORITY=/run/boat-x11/Xauthority DISPLAY=:0 xdpyinfo \| head -3` from the desktop session. If it is missing, `~boat/.local/share/boat-xfce-session.log` says why. Mount the **directory**, not the file - the session rewrites the file on every restart, and a file mount would leave the container on the old inode. |
+| Screen flickers between console and black, repeatedly | The session is crash-looping: `xfce4-session` (or Xorg) exits, the login shell ends, agetty autologins again. `~boat/.local/share/boat-xfce-session.log` names the failure; a missing package from `packagegroup-xfce-base` is the usual cause. |
 
 ## Sleep / Wake-on-LAN (Phase 2)
 
@@ -79,15 +79,19 @@ offers and whether an interface is armed, without changing anything. See
 | Board wakes by itself, or reboots a minute into every sleep | If it *reboots*, suspect the hardware watchdog still counting across SC7: set `BOAT_SLEEP_STOP_WATCHDOG=1` in `/etc/default/boat-power`. If it *wakes*, another device is a wake source - `grep enabled /sys/devices/*/power/wakeup` and disable the ones you don't want, or find the culprit in `journalctl -b` right after the resume. |
 | Resumes, but nothing on the network can reach it | The link came back without its address, or WoL wasn't re-armed. `journalctl -b \| grep boat-power` covers the hook's `post` run; `nmcli device status` covers the link. Containers keep running through a suspend but any connection they held (MQTT, a registry pull) drops and has to reconnect. |
 | `boat-sleep` exits non-zero with a logind message about inhibitors | Something holds an inhibitor lock (`systemd-inhibit --list` names it - the XFCE session is the usual one). `boat-sleep --force` goes past them. |
-| `boat-sleep`: *must run as root* | It writes `/sys`. There is no `sudo` in this image - `ssh root@<boat> boat-sleep`. |
+| `boat-sleep`: *must run as root* | It writes `/sys` (arming WoL, selecting the sleep state). Either `ssh root@<boat> boat-sleep`, or as the `boat` user `sudo boat-sleep` - the account has passwordless sudo. `boat-sleep --status` needs no privileges at all and is what to reach for first. `wol/boat-sleep.sh` picks the right form for whatever `BOAT_SSH_USER` is set to. |
 
 ## CAN / NMEA 2000 (Phase 2)
 
-| Symptom | Fix |
-|---------|-----|
-| `can0` missing | CAN kernel modules absent. Ensure `boat-image` pulls `kernel-module-mttcan`/`kernel-module-can*`; check `dmesg \| grep -i can`. |
-| `candump` silent | No transceiver / termination / bus power, or wrong bitrate. NMEA 2000 = 250 kbit/s; verify `/etc/default/boat-can0`. |
-| Interface won't come up | `ip -details link show can0`; check `boat-can0.service` status/logs. |
+**There is no CAN on this host any more.** NMEA 2000 comes from an external
+interface on the boat's network, and the CAN kernel modules, `can-utils` and
+the old `boat-can0` service were all dropped from `boat-image` with it — see
+[`05-phase2-boat-computer-layer.md`](05-phase2-boat-computer-layer.md) "What
+changed from the earlier scaffold". If you are looking for `can0`,
+`/etc/default/boat-can0` or `boat-can0.service` because an older revision of
+these docs mentioned them: they are gone deliberately, not missing by
+accident. Troubleshoot the external interface on its own terms, and reach it
+over the network like any other data source.
 
 ## Where to get help
 
