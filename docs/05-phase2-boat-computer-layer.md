@@ -340,6 +340,49 @@ services:
 open this same KasmVNC URL (`localhost:3000`) in a local browser there if you
 want the Firefox container on the HDMI screen too.
 
+### A browser on the boat's own screen
+
+No browser is built into this image, and none needs to be. Firefox is not
+packaged for Yocto in any layer this project fetches; building it from source
+on kirkstone would mean adding meta-browser plus a matching Rust/cbindgen
+toolchain, and the only natively packaged browser available (`epiphany`)
+drags in a WebKitGTK build that is one of the largest compiles in all of
+Yocto.
+
+There are two container answers, and they are not interchangeable:
+
+| | `firefox.yml.example` | `browser.yml.example` |
+|---|---|---|
+| Renders | its own desktop over KasmVNC on `:3000` | directly on the HDMI screen |
+| Reach it from | any phone/tablet/laptop on the LAN | the XFCE session itself |
+| Needs a browser already? | **yes** — to open `:3000` | no |
+
+So `firefox.yml.example` is the right answer for the helm UI on other
+devices, and the wrong one if the Jetson's own screen has no browser yet —
+you would need a browser to open it.
+
+`browser.yml.example` closes that loop. It runs Firefox as an ordinary
+windowed application on the local X display, using the same socket +
+`DISPLAY` + MIT-MAGIC-COOKIE wiring described under "Container GUI apps on
+the HDMI screen (X11)". Build the image once from the shipped Dockerfile:
+
+```bash
+mkdir -p /data/browser
+cp /usr/share/boat/compose-examples/Dockerfile.firefox.example /data/browser/Dockerfile
+docker build -t boat-firefox /data/browser
+
+cp /usr/share/boat/compose-examples/browser.yml.example /data/compose/docker-compose.yml
+systemctl start boat-compose
+```
+
+It wraps Debian's maintained arm64 `firefox-esr` .deb and runs as uid 2000,
+so the profile on `/data/browser/profile` is owned by the `boat` user.
+
+> **Not yet confirmed on hardware.** The X11 plumbing is the same as
+> `signalk-kiosk.yml.example`, which is hardware-proven; Debian's firefox-esr
+> on this board is not. `docker logs firefox` shows X authorization failures
+> if the cookie mount is wrong.
+
 ### Container file ownership
 
 Containers write to bind-mounted volumes with raw numeric uid/gid — there is

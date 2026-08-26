@@ -15,6 +15,8 @@ SRC_URI = " \
     file://firefox.yml.example \
     file://x11-app.yml.example \
     file://signalk-kiosk.yml.example \
+    file://browser.yml.example \
+    file://Dockerfile.firefox.example \
     "
 
 inherit systemd allarch
@@ -35,7 +37,8 @@ do_install() {
     install -d ${D}${datadir}/boat/compose-examples
     install -m 0644 ${WORKDIR}/signalk.yml.example ${WORKDIR}/deepstream.yml.example \
         ${WORKDIR}/firefox.yml.example ${WORKDIR}/x11-app.yml.example \
-        ${WORKDIR}/signalk-kiosk.yml.example \
+        ${WORKDIR}/signalk-kiosk.yml.example ${WORKDIR}/browser.yml.example \
+        ${WORKDIR}/Dockerfile.firefox.example \
         ${D}${datadir}/boat/compose-examples/
 }
 
