@@ -1,0 +1,37 @@
+# Copy to wol/boat.conf and fill in for your boat. That copy is git-ignored:
+# it holds device-identifying addresses that should not be pushed.
+#
+# Every value here can also be overridden per-invocation from the
+# environment, e.g.:  BOAT_HOST=192.168.0.99 wol/boat-wake.sh
+
+# Address or hostname to reach the board on. Used to watch for it going down
+# and coming back; not needed to send the packet itself.
+BOAT_HOST=192.168.0.43
+
+# The MAC that wakes it - the Ethernet one, not Wi-Fi. Wake-on-LAN over
+# Wi-Fi is not armed by this image and the Xavier NX's wlan0 does not do it.
+# Read it off the board with:  cat /sys/class/net/eth0/address
+# `boat-sleep` also prints it every time it suspends.
+BOAT_MAC=48:b0:2d:11:22:33
+
+# Where to send the packet. 255.255.255.255 works only from the same layer-2
+# segment and is never routed. Use the boat LAN's directed broadcast (e.g.
+# 192.168.0.255) when this machine is on Wi-Fi and the board is on Ethernet,
+# or on a different subnet - and note most routers do not forward directed
+# broadcasts between subnets, which is the usual reason a magic packet
+# "does nothing".
+BOAT_BROADCAST=192.168.0.255
+
+# SSH user for boat-sleep.sh. Must be able to run `boat-sleep`, which needs
+# root - so either root, or the "boat" user via its passwordless sudo.
+BOAT_SSH_USER=root
+
+# Seconds to wait for the board to answer after a wake / to go quiet after a
+# sleep. A resume from SC7 measured about 7s on a Xavier NX devkit.
+#BOAT_WAKE_TIMEOUT=90
+#BOAT_SLEEP_TIMEOUT=60
+
+# Extra ssh options if you need them - a key, a port, a jump host. Handy
+# while reflashing, when the board's host key changes on every image:
+#   BOAT_SSH_OPTS="-o UserKnownHostsFile=~/.ssh/known_hosts.boat"
+#BOAT_SSH_OPTS=
