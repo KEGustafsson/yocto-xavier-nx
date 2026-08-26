@@ -325,8 +325,8 @@ services:
     security_opt:
       - seccomp=unconfined   # optional, quiets some sandbox syscall warnings
     environment:
-      - PUID=1000
-      - PGID=1000
+      - PUID=2000        # the "boat" user, so the profile is manageable
+      - PGID=2000        # from the desktop session without sudo
       - TZ=Etc/UTC
     volumes:
       - /data/firefox/config:/config   # persistent browser profile on NVMe
@@ -339,6 +339,28 @@ services:
 `boat-hmi-autostart`'s local XFCE/tty1 desktop is still useful on its own —
 open this same KasmVNC URL (`localhost:3000`) in a local browser there if you
 want the Firefox container on the HDMI screen too.
+
+### Container file ownership
+
+Containers write to bind-mounted volumes with raw numeric uid/gid — there is
+no translation, because `daemon.json` sets no `userns-remap`. So whatever uid
+the image runs its app as lands on `/data` verbatim, and `ls` on the host then
+resolves those numbers against the *host's* tables.
+
+That bites in two ways worth knowing:
+
+- Most images default to **uid/gid 1000** (`node`, `ubuntu`, `debian`, most
+  `-slim` bases). No account on this image has uid 1000 — `boat` is 2000 — so
+  such files show a bare numeric owner. Set `PUID`/`PGID` (linuxserver images)
+  or `user:` (plain images) to `2000:2000` where you want the desktop user to
+  own them.
+- gid 1000 used to be **`i2c`** here, because `boat-image.bb` created the i2c
+  and spi groups without pinning their ids and `groupadd` took the first free
+  one at/above `GID_MIN`. Container-written files were therefore group-owned
+  by a hardware-access group, so anything later added to `i2c` to reach
+  `/dev/i2c-*` also got group access to all of it. Both groups are now pinned
+  into the system range (990/989), leaving 1000/1001 unclaimed. **Not
+  retroactive** — files already written under gid 1000 need a `chgrp` sweep.
 
 ## HMI / XFCE autostart
 
