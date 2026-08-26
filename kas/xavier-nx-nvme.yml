@@ -65,8 +65,10 @@ local_conf_header:
     # what lets the desktop user reboot/shut down/suspend at all (without it
     # XFCE's Log Out dialog has those three greyed out).
     DISTRO_FEATURES:append = " virtualization opengl pam x11 polkit"
-    # Same rm_work / shared-dir choices the scripts make, so a kas build does
-    # not need 50GB+ of work directories or re-download on every re-init.
+    # Delete each recipe's work directory as it finishes; a full image build
+    # otherwise reaches 50GB+ of them. (DL_DIR/SSTATE_DIR are deliberately NOT
+    # set here, unlike scripts/02-configure-build.sh: kas manages its own work
+    # directory layout, and pinning them would fight it.)
     INHERIT += "rm_work"
     # ---- Newer-host accommodations (see docs/02 "Newer hosts") ----
     # kirkstone's tested-distro list stops at ubuntu-24.04; sanity.bbclass splits

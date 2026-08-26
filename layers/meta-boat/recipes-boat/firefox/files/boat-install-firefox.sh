@@ -121,8 +121,11 @@ installed_version() {
 # Shared curl options. Without a timeout, a marina wifi that associates and
 # then blackholes (a captive portal, a weak link) leaves this hanging with no
 # output at all - the operator sees a wedged terminal, not "no network".
-# --proto '=https' refuses a redirect that downgrades to plain HTTP.
-CURL_OPTS="--proto =https --tlsv1.2 --connect-timeout 15 --retry 3 --retry-delay 5"
+# --proto restricts the protocols of the transfer itself; --proto-redir is a
+# SEPARATE option covering where a redirect may go, and every fetch here uses
+# -L. Both are needed: without --proto-redir a 301 to http:// is still
+# followed.
+CURL_OPTS="--proto =https --proto-redir =https --tlsv1.2 --connect-timeout 15 --retry 3 --retry-delay 5"
 
 latest_version() {
     # shellcheck disable=SC2086 # CURL_OPTS is a deliberately split option list

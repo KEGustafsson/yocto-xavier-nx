@@ -28,11 +28,24 @@
 # logged and swallowed.
 set -eu
 
+# Snapshot BOAT_WOL_WAIT before sourcing the config, and put it back after:
+# the file is plain `VAR=value` assignments, so it would otherwise overwrite a
+# value passed in the environment - and the systemd-sleep hook passes
+# BOAT_WOL_WAIT=0 on resume precisely to avoid a per-interface stall while the
+# sleep operation is still open. An operator who sets BOAT_WOL_WAIT in this
+# CONFFILE (which its own comments invite) would silently get that stall back.
+# Same "environment beats the file" rule load_boat_conf applies on the host.
+_env_wol_wait="${BOAT_WOL_WAIT-}"
+_env_wol_wait_set="${BOAT_WOL_WAIT+set}"
+
 CONF=/etc/default/boat-power
 if [ -r "$CONF" ]; then
     # shellcheck source=/dev/null
     . "$CONF"
 fi
+[ "$_env_wol_wait_set" = "set" ] && BOAT_WOL_WAIT="$_env_wol_wait"
+unset _env_wol_wait _env_wol_wait_set
+
 : "${BOAT_WOL_INTERFACES:=eth0}"
 # Seconds to wait for a driver to advertise magic-packet support before
 # giving up on an interface. Only used when actually arming.

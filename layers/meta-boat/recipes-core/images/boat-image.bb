@@ -41,16 +41,30 @@ IMAGE_INSTALL:append = " \
     boat-grow-rootfs \
     boat-firefox \
     kernel-modules \
-    kernel-module-usb-serial \
     "
 
-# kernel-module-usb-serial is in IMAGE_INSTALL above, NOT in
-# MACHINE_ESSENTIAL_EXTRA_RRECOMMENDS where it used to be: that variable is
-# read by packagegroup-core-boot.bb, a DIFFERENT recipe, which cannot see an
+# USB-serial (docs/05 "Local device passthrough into containers") comes from
+# `kernel-modules` above, which installs every module the kernel built - and
+# CONFIG_USB_SERIAL plus the ftdi_sio/cp210x/ch341/pl2303 drivers are all set
+# to =m in recipes-kernel/linux/files/boat-docker.cfg.
+#
+# This used to also carry MACHINE_ESSENTIAL_EXTRA_RRECOMMENDS +=
+# " kernel-module-usb-serial", which did nothing at all: that variable is read
+# by packagegroup-core-boot.bb, a DIFFERENT recipe, which cannot see an
 # assignment made here - the same per-recipe parse trap this file warns about
-# for DISTRO_FEATURES a few lines down. It appeared to work only because
-# `kernel-modules` pulls in every module; the day that is dropped for size,
-# USB-serial support would have disappeared with no error.
+# for DISTRO_FEATURES a few lines down. The name was wrong as well. OE splits
+# kernel-module packages on the .ko BASENAME, so CONFIG_USB_SERIAL=m yields
+# usbserial.ko and therefore `kernel-module-usbserial` - no hyphen. (Compare
+# docs/05's `kernel-module-rtc-ds1307` for rtc-ds1307.ko.)
+#
+# Deliberately NOT re-added under the corrected name: IMAGE_INSTALL is a HARD
+# dependency, so a name that is still wrong fails the whole image with
+# "Nothing RPROVIDES", and the exact split-package names cannot be confirmed
+# without a kernel build. If `kernel-modules` is ever dropped for size, name
+# the specific drivers then and verify them with
+# `oe-pkgdata-util list-pkgs | grep -i usbserial`:
+#   kernel-module-usbserial  kernel-module-ftdi-sio  kernel-module-cp210x
+#   kernel-module-ch341      kernel-module-pl2303    kernel-module-cdc-acm
 #
 # CAN kernel modules dropped: NMEA 2000/CAN is provided by an external
 # interface now, not this host (docs/05 "What changed from the earlier

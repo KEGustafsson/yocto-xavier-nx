@@ -799,8 +799,14 @@ away. The connection then drops when the board actually suspends — an
 expected disconnect, not a failure. It must run as **root** (arming WoL and
 selecting the sleep state are both `/sys` writes) — either `ssh root@<boat>`,
 or `sudo boat-sleep` as the `boat` user, which has passwordless sudo.
-`boat-sleep --status` is the exception: it reads only world-readable state and
-needs no privileges at all.
+
+`boat-sleep --status` will *run* unprivileged, but it cannot answer the
+Wake-on-LAN half that way and says so rather than guessing: reading the WoL
+flag goes through ethtool's `ETHTOOL_GWOL` ioctl, which the kernel gates on
+`CAP_NET_ADMIN`, and an unprivileged `ethtool eth0` simply omits the
+`Wake-on:` lines — indistinguishable from a driver with no support. Run it
+with `sudo` (or as root) to get a real answer; unprivileged it reports
+`wake-on-lan: UNKNOWN` and tells you to.
 
 ### Waking it up
 

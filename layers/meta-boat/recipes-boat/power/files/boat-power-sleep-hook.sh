@@ -45,10 +45,12 @@ case "${1:-}" in
         # BOAT_WOL_WAIT=0: on resume the MAC has just re-probed, so it reports
         # no Wake-on-LAN support for a moment and boat-wol-arm's default
         # 15-second wait would be spent in full, PER INTERFACE, while
-        # systemd-sleep still holds the sleep inhibitor and `systemctl suspend`
-        # has not returned. NetworkManager's dispatcher (90-boat-wol) does the
-        # authoritative re-arm a moment later once the link is actually up -
-        # this call is the belt to its braces, not the mechanism.
+        # systemd-sleep is still holding the sleep operation open and has not
+        # released its inhibitor. (Not the original caller - `systemctl
+        # suspend` handed the request to logind and returned long before.)
+        # NetworkManager's dispatcher (90-boat-wol) does the authoritative
+        # re-arm a moment later once the link is actually up - this call is the
+        # belt to its braces, not the mechanism.
         if ! BOAT_WOL_WAIT=0 /usr/bin/boat-wol-arm; then
             echo "boat-power: Wake-on-LAN could not be re-armed after resume"
         fi

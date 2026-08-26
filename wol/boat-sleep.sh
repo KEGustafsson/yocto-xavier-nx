@@ -3,8 +3,13 @@
 #
 #   wol/boat-sleep.sh              # suspend, then confirm it actually went down
 #   wol/boat-sleep.sh --status     # report readiness, suspend nothing
+#   wol/boat-sleep.sh --dry-run    # run every check, stop before suspending
 #   wol/boat-sleep.sh --force      # suspend even if Wake-on-LAN is not armed
+#   wol/boat-sleep.sh --delay 10   # seconds before logind is asked
 #   wol/boat-sleep.sh --no-wait    # fire and return, don't wait for silence
+#
+# Everything except --no-wait is passed straight through to `boat-sleep` on
+# the board; --no-wait is local, and only decides whether to watch.
 #
 # This is a thin remote wrapper: the decisions all belong to `boat-sleep` on
 # the board, which refuses to suspend unless something can wake it again.
@@ -23,7 +28,7 @@ PASSTHRU=()
 for arg in "$@"; do
     case "$arg" in
         --no-wait) WAIT=0 ;;
-        -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)         PASSTHRU+=("$arg") ;;
     esac
 done

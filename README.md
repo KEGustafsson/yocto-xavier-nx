@@ -103,8 +103,8 @@ the boat), YAML syntax, the shipped compose examples against the real Compose
 schema when a `docker compose` client is present, relative links in the docs,
 and that every recipe's `file://` reference actually exists. Seconds, no
 layers fetched, no bitbake.
-`.github/workflows/lint.yml` runs exactly this script on every push, so CI
-and your machine can't drift apart.
+`.github/workflows/lint.yml` runs exactly this script on every pull request
+and on pushes to `main`, so CI and your machine can't drift apart.
 
 It is **not** a build gate, and deliberately so: it cannot catch recipe
 parse errors, unresolvable `RDEPENDS`, or packaging QA failures. That last
@@ -164,7 +164,9 @@ and waking it again from your laptop.
   Anyone who can reach port 22 has root with no credential. This is a
   deliberate choice, declared in `boat-image.bb` rather than inherited from
   `debug-tweaks` by accident — reverse it before the boat goes anywhere near
-  an untrusted network. See docs/05 "Build-time user & SSH".
+  an untrusted network. See the ⚠️ Credentials entry under docs/05 "What's
+  built vs deferred", and "Build-time user & SSH" for the key-provisioning
+  flow that would replace it.
 - Pin layer commits (`scripts/01-fetch-layers.sh` prints them) before treating
   a build as a product; `kirkstone` branches move.
 - Package names in `packagegroup-boat` target kirkstone; if one is missing on

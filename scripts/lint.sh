@@ -132,9 +132,7 @@ fi
 # YAML parse is the floor that must always run; this is the stronger check when
 # a client happens to be present.
 log "Compose examples ..."
-if [[ "${HAVE_PYTHON}" == "0" ]]; then
-    soft_skip "python3 not installed - compose examples not schema-checked"
-elif ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
     soft_skip "no 'docker compose' client - compose examples not schema-checked"
 else
     compose_bad=0
@@ -172,11 +170,17 @@ if [[ "${HAVE_PYTHON}" == "0" ]]; then
 elif python3 - <<'PY'; then
 import os, re, sys, glob
 LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
-# Every Markdown file in the repo except anything under the git-ignored
-# yocto/ working tree. An allowlist of directories is how wol/README.md
-# came to be the one document nobody link-checked.
+# Every Markdown file in the repo except the scratch trees. An allowlist of
+# directories is how wol/README.md came to be the one document nobody
+# link-checked - but the exclusions have to cover BOTH scratch layouts:
+# scripts/env.sh puts everything under yocto/, while `kas build` defaults its
+# work dir to the CWD and clones poky/ and the meta-* layers into the repo
+# ROOT. Same set .gitignore names; without it, one kas run makes this check
+# walk thousands of upstream documents and report their broken links as ours.
+SCRATCH = ("yocto/", "build/", "poky/", "meta-openembedded/", "meta-tegra/",
+           "meta-tegra-community/", "meta-virtualization/")
 docs = sorted(d for d in glob.glob("**/*.md", recursive=True)
-              if not d.startswith("yocto/"))
+              if not d.startswith(SCRATCH))
 bad, checked = [], 0
 for doc in docs:
     base = os.path.dirname(doc)

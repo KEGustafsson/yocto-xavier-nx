@@ -31,6 +31,10 @@ if [[ "${1:-}" == "--host-drive" ]]; then
   DEV="${2:-}"
   [[ -b "${DEV}" ]] || die "usage: $0 --host-drive /dev/sdX   (block device not found)"
   [[ -x ./doexternal.sh ]] || die "doexternal.sh not found - was the image built with TNSPEC_BOOTDEV set to an NVMe device?"
+  # need, not a soft check: if lsblk were missing, the guard below would see an
+  # empty MOUNTED and wave the write through. A safety check that fails open is
+  # worse than no check, because it reads like one.
+  need lsblk
   # Refuse outright if this disk carries anything currently mounted. There is
   # no undo on the write below, and "I picked the wrong /dev/sdX" is the
   # mistake this whole block exists to prevent - a confirmation prompt is not a

@@ -32,7 +32,12 @@ The files
                            root-equivalent control of the host.
   browser.yml.example      a browser in a container on the HDMI screen, with
                            the X cookie mounted from /run/boat-x11
-  firefox.yml.example      minimal Firefox-on-X11 variant of the above
+  firefox.yml.example      linuxserver/firefox - brings its own KasmVNC
+                           desktop on :3000, reached from a browser on any
+                           other machine. It never touches the host display,
+                           so it needs none of the X wiring above - and it is
+                           the wrong answer if what you want is a window on
+                           the Jetson's own screen.
   x11-app.yml.example      the smallest thing that proves the X path works
   deepstream.yml.example   NVIDIA DeepStream, GPU + camera
   Dockerfile.firefox.example  what browser.yml.example builds from

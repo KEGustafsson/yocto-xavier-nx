@@ -44,6 +44,8 @@ Suspend the boat computer to SC7 (Tegra deep sleep), leaving it wakeable
 with a Wake-on-LAN magic packet. Run it over SSH as root.
 
   -s, --status     report SC7/Wake-on-LAN readiness and exit, changing nothing
+                   (runs unprivileged, but reading the WoL flag needs root -
+                   without it the report says UNKNOWN rather than guessing)
   -n, --dry-run    arm Wake-on-LAN and run every check, but do not suspend
   -f, --force      suspend anyway: without Wake-on-LAN armed, into a
                    non-deep sleep state, and past any inhibitor lock
@@ -72,15 +74,23 @@ case "$BOAT_SLEEP_DELAY" in
     ''|*[!0-9]*) die "the suspend delay must be a whole number of seconds (--delay, or BOAT_SLEEP_DELAY in $CONF), got '$BOAT_SLEEP_DELAY'" ;;
 esac
 
-# Every mode except --status writes: --dry-run still arms Wake-on-LAN with
-# `ethtool -s`, and a real run also selects the sleep state in /sys. --status
-# writes nothing at all - /sys/power/mem_sleep is world-readable and
-# `boat-wol-arm --check` only reads back - so requiring root for it made the
-# one command you would reach for from the unprivileged "boat" account fail for
-# no reason. boat-grow-rootfs gates root on its writing mode alone; this now
-# matches.
-if [ "$STATUS_ONLY" != "1" ]; then
-    [ "$(id -u)" = "0" ] || die "must run as root (arming WoL and selecting the sleep state both write to /sys) - try 'ssh root@<boat>'. 'boat-sleep --status' reports readiness and needs no privileges."
+# Every mode except --status WRITES: --dry-run still arms Wake-on-LAN with
+# `ethtool -s`, and a real run also selects the sleep state in /sys.
+#
+# --status writes nothing, so it is allowed to run unprivileged - but it cannot
+# tell the whole truth that way, and must not pretend otherwise. Reading the
+# WoL flag goes through ethtool's ETHTOOL_GWOL ioctl, which the kernel gates on
+# CAP_NET_ADMIN: as an ordinary user `ethtool eth0` fails with "Operation not
+# permitted" and simply omits the "Supports Wake-on:" and "Wake-on:" lines. To
+# boat-wol-arm --check that is indistinguishable from a driver with no support,
+# so an unprivileged --status would report "NOT armed" on a board where WoL is
+# armed - the exact question it exists to answer, answered backwards.
+# STATUS_UNPRIV records that, and the report below says so instead of guessing.
+STATUS_UNPRIV=0
+if [ "$STATUS_ONLY" = "1" ]; then
+    [ "$(id -u)" = "0" ] || STATUS_UNPRIV=1
+else
+    [ "$(id -u)" = "0" ] || die "must run as root (arming WoL and selecting the sleep state both write to /sys) - try 'ssh root@<boat>', or 'sudo boat-sleep' as the boat user."
 fi
 
 # --- Is suspend-to-RAM there at all? ---------------------------------------
@@ -143,7 +153,11 @@ fi
 # the same test with no writes, which is what lets --status promise it
 # changes nothing; either way its per-interface messages explain a failure.
 wol_ok=0
-if [ "$STATUS_ONLY" = "1" ]; then
+if [ "$STATUS_UNPRIV" = "1" ]; then
+    # Deliberately not run: its answer would be misleading, not merely
+    # incomplete. See the CAP_NET_ADMIN note above.
+    :
+elif [ "$STATUS_ONLY" = "1" ]; then
     if /usr/bin/boat-wol-arm --check; then wol_ok=1; fi
 else
     if /usr/bin/boat-wol-arm; then wol_ok=1; fi
@@ -164,6 +178,13 @@ fi
 
 if [ "$STATUS_ONLY" = "1" ]; then
     say "sleep state:  $sleep_state"
+    if [ "$STATUS_UNPRIV" = "1" ]; then
+        say "wake-on-lan:  UNKNOWN - reading the flag needs root (ethtool's WoL"
+        say "              query is gated on CAP_NET_ADMIN). Re-run as"
+        say "              'sudo boat-sleep --status' or over 'ssh root@<boat>'."
+        say "suspend now:  sudo boat-sleep"
+        exit 0
+    fi
     if [ "$wol_ok" = "1" ]; then
         say "wake-on-lan:  armed on ${macs:-(unknown MAC)}"
         say "wake with:    wakeonlan ${macs%% *}   (or scripts/wake-boat.sh in the yocto-xavier-nx checkout)"
