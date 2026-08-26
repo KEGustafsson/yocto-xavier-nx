@@ -157,8 +157,12 @@ for the authoritative, commented list.
   the autologin user — without that session the **unprivileged** Xorg
   `boat-hmi-autostart` starts cannot take DRM master or open input devices
   at all.
-  `wayland` was dropped from that list along with Weston; add it back if you
-  reintroduce a Wayland compositor.
+  `wayland` was dropped from that append along with Weston — but note that
+  poky's own `POKY_DEFAULT_DISTRO_FEATURES` still carries it, so it remains in
+  `DISTRO_FEATURES` and GTK still builds its Wayland backend. Dropping it from
+  the append only stops this project asserting a dependency it no longer has;
+  actually removing it would need `DISTRO_FEATURES:remove = "wayland"`, which
+  is a larger change and is not made here.
 - **`LICENSE_FLAGS_ACCEPTED += "commercial"`** (Tegra driver / NVIDIA
   components) — already set in this project.
 

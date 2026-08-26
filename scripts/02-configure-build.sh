@@ -136,10 +136,17 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
   # core-image-base build too (it just makes a few common recipes' optional
   # x11/virtualization PACKAGECONFIGs available, it doesn't install anything
   # by itself).
-  # "wayland" is deliberately NOT in this list any more: the helm display was
-  # a Weston/Wayland session in earlier versions of this image and is now
-  # XFCE on Xorg. Leaving it in would only build unused Wayland backends into
-  # GTK and friends. Add it back if you reintroduce a Wayland compositor.
+  # "wayland" is deliberately NOT in this append any more: the helm display
+  # was a Weston/Wayland session in earlier versions of this image and is now
+  # XFCE on Xorg.
+  #
+  # Be clear about what that does and does not achieve: the poky DISTRO still
+  # carries "wayland" in its own POKY_DEFAULT_DISTRO_FEATURES, so it is in
+  # DISTRO_FEATURES either way and GTK and friends still build their Wayland
+  # backends. Dropping it here only stops this project ASSERTING a dependency
+  # it no longer has - actually removing it needs a
+  # DISTRO_FEATURES:remove = "wayland" (or a different DISTRO), which is a
+  # bigger change than it looks and is not made here.
   echo 'DISTRO_FEATURES:append = " virtualization opengl pam x11 polkit"'
   # Keep downloads / sstate outside the build dir so re-inits are cheap.
   echo "DL_DIR = \"${WORKROOT}/downloads\""
