@@ -314,8 +314,7 @@ browser on the LAN can reach the helm UI, not just whatever's plugged into
 the HDMI port.
 
 (If you *do* want a browser painting on the Jetson's own screen, that is the
-X11 route below — `signalk-kiosk.yml.example` does exactly that with
-Chromium.)
+X11 route below — `browser.yml.example` does exactly that with Firefox.)
 
 ```yaml
 services:
@@ -409,10 +408,11 @@ systemctl start boat-compose
 It wraps Debian's maintained arm64 `firefox-esr` .deb and runs as uid 2000,
 so the profile on `/data/browser/profile` is owned by the `boat` user.
 
-> **Not yet confirmed on hardware.** The X11 plumbing is the same as
-> `signalk-kiosk.yml.example`, which is hardware-proven; Debian's firefox-esr
-> on this board is not. `docker logs firefox` shows X authorization failures
-> if the cookie mount is wrong.
+> **Not yet confirmed on hardware.** The X11 plumbing — socket, `DISPLAY`,
+> cookie mount, `shm_size` — has been exercised on this board with a
+> containerised browser and works; Debian's firefox-esr on it has not.
+> `docker logs firefox` shows X authorization failures if the cookie mount is
+> wrong.
 
 ### Container file ownership
 
@@ -632,23 +632,23 @@ See
 for the shipped copy of this template.
 
 **Concrete example:**
-[`signalk-kiosk.yml.example`](../layers/meta-boat/recipes-boat/compose/files/signalk-kiosk.yml.example)
-combines Signal K with a normal-mode (not `--kiosk`) Chromium container
-(`zenika/alpine-chrome`) pointed at `http://localhost:3000`, so Signal K's
-web admin UI shows up directly on the boat's own HDMI screen, full browser
-chrome (tabs, address bar) included, instead of needing a browser on another
-device. Two fixes in that file were confirmed on hardware under the Weston
-session and are unaffected by the switch: `shm_size` (Docker's default 64MB
-was a black-screen cause) and overriding the image's `--headless`
-`ENTRYPOINT`. A third one is now **gone**: under Weston's minimal
-`desktop-shell`, `--start-maximized` was ignored and the file resorted to a
-synthetic mouse click at a hardcoded screen coordinate to maximize the
-window. `xfwm4` is a full EWMH window manager, so `--start-maximized` (and
-`wmctrl`/`xdotool` window-state requests from other processes) should simply
-work — this is the one part of that example not yet re-confirmed on hardware.
-The `signalk-server` service in that file is adapted from a known-working
-external stack, not this project's own `signalk.yml.example` — see the
-comments at the top of the file for what changed and why.
+[`browser.yml.example`](../layers/meta-boat/recipes-boat/compose/files/browser.yml.example)
+runs Firefox this way, as an ordinary window on the boat's own HDMI screen.
+
+Two findings from doing this on real hardware apply to any browser container
+here, not just that one. `shm_size` must be raised: Docker's default 64MB
+/dev/shm is too small for a browser's renderer/GPU shared memory, and the
+symptom is a window that is black but alive — the process runs fine and
+nothing ever composites. And if the image's own `ENTRYPOINT` ends in
+`--headless` (several do), a plain `command:` only appends arguments after
+it, so the browser loads the page and exits immediately in a crash-loop with
+`ExitCode=0`; the entrypoint has to be overridden, not extended.
+
+A third fix is now **gone**: under Weston's minimal `desktop-shell`,
+`--start-maximized` was ignored and the old example resorted to a synthetic
+mouse click at a hardcoded screen coordinate. `xfwm4` is a full EWMH window
+manager, so `--start-maximized` — and `wmctrl`/`xdotool` window-state
+requests from other processes — should simply work.
 
 ### Build-time user & SSH (not implemented — future direction)
 

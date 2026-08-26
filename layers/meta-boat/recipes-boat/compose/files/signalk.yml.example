@@ -1,14 +1,114 @@
 # Example - copy to /data/compose/ and adjust before use.
 # See docs/05-phase2-boat-computer-layer.md "Example: Signal K container".
+#
+# Taken from the operator's own running "Arabella" stack rather than written
+# from scratch, so this is a configuration known to work on this hardware, not
+# a plausible-looking one. One thing was changed from that source: the config
+# volume points at /data/signalk, this project's persistent-storage
+# convention, instead of the /home/boat/docker/apps/signalk_conf path the
+# original used.
+#
+# TWO THINGS TO KNOW BEFORE COPYING IT
+#
+# 1. `privileged: true` plus a mounted docker.sock gives signalk-server
+#    root-equivalent control of the whole host - it can start any container,
+#    with any mount. That is carried over verbatim because the stack it came
+#    from uses it (jetson-stats, managing sibling containers). If yours does
+#    not, drop privileged, the docker.sock mount and the cap_add block; Signal
+#    K itself does not need any of them to read sensors over the mounts below.
+#
+# 2. The D-Bus block below silently takes its fallback branch unless the
+#    container's uid exists on the HOST. CONFIRMED ON HARDWARE: this image
+#    runs as uid 1000 ("node"), no host account has uid 1000 - "boat" is 2000 -
+#    and D-Bus authenticates over the socket with SO_PEERCRED, resolving the
+#    peer uid against the host's passwd database. An unresolvable uid never
+#    completes the handshake, so dbus-send fails with "Did not receive a
+#    reply", the else branch runs, and the log fills with
+#
+#      Failed to bind socket "/run/dbus/system_bus_socket": Address already in use
+#      sudo: /usr/sbin/avahi-daemon: command not found
+#
+#    - the first because it is trying to bind over the host's own mounted
+#    socket, the second because this image has no avahi-daemon at all. Adding
+#    `user: "2000:2000"` makes dbus-send succeed and the host's avahi (which
+#    is running, and already publishes _signalk-tcp._tcp) gets used instead.
+x-common: &common
+  restart: unless-stopped
+  network_mode: host          # mDNS + reachability
+  logging:
+    options:
+      max-size: 10m
+
 services:
-  signalk:
-    image: ghcr.io/kegustafsson/signalk-server@sha256:<digest>   # pin by digest, not a floating tag
-    network_mode: host                      # mDNS + reachability
+
+  signalk-server:
+    <<: *common
+    # Pin by digest rather than a floating tag for anything you depend on:
+    # `image: ghcr.io/kegustafsson/signalk-server@sha256:<digest>`
+    image: ghcr.io/kegustafsson/signalk-server:latest-ubuntu-26.04-26.x
+    container_name: signalk-server
+    mem_limit: 2048m
+    memswap_limit: 2048m      # equal to mem_limit -> swap disabled
+    environment:
+      IS_IN_DOCKER: "true"
+      NODE_NO_WARNINGS: "1"
+      UV_THREADPOOL_SIZE: "16"
+      NSOLID_APPNAME: SignalK-Server-Arabella
+      NSOLID_HUB: none
+      NSOLID_REPORTER_INTERVAL: "5000"
+      NODE_OPTIONS: "--dns-result-order=ipv4first"
     volumes:
       - /data/signalk:/home/node/.signalk    # persistent config on NVMe
-      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket  # use host avahi/bluez
-    devices:
-      - /dev/ttyUSB0                          # any local NMEA0183 / sensor
-      - /dev/i2c-1
-    group_add: ["990", "989"]                 # NUMERIC host GIDs (i2c, spi) - `getent group i2c`
-    restart: unless-stopped
+      - /dev:/dev/hostdev
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker
+      - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket
+    # See note 1 at the top before keeping these.
+    privileged: true
+    security_opt:
+      - no-new-privileges:false
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_TIME
+    # PID 1 that forwards signals and reaps zombies, so the shell below does
+    # not have to be one.
+    init: true
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Detect container runtime
+        if [ -z "$$CONTAINER_RUNTIME" ]; then
+            if [ -f /.dockerenv ]; then
+                export CONTAINER_RUNTIME="docker"
+            elif [ -f /run/.containerenv ]; then
+                export CONTAINER_RUNTIME="podman"
+            elif [ -n "$$KUBERNETES_SERVICE_HOST" ]; then
+                export CONTAINER_RUNTIME="kubernetes"
+            elif [ -f /proc/1/cgroup ]; then
+                grep -q '/docker'     /proc/1/cgroup 2>/dev/null && export CONTAINER_RUNTIME="docker"
+                grep -q '/libpod'     /proc/1/cgroup 2>/dev/null && export CONTAINER_RUNTIME="podman"
+                grep -q '/kubepods'   /proc/1/cgroup 2>/dev/null && export CONTAINER_RUNTIME="kubernetes"
+                grep -q '/lxc'        /proc/1/cgroup 2>/dev/null && export CONTAINER_RUNTIME="lxc"
+                grep -q '/containerd' /proc/1/cgroup 2>/dev/null && export CONTAINER_RUNTIME="containerd"
+            fi
+        fi
+
+        # Start D-Bus / Avahi only when the host socket is not available.
+        # See note 2 at the top: which branch this takes depends on the
+        # container's uid existing on the host, not on the mount.
+        if [ -S /run/dbus/system_bus_socket ] \
+           && dbus-send --system --dest=org.freedesktop.DBus --print-reply \
+                /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
+            echo "Using host D-Bus (socket mounted from host)"
+        else
+            echo "Starting container D-Bus and Avahi services"
+            sudo service dbus restart
+            sudo /usr/sbin/avahi-daemon -k 2>/dev/null
+            sudo /usr/sbin/avahi-daemon --no-drop-root &
+            sudo service bluetooth restart
+        fi
+
+        # Launch Signal K - init: true above handles PID 1 duties
+        exec node /home/node/signalk/node_modules/signalk-server/bin/signalk-server \
+            --securityenabled

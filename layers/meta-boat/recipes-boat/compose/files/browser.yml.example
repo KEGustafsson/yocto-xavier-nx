@@ -87,9 +87,9 @@ services:
     #
     # Firefox's content processes use shared memory heavily. Docker's default
     # /dev/shm is 64MB, which on this hardware was CONFIRMED to be exactly
-    # what produced a black-but-alive Chromium window in
-    # signalk-kiosk.yml.example; Firefox is no less demanding, so give it
-    # room rather than debug the same symptom twice.
+    # what left a browser window black-but-alive - the process ran fine and
+    # nothing ever composited. Give it room rather than debug that symptom
+    # twice.
     shm_size: "1gb"
     restart: unless-stopped
 
@@ -97,9 +97,8 @@ services:
 # NOT YET CONFIRMED ON THIS HARDWARE.
 #
 # The X11 plumbing above (socket + DISPLAY + cookie mount, host networking,
-# shm_size) is the same wiring signalk-kiosk.yml.example uses and that IS
-# hardware-proven. What has not been exercised here is Debian's firefox-esr
-# itself on this board. If the window does not appear, check in this order:
+# shm_size) has been exercised on this board with a containerised browser and
+# works. What has not been exercised is Debian's firefox-esr itself on it. If the window does not appear, check in this order:
 #
 #   docker logs firefox                      - X auth errors show up here as
 #                                              "Authorization required, but no
