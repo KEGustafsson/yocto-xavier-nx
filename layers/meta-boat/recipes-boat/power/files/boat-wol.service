@@ -7,8 +7,23 @@ Documentation=file:///etc/default/boat-power
 # didn't wake will look. NetworkManager re-applies its own wake-on-lan
 # setting on every activation (see /etc/NetworkManager/conf.d/90-boat-wol.conf),
 # which is what keeps the flag set long after this unit has run.
-After=network.target NetworkManager.service
-Wants=network.target
+# network-online.target, NOT just NetworkManager.service. CONFIRMED ON
+# HARDWARE: NetworkManager.service is "started" long before any link is up,
+# and the nvethernet driver on this board reports no Wake-on-LAN support at
+# all until the PHY attaches at link-up. Ordering only after the daemon ran
+# this unit 4.4 seconds too early and it failed every boot:
+#
+#   [12.178] boat-wol-arm: supports Wake-on 'd' ... skipped
+#   [16.541] nvethernet eth0: Link is Up - 1Gbps/Full
+#
+# NetworkManager-wait-online.service is what provides network-online.target
+# here and is enabled by default, so this adds no boot delay of its own -
+# docker.service already pulls the same target in. (The masked wait-online
+# unit noted in boat-image.bb is systemd-networkd's, a different one.)
+# boat-wol-arm also waits for the capability itself, as a backstop for a
+# cable plugged in after boot.
+After=network-online.target NetworkManager.service
+Wants=network-online.target
 
 [Service]
 Type=oneshot

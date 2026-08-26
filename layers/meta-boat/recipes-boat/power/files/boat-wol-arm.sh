@@ -34,6 +34,9 @@ if [ -r "$CONF" ]; then
     . "$CONF"
 fi
 : "${BOAT_WOL_INTERFACES:=eth0}"
+# Seconds to wait for a driver to advertise magic-packet support before
+# giving up on an interface. Only used when actually arming.
+: "${BOAT_WOL_WAIT:=15}"
 
 say() { echo "boat-wol: $*"; }
 
@@ -82,7 +85,33 @@ for ifc in $BOAT_WOL_INTERFACES; do
         continue
     fi
 
+    # Wait for the capability to appear, don't just sample it once.
+    # CONFIRMED ON HARDWARE (Xavier NX devkit, nvethernet): this driver
+    # reports "Supports Wake-on: d" - i.e. nothing - until the PHY is
+    # attached at link-up, and only then advertises 'g'. On a real boot the
+    # gap was 4.4 seconds:
+    #
+    #   [12.178] boat-wol-arm: supports Wake-on 'd' ... skipped   <- unit failed
+    #   [16.541] nvethernet eth0: Link is Up - 1Gbps/Full
+    #
+    # boat-wol.service now orders itself after network-online.target, which
+    # closes that gap on a normal boot; this loop is the backstop for the
+    # cases ordering cannot cover - a cable plugged in late, a switch slow to
+    # negotiate, or the driver advertising capability slightly after carrier.
+    # Skipped entirely in --check mode: a readiness report should answer
+    # about the state right now, not block for ten seconds first.
     caps=$(wol_supported "$ifc")
+    if [ "$CHECK_ONLY" = "0" ]; then
+        waited=0
+        while [ -z "$caps" ] || [ "${caps#*g}" = "$caps" ]; do
+            [ "$waited" -ge "$BOAT_WOL_WAIT" ] && break
+            sleep 1
+            waited=$((waited + 1))
+            caps=$(wol_supported "$ifc")
+        done
+        [ "$waited" -gt 0 ] && [ -n "$caps" ] \
+            && say "$ifc: waited ${waited}s for the driver to advertise Wake-on-LAN"
+    fi
     case "$caps" in
         *g*) ;;
         "")  say "$ifc: driver '$(wol_driver "$ifc")' reports no Wake-on-LAN support - skipped"
