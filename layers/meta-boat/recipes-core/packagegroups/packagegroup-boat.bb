@@ -247,6 +247,16 @@ RDEPENDS:${PN}-connectivity = "\
 # boat-hmi-autostart, which is not allarch, RDEPENDS on `dbus` by name for
 # the same binary - that one resolves fine.
 #
+# polkit is here rather than in -security because the reason it is installed
+# is the desktop: systemd-logind authorizes reboot/shutdown/suspend through
+# it, and CONFIRMED ON HARDWARE, without it the XFCE Log Out dialog shows
+# those three greyed out - `sudo systemctl reboot` was the only way to
+# restart the machine. Its stock org.freedesktop.login1.* rules allow an
+# active local session (which the tty1 autologin session is) to do all three
+# without a password. The daemon alone is not enough: "polkit" must also be
+# in DISTRO_FEATURES, or systemd itself is built -Dpolkit=false and never
+# asks - scripts/02-configure-build.sh sets it.
+#
 # network-manager-applet (nm-applet) and blueman are the Wi-Fi and Bluetooth
 # front ends for this desktop. The radios, drivers, firmware and daemons are
 # all in -connectivity and the BSP already; these two are what makes them
@@ -272,6 +282,7 @@ RDEPENDS:${PN}-hmi = "\
     ttf-dejavu-sans \
     network-manager-applet \
     blueman \
+    polkit \
 "
 
 # --- Reliability for an unattended, power-cycled system ---------------------

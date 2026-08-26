@@ -82,6 +82,25 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
   #                    all declare REQUIRED_DISTRO_FEATURES = "x11", and opengl
   #                    is what builds GLX (xfwm4's compositor, and any GPU
   #                    accelerated container app on the same display).
+  #   polkit         - what lets the DESKTOP user reboot, shut down and
+  #                    suspend. systemd-logind authorizes those requests
+  #                    through polkit; poky's systemd recipe gates that on
+  #                    this exact distro feature (PACKAGECONFIG[polkit]),
+  #                    so without it logind is built with -Dpolkit=false and
+  #                    has no way to say yes to an unprivileged caller.
+  #                    CONFIRMED ON HARDWARE: the XFCE "Log Out" dialog comes
+  #                    up with Shut Down / Restart / Suspend greyed out and
+  #                    only Log Out usable. polkit's stock rules for
+  #                    org.freedesktop.login1.* allow an *active local
+  #                    session* - which the tty1 autologin session is - to do
+  #                    all three without a password, so the buttons simply
+  #                    start working. `sudo systemctl reboot` was the only
+  #                    route before this.
+  #                    Note this also switches NetworkManager from
+  #                    -Dpolkit=false (no authorization checks at all) to
+  #                    doing real per-action checks; its defaults also allow
+  #                    active sessions, so nm-applet keeps working, but that
+  #                    is the one thing to re-test after enabling it.
   #   pam            - load-bearing, not cosmetic: with systemd init,
   #                    pam_systemd is what makes systemd-logind create the
   #                    session (and /run/user/<uid>) for the autologin user.
@@ -98,7 +117,7 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
   # a Weston/Wayland session in earlier versions of this image and is now
   # XFCE on Xorg. Leaving it in would only build unused Wayland backends into
   # GTK and friends. Add it back if you reintroduce a Wayland compositor.
-  echo 'DISTRO_FEATURES:append = " virtualization opengl pam x11"'
+  echo 'DISTRO_FEATURES:append = " virtualization opengl pam x11 polkit"'
   # Keep downloads / sstate outside the build dir so re-inits are cheap.
   echo "DL_DIR = \"${WORKROOT}/downloads\""
   echo "SSTATE_DIR = \"${WORKROOT}/sstate-cache\""
