@@ -29,9 +29,39 @@
 #      sudo: /usr/sbin/avahi-daemon: command not found
 #
 #    - the first because it is trying to bind over the host's own mounted
-#    socket, the second because this image has no avahi-daemon at all. Adding
-#    `user: "2000:2000"` makes dbus-send succeed and the host's avahi (which
-#    is running, and already publishes _signalk-tcp._tcp) gets used instead.
+#    socket, the second because this image has no avahi-daemon at all.
+#
+#    Running as uid 2000 fixes the D-Bus half, and the host's avahi (which is
+#    running, and already publishes _signalk-tcp._tcp) gets used instead. But
+#    `user: "2000:2000"` ALONE puts the container in a restart loop, because
+#    this image is built around uid 1000 in three more places. All four lines
+#    are needed together, CONFIRMED ON HARDWARE:
+#
+#      user: "2000:2000"
+#      group_add: ["1000"]                                  # see (a)
+#      environment:
+#        HOME: /home/node                                   # see (b)
+#      volumes:
+#        - /some/host/dir:/home/node/.npm                   # see (c)
+#
+#    (a) /home/node is mode 0750 owned by uid 1000, so uid 2000 cannot even
+#        traverse into it and node dies with MODULE_NOT_FOUND on
+#        /home/node/signalk/node_modules/... Supplementary group 1000 grants
+#        the r-x. Primary group stays 2000 so files written to the config
+#        mount stay boat:boat on the host.
+#    (b) uid 2000 has no passwd entry inside the image, so $HOME is unset and
+#        signalk-server falls back to "/" - it then tries to mkdir /.signalk
+#        and dies with EACCES.
+#    (c) /home/node/.npm is mode 0755 owned by uid 1000: readable, not
+#        writable, so npm cannot create _cacache and every plugin install
+#        from the web UI fails with EACCES. The host directory must be owned
+#        2000:2000.
+#
+#    Four workarounds is a lot for what is really one mismatch. If more turn
+#    up, the two clean exits are a derived image that does
+#    `chown -R 2000:2000 /home/node`, or creating a uid-1000 account on the
+#    host so the container can keep running as "node" and D-Bus resolves it -
+#    that one needs no container changes at all.
 x-common: &common
   restart: unless-stopped
   network_mode: host          # mDNS + reachability
