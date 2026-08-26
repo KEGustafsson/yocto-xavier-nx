@@ -62,7 +62,7 @@ lsblk                                        # identify the drive, e.g. /dev/sdb
 
 A GPT with a small ESP (UEFI) and the **APP** partition (`nvme0n1p1`) holding the
 ext4 rootfs, kernel, device tree and `extlinux.conf`. `ROOTFSPART_SIZE` in
-`local.conf` controls the APP partition size (default 16 GiB — deliberately small, since every byte of it is written over USB 2.0; `boat-grow-rootfs --grow` extends it over the whole SSD on first boot). It must be ≥ your
+`local.conf` controls the APP partition size (default 16 GiB — deliberately small, since every byte of it is written over USB 2.0; `boat-grow-rootfs --grow` extends it over the whole SSD on first boot — that command is part of `boat-image`, so a Phase 1 `core-image-base` flash does not have it). It must be ≥ your
 image and ≤ the SSD capacity.
 
 ## Signing / secure boot (later)

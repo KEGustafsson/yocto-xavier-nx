@@ -21,8 +21,25 @@ warn() { printf '%s[!]%s %s\n' "$(_c '1;33')" "$(_c 0)" "$*" >&2; }
 err()  { printf '%s[-]%s %s\n' "$(_c '1;31')" "$(_c 0)" "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
+# boat.conf is a file of plain VAR=value assignments, so sourcing it would
+# overwrite anything already exported - the exact opposite of the precedence
+# documented above, and silently: `BOAT_HOST=x wol/boat-sleep.sh` would act on
+# whatever boat.conf says instead. (Found the hard way: an override meant to
+# point at an unreachable test address suspended the real board.) Snapshot
+# what the environment set, source the file, then put the environment back on
+# top.
+WOL_VARS=(BOAT_HOST BOAT_MAC BOAT_BROADCAST BOAT_SSH_USER BOAT_SSH_OPTS
+          BOAT_WAKE_TIMEOUT BOAT_SLEEP_TIMEOUT)
+declare -A _wol_from_env=()
+for _v in "${WOL_VARS[@]}"; do
+    [[ -n "${!_v:-}" ]] && _wol_from_env["$_v"]="${!_v}"
+done
 # shellcheck source=/dev/null
 [[ -r "${WOL_DIR}/boat.conf" ]] && source "${WOL_DIR}/boat.conf"
+for _v in "${!_wol_from_env[@]}"; do
+    printf -v "$_v" '%s' "${_wol_from_env[$_v]}"
+done
+unset _v _wol_from_env
 
 : "${BOAT_HOST:=}"
 : "${BOAT_MAC:=}"

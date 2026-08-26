@@ -25,7 +25,11 @@
 : "${BOOTDEV=nvme0n1p1}"
 
 # Size in bytes of the rootfs partition created on the NVMe drive.
-# Must be <= the SSD size and >= your image size.
+# Must be >= your image size, and must leave 1 GiB of headroom below the SSD's
+# capacity: scripts/02-configure-build.sh derives
+# TEGRA_EXTERNAL_DEVICE_SECTORS from this value PLUS 1 GiB, for the kernel,
+# recovery, esp and UDA partitions that share the drive. Setting it equal to
+# the SSD size therefore describes a layout larger than the disk.
 #
 # 16 GiB, deliberately much smaller than the SSD you will actually fit.
 # make-sdcard writes the APP partition with a plain, NON-sparse dd, so every

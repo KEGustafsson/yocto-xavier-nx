@@ -859,10 +859,9 @@ The image is flashed with a **fixed-size** root filesystem —
 default — because nothing at build time knows how big the boat's SSD is, and
 because `make-sdcard` writes that whole size over recovery-mode USB 2.0 with a
 plain non-sparse `dd`. Keeping it small is what makes flashing quick; this
-command is what makes the drive fully usable afterwards.
-NVIDIA's `initrd-flash` writes a GPT that describes only that much of the
-drive, so on anything larger the remaining space is unallocated and the
-GPT's backup header sits in the middle of the disk rather than at its end.
+command is what makes the drive fully usable afterward. On a normal flash
+the partition already covers the whole SSD and only the filesystem inside it
+is short, so the job is a single online `resize2fs` — see below.
 
 `boat-grow-rootfs` (from the `boat-grow-rootfs` recipe) reclaims it, run
 once from a terminal on the desktop after the first boot:

@@ -30,11 +30,32 @@ done
 
 require_conf BOAT_HOST
 
+# Refuse to report a suspend we never observed. wait_for_state down succeeds
+# on its first probe if the board was already unreachable, so without this an
+# unplugged or already-sleeping board reads as a successful sleep - and the
+# ssh failure above cannot contradict it, because a dropped connection is the
+# expected outcome of a real suspend.
+if (( WAIT )) && ! boat_is_up; then
+    die "board at ${BOAT_HOST} is not answering - refusing to claim it slept.
+      If it is already asleep, wake it with wol/boat-wake.sh first;
+      if it should be up, check the address in wol/boat.conf."
+fi
+
 # --status must not be followed by a "did it go down" wait: nothing was asked
 # to go down.
 for arg in "${PASSTHRU[@]:-}"; do
     [[ "$arg" == "--status" || "$arg" == "-s" ]] && WAIT=0
 done
+
+# boat-sleep needs root. boat.conf.example offers the "boat" user as an
+# alternative to root, which only works because of its passwordless sudo - so
+# prefix the command for any user that is not root, rather than letting that
+# documented configuration fail.
+if [[ "$BOAT_SSH_USER" == "root" ]]; then
+    REMOTE_CMD=(boat-sleep)
+else
+    REMOTE_CMD=(sudo -n boat-sleep)
+fi
 
 log "asking ${BOAT_SSH_USER}@${BOAT_HOST} to suspend ..."
 # shellcheck disable=SC2086
@@ -44,14 +65,14 @@ if (( WAIT )); then
     # here. The liveness check below is the honest test, and it runs either
     # way.
     ssh -o ConnectTimeout=10 ${BOAT_SSH_OPTS} "${BOAT_SSH_USER}@${BOAT_HOST}" \
-        boat-sleep "${PASSTHRU[@]:-}" || true
+        "${REMOTE_CMD[@]}" "${PASSTHRU[@]:-}" || true
 else
     # Nothing is going to drop the connection (--status) or nothing is going
     # to be verified (--no-wait), so a failed ssh here is just a failure and
     # swallowing it would report success for a command that never ran. This
     # is how a stale host key or a wrong address stays visible.
     ssh -o ConnectTimeout=10 ${BOAT_SSH_OPTS} "${BOAT_SSH_USER}@${BOAT_HOST}" \
-        boat-sleep "${PASSTHRU[@]:-}"
+        "${REMOTE_CMD[@]}" "${PASSTHRU[@]:-}"
 fi
 
 if (( WAIT == 0 )); then

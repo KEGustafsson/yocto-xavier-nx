@@ -7,10 +7,16 @@
 # Build the image first - see Dockerfile.firefox.example in this same
 # directory (/usr/share/boat/compose-examples/):
 #
-#   mkdir -p /data/browser
+#   mkdir -p /data/browser/profile
+#   chown 2000:2000 /data/browser/profile
 #   cp /usr/share/boat/compose-examples/Dockerfile.firefox.example \
 #      /data/browser/Dockerfile
 #   docker build -t boat-firefox /data/browser
+#
+# The chown is not optional. Docker creates a missing bind-mount source
+# itself, as root - and this image runs Firefox as uid 2000, which then
+# cannot write its own profile. The same trap costs a restart loop elsewhere
+# in this directory: see note 2 in signalk.yml.example.
 #
 # Then copy this file to /data/compose/docker-compose.yml and
 # `systemctl start boat-compose`.

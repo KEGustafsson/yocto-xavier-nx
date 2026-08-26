@@ -307,9 +307,18 @@ if [ "$NEED_PART" -eq 1 ]; then
 
     # partx -u updates just this partition's size in the kernel's view, which
     # does work while it is mounted (a full BLKRRPART does not).
+    # Fatal, not a warning. resize2fs takes its target size from the KERNEL's
+    # idea of the partition, so if this did not take, resize2fs finds the old
+    # size, does nothing, and the script goes on to report "done" with an
+    # unchanged filesystem - the one outcome worse than failing.
     say "updating the kernel's view of ${ROOT_SRC}"
-    partx -u --nr "$PART_NUM" "$DISK" \
-        || say "WARNING: partx failed; a reboot will pick up the new size"
+    if ! partx -u --nr "$PART_NUM" "$DISK"; then
+        err_msg="partx could not update the kernel's view of ${ROOT_SRC}."
+        say "$err_msg"
+        say "The partition table on disk IS grown; only the running kernel"
+        say "has not noticed. Reboot and re-run '${SELF} --grow' to finish."
+        exit 1
+    fi
 fi
 
 # Always last, and on its own the whole job after a normal flash. resize2fs
