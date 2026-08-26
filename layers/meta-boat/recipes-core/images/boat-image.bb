@@ -41,10 +41,25 @@ IMAGE_ROOTFS_EXTRA_SPACE = "4194304"
 DISTRO_FEATURES:append = " systemd"
 
 # Login user for the console/XFCE session (docs/05 "Boot flow for the
-# display"). Fixed scaffold user for now, locked password (console-autologin
-# + SSH key only) - replace with docs/05's interactive build-time user-
-# creation flow (not yet implemented in scripts/02-configure-build.sh) when
-# that lands; must keep matching boat-hmi-autostart's BOAT_HMI_USER/_UID.
+# display"). Fixed scaffold user for now - replace with docs/05's interactive
+# build-time user-creation flow (not yet implemented in
+# scripts/02-configure-build.sh) when that lands; must keep matching
+# boat-hmi-autostart's BOAT_HMI_USER/_UID.
+#
+# -p '' gives "boat" an EMPTY password, not a locked one ('*', which is what
+# this used to be). Empty means the account is usable and `passwd` can set a
+# real one on the boat; locked meant no string could ever authenticate, so
+# the account was reachable only through the tty1 autologin.
+#
+# SECURITY, and it is not subtle: an empty password combines badly with two
+# other things this image currently has. IMAGE_FEATURES still carries poky's
+# stock "debug-tweaks", whose ssh_allow_empty_password sets
+# PermitEmptyPasswords yes - and /etc/sudoers.d/boat grants this user
+# passwordless sudo. Together that is unauthenticated root over the network
+# for anyone who can reach port 22. Fine on a bench; wrong the moment the
+# board is on a marina LAN. Close it by either setting a password on first
+# boot (`passwd boat`) or dropping debug-tweaks from EXTRA_IMAGE_FEATURES -
+# console autologin and sudo keep working without it.
 inherit extrausers
 # i2c/spi groups: unlike video/render/input/dialout, no recipe on this
 # kirkstone snapshot creates them (it's a Debian/Raspbian convention, not
@@ -52,10 +67,23 @@ inherit extrausers
 # the usermod below has something to add "boat" to. Note this only grants
 # group membership; actual /dev/i2c-*, /dev/spidev* device-node group
 # ownership still needs udev rules, not wired up yet.
+#
+# The explicit -g matters. Without it groupadd takes the first free id at or
+# above GID_MIN, which put i2c at gid 1000 and spi at 1001. Container images
+# overwhelmingly run their app as uid/gid 1000 (node, ubuntu, debian, most
+# -slim bases), and with no userns-remap in daemon.json a container writing
+# to a bind-mounted volume stores those raw numeric ids. The host then
+# rendered such files as "1000:i2c" - CONFIRMED ON HARDWARE - which is both
+# confusing and wrong in substance: every file a container created ended up
+# group-owned by a hardware-access group, so anything later given i2c
+# membership to reach /dev/i2c-* would also get group access to all of it.
+# Pinning both into the system range leaves 1000/1001 unclaimed, so such
+# files show up as a plain "1000:1000" - honestly labelled as a container's.
+# NOT retroactive: files already written under gid 1000 need a chgrp sweep.
 EXTRA_USERS_PARAMS = "\
-    groupadd -f i2c; \
-    groupadd -f spi; \
-    useradd -u 2000 -m -s /bin/bash -p '*' boat; \
+    groupadd -f -g 990 i2c; \
+    groupadd -f -g 989 spi; \
+    useradd -u 2000 -m -s /bin/bash -p '' boat; \
     usermod -a -G video,render,input,dialout,i2c,spi,docker,jtop boat; \
     usermod -s /bin/bash root; \
 "
