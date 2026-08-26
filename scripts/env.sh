@@ -25,8 +25,28 @@
 : "${BOOTDEV=nvme0n1p1}"
 
 # Size in bytes of the rootfs partition created on the NVMe drive.
-# 64 GiB by default; must be <= the SSD size and >= your image size.
-: "${ROOTFS_SIZE_BYTES:=68719476736}"
+# Must be >= your image size, and must leave 1 GiB of headroom below the SSD's
+# capacity: scripts/02-configure-build.sh derives
+# TEGRA_EXTERNAL_DEVICE_SECTORS from this value PLUS 1 GiB, for the kernel,
+# recovery, esp and UDA partitions that share the drive. Setting it equal to
+# the SSD size therefore describes a layout larger than the disk.
+#
+# 16 GiB, deliberately much smaller than the SSD you will actually fit.
+# make-sdcard writes the APP partition with a plain, NON-sparse dd, so every
+# byte of this size crosses the recovery-mode USB 2.0 link whether it holds
+# data or not - and boat-image's real content is around 5 GiB. At 64 GiB
+# (the previous default) that meant 20-30 minutes per flash, almost all of
+# it spent transferring zeros; at 16 GiB it is roughly a quarter of that.
+#
+# The rest of the drive is not lost, just not claimed at flash time: run
+# `boat-grow-rootfs --grow` once on the booted board and it extends the APP
+# partition and the ext4 over the whole SSD in seconds. See
+# docs/05-phase2-boat-computer-layer.md "Reclaiming the rest of the SSD".
+#
+# Raise it if you would rather not run that step (e.g. an unattended factory
+# flash), or if the image grows past ~12 GiB. Lower it and the build fails in
+# do_image_ext4 rather than producing something that won't boot.
+: "${ROOTFS_SIZE_BYTES:=17179869184}"
 
 # --- Image to build -------------------------------------------------------
 # Phase 1 (first bootable): core-image-base

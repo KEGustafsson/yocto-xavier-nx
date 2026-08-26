@@ -1,0 +1,50 @@
+# Example - copy to /data/browser/Dockerfile and build before use:
+#
+#   mkdir -p /data/browser
+#   cp /usr/share/boat/compose-examples/Dockerfile.firefox.example \
+#      /data/browser/Dockerfile
+#   docker build -t boat-firefox /data/browser
+#
+# Then browser.yml.example (same directory) runs it on the HDMI screen.
+#
+# Firefox is not packaged for Yocto in any layer this project fetches, and
+# building it from source on kirkstone would mean adding meta-browser plus a
+# matching Rust/cbindgen toolchain. Debian ships a maintained arm64
+# firefox-esr .deb, so a thin image around that is the short path to a real
+# Firefox on this board.
+#
+# ESR rather than the latest rapid-release channel on purpose: an appliance
+# that may go months between updates wants the branch that gets security
+# fixes without feature churn.
+#
+# NOTE this builds ON the Jetson, so it needs working DNS and outbound
+# HTTPS - it pulls the base image and packages from the network. It is a
+# one-off; the built image persists in Docker's data-root on /data.
+FROM debian:bookworm-slim
+
+# ca-certificates: HTTPS. fonts-dejavu: without any font the UI renders as
+# empty boxes. libgl1/libgtk-3-0/libdbus-glib-1-2: firefox-esr Depends pulls
+# these itself, but naming them keeps --no-install-recommends from being able
+# to strip the graphical stack out from under it.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      firefox-esr \
+      ca-certificates \
+      fonts-dejavu \
+      libgl1 \
+      libgtk-3-0 \
+      libdbus-glib-1-2 \
+ && rm -rf /var/lib/apt/lists/*
+
+# uid 2000 deliberately matches the "boat" user in boat-image.bb, so the
+# profile bind-mounted from /data comes out owned by the desktop user rather
+# than by a uid that does not exist on the host. See docs/05 "Container file
+# ownership".
+RUN useradd -u 2000 -m -s /bin/bash boat
+USER boat
+ENV HOME=/home/boat
+
+# Not --kiosk: this is meant to be an ordinary browser with tabs and an
+# address bar, the thing that was missing from the desktop. Add --kiosk here
+# if you want a locked-down single-page display instead.
+ENTRYPOINT ["firefox-esr"]

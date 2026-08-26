@@ -103,7 +103,7 @@ the **network** rather than a local GPS.
 ## What you get
 
 `boat-image` = `core-image-base` + `packagegroup-boat` + the local
-`boat-docker-config`/`boat-hmi-autostart`/`boat-compose`/`boat-power`
+`boat-docker-config`/`boat-hmi-autostart`/`boat-compose`/`boat-power`/`boat-grow-rootfs`
 recipes. Grouped so
 you can trim it — package names below were cross-checked against this
 project's actual fetched layers (kirkstone), not guessed:
@@ -113,13 +113,14 @@ project's actual fetched layers (kirkstone), not guessed:
 | `-containers` | `docker-ce` (meta-virtualization's default `virtual/docker` provider — `docker-moby` is a valid alternative but gets skipped as a runtime target unless you override the preference), `python3-docker-compose`, `ca-certificates` |
 | `-nvidia-container` ⚠️ | `nvidia-container-toolkit` (pulls in `libnvidia-container-tools` + `tegra-configs-container-csv`) — **unproven on kirkstone, prototype first, see risks** |
 | `-nvidia-host` | `tegra-argus-daemon` (CSI cameras). Tegra userspace driver libs (`tegra-libraries-*`) are already pulled in by the BSP, not listed again |
+| `-cuda` | `cuda-toolkit` (CUDA 11.4 — `nvcc`, cudart, cuBLAS/cuFFT/cuRAND/cuSOLVER/cuSPARSE/NPP, nvrtc, cuDLA), `cudnn` (8.6.0), `tensorrt-core` + `tensorrt-plugins` + `tensorrt-trtexec` (8.5.2), `python3-tensorrt` — JetPack's "SDK Components" half, fetched from NVIDIA's public Jetson deb feed. Several GB; drop it, or swap `cuda-toolkit` for `cuda-libraries`, if the host only ever runs containers |
 | `-jetson` | `tegra-nvpmodel`, `tegra-nvfancontrol`, `tegra-tools` (`jetson_clocks`/`tegrastats`), `python3-jetson-stats` (jtop) |
-| `-connectivity` | `networkmanager`, `modemmanager`, `avahi-daemon`+`avahi-utils`, `bluez5`, `hostapd`, `dnsmasq`, `iw`, `wireless-regdb-static`, `wireguard-tools`, `chrony` |
-| `-hmi` | `packagegroup-core-x11-xserver` (expands to meta-tegra's own `XSERVER`: `xserver-xorg` + NVIDIA's `xserver-xorg-video-nvidia`), `packagegroup-xfce-base` (xfwm4, xfce4-session, xfce4-panel, xfdesktop, xfce4-settings, thunar, xfce4-terminal, …), `xinit`, `xauth`, `xrandr`, `xset`, `xdpyinfo`, `dbus`, `ttf-dejavu-sans` — browsers/apps themselves are containers, not packages |
+| `-connectivity` | `networkmanager` + `networkmanager-nmcli` + `networkmanager-nmtui` (the TUI is a separate package — without it there is no console Wi-Fi picker), `modemmanager`, `avahi-daemon`+`avahi-utils`, `bluez5`, `hostapd`, `dnsmasq`, `iw`, `wireless-regdb-static`, `wireguard-tools`, `chrony` |
+| `-hmi` | `packagegroup-core-x11-xserver` (expands to meta-tegra's own `XSERVER`: `xserver-xorg` + NVIDIA's `xserver-xorg-video-nvidia`), `packagegroup-xfce-base` (xfwm4, xfce4-session, xfce4-panel, xfdesktop, xfce4-settings, thunar, xfce4-terminal, …), `xinit`, `xauth`, `xrandr`, `xset`, `xdpyinfo`, `dbus`, `ttf-dejavu-sans`, `network-manager-applet` + `blueman` (the Wi-Fi and Bluetooth tray applets — both autostart via `/etc/xdg/autostart` into the panel systray) — browsers/apps themselves are containers, not packages |
 | `-reliability` | `watchdog` (not `watchdog-keepalive` too — upstream declares them mutually exclusive alternatives) |
 | `-security` | `openssh`, `nftables` |
 | `-nettools` | `iproute2`, `net-tools`, `iputils`, `bmon`, `tcpdump`, `mtr`, `traceroute`, `ethtool`, `iftop`, `curl`, `nmap`, `libqmi`/`libmbim` (cellular debug) |
-| `-tools` | `nvme-cli`, `i2c-tools`, `usbutils`, `pciutils`, `htop`, `tmux`, `rsync`, `nano`, `minicom`, `git` (for `/data/compose`, separate from the git inside any container), `iperf3` |
+| `-tools` | `nvme-cli`, `parted`, `gptfdisk`, `e2fsprogs-resize2fs` (see [Reclaiming the rest of the SSD](#reclaiming-the-rest-of-the-ssd)), `i2c-tools`, `usbutils`, `pciutils`, `htop`, `tmux`, `rsync`, `nano`, `minicom`, `git` (for `/data/compose`, separate from the git inside any container), `iperf3` |
 
 Not available in this project's fetched kirkstone-era layers, and
 deliberately **omitted** rather than left as names that fail the build:
@@ -313,8 +314,7 @@ browser on the LAN can reach the helm UI, not just whatever's plugged into
 the HDMI port.
 
 (If you *do* want a browser painting on the Jetson's own screen, that is the
-X11 route below — `signalk-kiosk.yml.example` does exactly that with
-Chromium.)
+X11 route below — `browser.yml.example` does exactly that with Firefox.)
 
 ```yaml
 services:
@@ -324,8 +324,8 @@ services:
     security_opt:
       - seccomp=unconfined   # optional, quiets some sandbox syscall warnings
     environment:
-      - PUID=1000
-      - PGID=1000
+      - PUID=2000        # the "boat" user, so the profile is manageable
+      - PGID=2000        # from the desktop session without sudo
       - TZ=Etc/UTC
     volumes:
       - /data/firefox/config:/config   # persistent browser profile on NVMe
@@ -338,6 +338,103 @@ services:
 `boat-hmi-autostart`'s local XFCE/tty1 desktop is still useful on its own —
 open this same KasmVNC URL (`localhost:3000`) in a local browser there if you
 want the Firefox container on the HDMI screen too.
+
+### A browser on the boat's own screen
+
+No browser is built into this image, and none needs to be. Firefox is not
+packaged for Yocto in any layer this project fetches; building it from source
+on kirkstone would mean adding meta-browser plus a matching Rust/cbindgen
+toolchain, and the only natively packaged browser available (`epiphany`)
+drags in a WebKitGTK build that is one of the largest compiles in all of
+Yocto.
+
+**The native answer: `boat-install-firefox`.** Mozilla publishes official,
+current **aarch64** Linux builds — `os=linux64-aarch64` on their download
+redirector (note it is *not* `linux-aarch64`, which 404s). The command
+downloads one, verifies it against Mozilla's published `SHA256SUMS`, installs
+it to `/opt/firefox` and adds an XFCE menu entry:
+
+```bash
+boat-install-firefox              # report installed vs latest, change nothing
+sudo boat-install-firefox --install
+```
+
+Re-run it later to upgrade; `--remove` uninstalls and leaves `~/.mozilla`
+profiles alone. It is not run at build or first boot on purpose — `do_rootfs`
+has no business reaching the internet, and a first-boot unit would block on
+DNS on a boat that may have no uplink for weeks. **So the browser is not in
+the flashed image; run the command once when there is a connection.**
+
+This needs no extra packages. Every shared library Mozilla's binaries link
+against — gtk3/gdk, pango, cairo, atk, gdk-pixbuf, fontconfig, freetype,
+alsa, dbus-1, libstdc++ and the X11 set — is already present via the XFCE
+desktop; NSS, NSPR and sqlite are bundled inside the tarball. Confirmed by
+`readelf`ing `firefox` and `libxul.so` against the built rootfs.
+
+Why not a Yocto recipe: meta-browser's `meta-firefox` still carries only
+`firefox_68.9.0esr` on kirkstone — **EOL since August 2020** — and wants
+meta-clang plus `python2.7` on the build host. A browser with six years of
+unpatched CVEs is the wrong thing to put on a boat that sits on marina wifi.
+
+The trade: the browser is a prebuilt binary Yocto did not build, so it sits
+outside the image's reproducibility and license manifests.
+
+There are also two container answers, useful for different reasons:
+
+| | `firefox.yml.example` | `browser.yml.example` |
+|---|---|---|
+| Renders | its own desktop over KasmVNC on `:3000` | directly on the HDMI screen |
+| Reach it from | any phone/tablet/laptop on the LAN | the XFCE session itself |
+| Needs a browser already? | **yes** — to open `:3000` | no |
+
+So `firefox.yml.example` is the right answer for the helm UI on other
+devices, and the wrong one if the Jetson's own screen has no browser yet —
+you would need a browser to open it.
+
+`browser.yml.example` closes that loop. It runs Firefox as an ordinary
+windowed application on the local X display, using the same socket +
+`DISPLAY` + MIT-MAGIC-COOKIE wiring described under "Container GUI apps on
+the HDMI screen (X11)". Build the image once from the shipped Dockerfile:
+
+```bash
+mkdir -p /data/browser
+cp /usr/share/boat/compose-examples/Dockerfile.firefox.example /data/browser/Dockerfile
+docker build -t boat-firefox /data/browser
+
+cp /usr/share/boat/compose-examples/browser.yml.example /data/compose/docker-compose.yml
+systemctl start boat-compose
+```
+
+It wraps Debian's maintained arm64 `firefox-esr` .deb and runs as uid 2000,
+so the profile on `/data/browser/profile` is owned by the `boat` user.
+
+> **Not yet confirmed on hardware.** The X11 plumbing — socket, `DISPLAY`,
+> cookie mount, `shm_size` — has been exercised on this board with a
+> containerised browser and works; Debian's firefox-esr on it has not.
+> `docker logs firefox` shows X authorization failures if the cookie mount is
+> wrong.
+
+### Container file ownership
+
+Containers write to bind-mounted volumes with raw numeric uid/gid — there is
+no translation, because `daemon.json` sets no `userns-remap`. So whatever uid
+the image runs its app as lands on `/data` verbatim, and `ls` on the host then
+resolves those numbers against the *host's* tables.
+
+That bites in two ways worth knowing:
+
+- Most images default to **uid/gid 1000** (`node`, `ubuntu`, `debian`, most
+  `-slim` bases). No account on this image has uid 1000 — `boat` is 2000 — so
+  such files show a bare numeric owner. Set `PUID`/`PGID` (linuxserver images)
+  or `user:` (plain images) to `2000:2000` where you want the desktop user to
+  own them.
+- gid 1000 used to be **`i2c`** here, because `boat-image.bb` created the i2c
+  and spi groups without pinning their ids and `groupadd` took the first free
+  one at/above `GID_MIN`. Container-written files were therefore group-owned
+  by a hardware-access group, so anything later added to `i2c` to reach
+  `/dev/i2c-*` also got group access to all of it. Both groups are now pinned
+  into the system range (990/989), leaving 1000/1001 unclaimed. **Not
+  retroactive** — files already written under gid 1000 need a `chgrp` sweep.
 
 ## HMI / XFCE autostart
 
@@ -535,23 +632,23 @@ See
 for the shipped copy of this template.
 
 **Concrete example:**
-[`signalk-kiosk.yml.example`](../layers/meta-boat/recipes-boat/compose/files/signalk-kiosk.yml.example)
-combines Signal K with a normal-mode (not `--kiosk`) Chromium container
-(`zenika/alpine-chrome`) pointed at `http://localhost:3000`, so Signal K's
-web admin UI shows up directly on the boat's own HDMI screen, full browser
-chrome (tabs, address bar) included, instead of needing a browser on another
-device. Two fixes in that file were confirmed on hardware under the Weston
-session and are unaffected by the switch: `shm_size` (Docker's default 64MB
-was a black-screen cause) and overriding the image's `--headless`
-`ENTRYPOINT`. A third one is now **gone**: under Weston's minimal
-`desktop-shell`, `--start-maximized` was ignored and the file resorted to a
-synthetic mouse click at a hardcoded screen coordinate to maximize the
-window. `xfwm4` is a full EWMH window manager, so `--start-maximized` (and
-`wmctrl`/`xdotool` window-state requests from other processes) should simply
-work — this is the one part of that example not yet re-confirmed on hardware.
-The `signalk-server` service in that file is adapted from a known-working
-external stack, not this project's own `signalk.yml.example` — see the
-comments at the top of the file for what changed and why.
+[`browser.yml.example`](../layers/meta-boat/recipes-boat/compose/files/browser.yml.example)
+runs Firefox this way, as an ordinary window on the boat's own HDMI screen.
+
+Two findings from doing this on real hardware apply to any browser container
+here, not just that one. `shm_size` must be raised: Docker's default 64MB
+/dev/shm is too small for a browser's renderer/GPU shared memory, and the
+symptom is a window that is black but alive — the process runs fine and
+nothing ever composites. And if the image's own `ENTRYPOINT` ends in
+`--headless` (several do), a plain `command:` only appends arguments after
+it, so the browser loads the page and exits immediately in a crash-loop with
+`ExitCode=0`; the entrypoint has to be overridden, not extended.
+
+A third fix is now **gone**: under Weston's minimal `desktop-shell`,
+`--start-maximized` was ignored and the old example resorted to a synthetic
+mouse click at a hardcoded screen coordinate. `xfwm4` is a full EWMH window
+manager, so `--start-maximized` — and `wmctrl`/`xdotool` window-state
+requests from other processes — should simply work.
 
 ### Build-time user & SSH (not implemented — future direction)
 
@@ -755,6 +852,71 @@ Two tiers:
 RAUC needs the `meta-rauc` layer, not yet fetched by this project — a
 deliberate follow-up, not started.
 
+## Reclaiming the rest of the SSD
+
+The image is flashed with a **fixed-size** root filesystem —
+`ROOTFS_SIZE_BYTES` in [`../scripts/env.sh`](../scripts/env.sh), 16 GiB by
+default — because nothing at build time knows how big the boat's SSD is, and
+because `make-sdcard` writes that whole size over recovery-mode USB 2.0 with a
+plain non-sparse `dd`. Keeping it small is what makes flashing quick; this
+command is what makes the drive fully usable afterward. On a normal flash
+the partition already covers the whole SSD and only the filesystem inside it
+is short, so the job is a single online `resize2fs` — see below.
+
+`boat-grow-rootfs` (from the `boat-grow-rootfs` recipe) reclaims it, run
+once from a terminal on the desktop after the first boot:
+
+```bash
+sudo boat-grow-rootfs            # report only — this is the default
+sudo boat-grow-rootfs --grow     # actually grow (asks to confirm)
+```
+
+**There are two different gaps, and normally only one of them applies.**
+`make-sdcard` creates the last partition with a "fill to end" flag, so after
+a flash the APP *partition* already spans the whole SSD — what is undersized
+is the *filesystem inside it*. On a 233 GiB drive that means a 231.8 GiB
+partition holding a 16 GiB ext4, and the entire job is one online
+`resize2fs`, with no partition table change at all.
+
+The other gap — unallocated space *after* the partition — only shows up if
+the partition itself is short (a hand-made layout, a restored image). For
+that case the command moves the GPT backup header to the true end of the disk
+(`sgdisk --move-second-header`), extends the partition (`sfdisk -N`, which
+keeps its type GUID, PARTUUID and name — the bootloader depends on those),
+re-reads just that partition's size (`partx -u`), and only then resizes the
+filesystem. It reports both gaps separately so it is obvious which one you
+have. `/` stays mounted throughout either way.
+
+This is safe because **`APP` is the last partition** in the NVMe layout
+meta-tegra flashes — `kernel`, `kernel-dtb`, the A/B chain reserves,
+`recovery`, `RECROOTFS`, `esp`/`esp_alt`, `UDA`, then `APP` (see
+`yocto/flash/external-flash.xml.in` after an unpack). Growing it therefore
+only ever claims space that is already free: nothing is moved and no file
+data is rewritten. The script verifies that itself rather than trusting the
+layout, and refuses if any partition is allocated past the rootfs — which is
+exactly what a hand-added `/data` partition would be. It also saves the
+original partition table to `/var/lib/boat/gpt-backup-<disk>.bin` before
+touching anything.
+
+Deliberately **not** a first-boot systemd unit: rewriting a partition table
+is the one operation on this image that can lose the whole rootfs if the
+disk isn't what was expected, and doing it unattended before anyone has
+looked at the machine buys nothing.
+
+**Verified on hardware** (Xavier NX devkit, 233 GiB NVMe, R35.6.4):
+
+```
+partition   /dev/nvme0n1p1 (no. 1)  231.8 GiB
+filesystem  ext4, 16.0 GiB - 4.3G used of 14.8G
+unallocated after the partition:      0.0 B
+filesystem short of its partition by: 215.8 GiB
+...
+resize2fs 1.46.5 — The filesystem on /dev/nvme0n1p1 is now 60764713 (4k) blocks long.
+done - / is now 217.1G
+```
+
+Re-running afterwards correctly reports "nothing to do".
+
 ## Reliability
 
 - `watchdog` tied to the Tegra hardware watchdog.
@@ -763,7 +925,9 @@ deliberate follow-up, not started.
   volumes and Docker's `data-root` are meant to live on `/data` — but that
   partition isn't provisioned by any recipe here yet, so until it is,
   `boat-image`'s rootfs has extra headroom
-  (`IMAGE_ROOTFS_EXTRA_SPACE = "4194304"`) as a stopgap.
+  (`IMAGE_ROOTFS_EXTRA_SPACE = "4194304"`) as a stopgap — and on an SSD
+  larger than 16 GiB, [`boat-grow-rootfs`](#reclaiming-the-rest-of-the-ssd)
+  turns the unallocated remainder into rootfs space.
 - Periodic `fstrim` on the NVMe; size-cap persistent journald.
 
 ## Open risks — prototype these first

@@ -9,3 +9,6 @@
 # Python bytecode cache (e.g. scripts/pyfix/sitecustomize.py)
 __pycache__/
 *.pyc
+
+# Per-boat WoL settings (MAC / LAN addresses) - copy boat.conf.example
+/wol/boat.conf

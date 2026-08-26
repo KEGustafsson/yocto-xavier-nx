@@ -36,7 +36,7 @@ on-board Linux sees the NVMe drive and writes the partitions to it, and writes
 boot firmware to the module's QSPI. Progress is high-level; on failure read the
 `log.initrd-flash.<timestamp>` file it names.
 
-Expect the rootfs write itself to take **20-30 minutes** for a 64 GiB partition:
+Expect the rootfs write itself to take roughly **5-8 minutes** for the default 16 GiB partition (it was 20-30 minutes when that default was 64 GiB):
 it's a raw block write of the full partition size (not sparse-aware, even
 though the source `.ext4` image usually is), over recovery mode's USB 2.0
 link (regardless of your cable/port's real USB 3.x capability). The firmware
@@ -62,7 +62,7 @@ lsblk                                        # identify the drive, e.g. /dev/sdb
 
 A GPT with a small ESP (UEFI) and the **APP** partition (`nvme0n1p1`) holding the
 ext4 rootfs, kernel, device tree and `extlinux.conf`. `ROOTFSPART_SIZE` in
-`local.conf` controls the APP partition size (default 64 GiB). It must be ≥ your
+`local.conf` controls the APP partition size (default 16 GiB — deliberately small, since every byte of it is written over USB 2.0; `boat-grow-rootfs --grow` extends it over the whole SSD on first boot — that command is part of `boat-image`, so a Phase 1 `core-image-base` flash does not have it). It must be ≥ your
 image and ≤ the SSD capacity.
 
 ## Signing / secure boot (later)

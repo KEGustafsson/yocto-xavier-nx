@@ -14,8 +14,15 @@ services:
     security_opt:
       - seccomp=unconfined   # optional, quiets some sandbox syscall warnings
     environment:
-      - PUID=1000
-      - PGID=1000
+      # The uid/gid linuxserver's init chowns /config to, and therefore the
+      # owner of the browser profile on the host. 2000:2000 is the "boat"
+      # user (boat-image.bb's useradd -u 2000), so the profile stays
+      # manageable and backup-able from the desktop session without sudo.
+      # Deliberately NOT the linuxserver default of 1000:1000: no account on
+      # this image has uid 1000, so those files would show up as a bare
+      # numeric owner - see docs/05 "Container file ownership".
+      - PUID=2000
+      - PGID=2000
       - TZ=Etc/UTC
     volumes:
       - /data/firefox/config:/config   # persistent browser profile on NVMe

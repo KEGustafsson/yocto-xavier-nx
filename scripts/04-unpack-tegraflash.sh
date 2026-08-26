@@ -47,7 +47,21 @@ case "${FLASH_DIR}" in
   ""|/|"${REPO_ROOT}"|"${WORKROOT}"|"${BUILD_DIR}"|"${LAYERS_DIR}"|"${HOME}")
     die "refusing to remove unsafe FLASH_DIR: '${FLASH_DIR}'" ;;
 esac
-rm -rf -- "${FLASH_DIR}"
+# Two-step removal. initrd-flash runs under sudo (scripts/05-flash-nvme.sh)
+# and leaves root-owned directories behind in here - bootloader_staging/,
+# signed/, __pycache__/, pyfdt/__pycache__/, device-logs-*/ - all mode 0755
+# root:root. An unprivileged rm cannot unlink their contents, so it exits
+# non-zero and, under `set -e`, aborts the script *after* it has already
+# deleted everything user-owned: a half-wiped FLASH_DIR with no extraction
+# into it. Try as this user first and only escalate if something survived;
+# the safety case above has already validated the path, so the sudo rm is
+# bounded to a directory we know is safe to destroy.
+rm -rf -- "${FLASH_DIR}" 2>/dev/null || true
+if [[ -e "${FLASH_DIR}" ]]; then
+  warn "root-owned leftovers from a previous sudo flash in ${FLASH_DIR}"
+  warn "  removing them with sudo (you may be prompted for your password)"
+  sudo rm -rf -- "${FLASH_DIR}"
+fi
 mkdir -p "${FLASH_DIR}"
 log "Extracting into ${FLASH_DIR} ..."
 tar -C "${FLASH_DIR}" -xf "${TARBALL}"

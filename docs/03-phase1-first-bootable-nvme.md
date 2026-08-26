@@ -49,7 +49,7 @@ Creates `yocto/build/` and writes:
   LICENSE_FLAGS_ACCEPTED += "commercial"     # accept NVIDIA BSP licences
   INIT_MANAGER = "systemd"
   TNSPEC_BOOTDEV = "nvme0n1p1"                # <-- boot rootfs from NVMe
-  ROOTFSPART_SIZE = "68719476736"            # 64 GiB APP partition on the SSD
+  ROOTFSPART_SIZE = "17179869184"            # 16 GiB APP partition on the SSD
   ```
 
   `TNSPEC_BOOTDEV = "nvme0n1p1"` is the switch that makes meta-tegra lay out the
@@ -96,7 +96,7 @@ Uses `tar` (never a GUI extractor — permissions/symlinks matter).
 Runs `sudo ./initrd-flash`, which RCM-boots a helper Linux over USB, writes the
 **firmware to QSPI** and the **rootfs to the NVMe**. First flash is slow because
 of the firmware step. Writing the rootfs itself is also not fast: it's a raw
-block write of the full `ROOTFSPART_SIZE` (not sparse-aware), so a 64 GiB
+block write of the full `ROOTFSPART_SIZE` (not sparse-aware), so a 16 GiB
 partition over USB 2.0 (recovery mode negotiates at USB 2.0 speeds regardless
 of your cable/port) realistically takes **20-30 minutes**, not a few. Let it run;
 don't disconnect mid-write.

@@ -1,0 +1,119 @@
+# Example - copy to /data/compose/ and adjust before use.
+#
+# Firefox in a real window on the boat's OWN HDMI screen, in the same X
+# session as the XFCE desktop. This is the answer to "there is no browser on
+# the Yocto desktop": none is built into this image, and none needs to be.
+#
+# Build the image first - see Dockerfile.firefox.example in this same
+# directory (/usr/share/boat/compose-examples/):
+#
+#   mkdir -p /data/browser/profile
+#   chown 2000:2000 /data/browser/profile
+#   cp /usr/share/boat/compose-examples/Dockerfile.firefox.example \
+#      /data/browser/Dockerfile
+#   docker build -t boat-firefox /data/browser
+#
+# The chown is not optional. Docker creates a missing bind-mount source
+# itself, as root - and this image runs Firefox as uid 2000, which then
+# cannot write its own profile. The same trap costs a restart loop elsewhere
+# in this directory: see note 2 in signalk.yml.example.
+#
+# Then copy this file to /data/compose/docker-compose.yml and
+# `systemctl start boat-compose`.
+#
+# WHY A CONTAINER AT ALL
+# Firefox is not packaged for Yocto in any layer this project fetches.
+# Building it from source on kirkstone means adding meta-browser plus a
+# matching Rust/cbindgen toolchain - hours of build, and historically
+# fragile on a kirkstone-era snapshot. Debian's arm64 firefox-esr package,
+# wrapped in a thin image, gets you a real Firefox in minutes instead.
+#
+# WHY NOT firefox.yml.example
+# That one runs linuxserver/firefox, which serves its own desktop over
+# KasmVNC on port 3000. Excellent for reaching the helm UI from a phone or
+# laptop anywhere on the boat - but circular if what you want is a browser ON
+# this screen, since you would need a browser already running here to open
+# it. This file has no such loop: Firefox paints directly on the local
+# display.
+#
+# HOW THE DISPLAY ACCESS WORKS (docs/05 "Container GUI apps on the HDMI
+# screen (X11)"). Three things, all below: the X socket, DISPLAY, and the
+# session's MIT-MAGIC-COOKIE, which boat-xfce-session writes to
+# /run/boat-x11/Xauthority as the desktop starts. Mount the DIRECTORY, not
+# the file - the session writes a fresh cookie on every restart, and a file
+# bind-mount would keep pointing at the old, deleted one.
+#
+# That cookie is the session's own, so it grants FULL access to the helm
+# display: input injection, screen capture, window manipulation. Mount it
+# read-only, and only into containers you trust with the screen.
+services:
+  firefox:
+    image: boat-firefox
+    container_name: firefox
+    network_mode: host
+    environment:
+      - DISPLAY=:0
+      - XAUTHORITY=/run/boat-x11/Xauthority
+      # Firefox on a machine with no D-Bus session bus of its own otherwise
+      # spends its startup waiting on one.
+      - MOZ_DBUS_REMOTE=0
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /run/boat-x11:/run/boat-x11:ro
+      # Persistent profile: bookmarks, history, logins survive a restart.
+      # The image runs as uid 2000, which is this image's "boat" user, so
+      # this comes out owned by the desktop user and is manageable without
+      # sudo. See docs/05 "Container file ownership" for why 1000 - the
+      # usual container default - would be the wrong choice here.
+      - /data/browser/profile:/home/boat/.mozilla
+    # GPU: leave the runtime alone and this gets the NVIDIA one, because
+    # boat-docker-config sets "default-runtime": "nvidia" in daemon.json.
+    # That is what you want here. tegra-configs-container-csv's l4t.csv
+    # injects the GLVND *vendor* libraries - libGLX_nvidia.so.0,
+    # libEGL_nvidia.so.0, libGLESv2_nvidia.so.2 plus
+    # glvnd/egl_vendor.d/10-nvidia.json - and Debian's libgl1 is itself
+    # GLVND-based, so the container's libGL.so.1 dispatches straight to the
+    # Tegra driver. That is exactly the arrangement the CSV exists for.
+    #
+    # If GL misbehaves, pin `runtime: runc` to opt out of the injection
+    # entirely: Firefox then falls back to software rendering (llvmpipe),
+    # which is perfectly fine for Signal K dashboards, charts and gauges and
+    # poor for video or WebGL. docs/05 lists nvidia-container-toolkit on this
+    # kirkstone/L4T combination as an OPEN RISK, so expect to try both.
+    #
+    # Note that hardware *video* decode is out of reach either way: Firefox
+    # on Tegra has no VA-API/VDPAU path to NVDEC, so streaming video is
+    # software-decoded on the Carmel cores whether it runs in a container or
+    # natively. That is a Firefox-on-Tegra limitation, not a container one.
+    #
+    # No audio is wired up: this image has no PulseAudio or PipeWire and
+    # nothing mounts /dev/snd, so Firefox will be mute. Add a
+    # "- /dev/snd:/dev/snd" device mapping and an audio server if you need
+    # sound.
+    #
+    # Firefox's content processes use shared memory heavily. Docker's default
+    # /dev/shm is 64MB, which on this hardware was CONFIRMED to be exactly
+    # what left a browser window black-but-alive - the process ran fine and
+    # nothing ever composited. Give it room rather than debug that symptom
+    # twice.
+    shm_size: "1gb"
+    restart: unless-stopped
+
+# ---------------------------------------------------------------------------
+# NOT YET CONFIRMED ON THIS HARDWARE.
+#
+# The X11 plumbing above (socket + DISPLAY + cookie mount, host networking,
+# shm_size) has been exercised on this board with a containerised browser and
+# works. What has not been exercised is Debian's firefox-esr itself on it. If the window does not appear, check in this order:
+#
+#   docker logs firefox                      - X auth errors show up here as
+#                                              "Authorization required, but no
+#                                              authorization protocol
+#                                              specified"
+#   ls -l /run/boat-x11/Xauthority           - must exist; boat-xfce-session
+#                                              writes it at desktop start
+#   echo $DISPLAY                            - :0 in the desktop session
+#
+# A missing or empty cookie file means the desktop session did not export it;
+# boat-xfce-session prints why on stderr, and /tmp/boat-xfce-session.log has
+# the session's output.
