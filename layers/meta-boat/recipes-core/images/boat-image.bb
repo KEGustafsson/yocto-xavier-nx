@@ -6,6 +6,32 @@ require recipes-core/images/core-image-base.bb
 
 IMAGE_FEATURES += "ssh-server-openssh"
 
+# Both root and "boat" log in with an EMPTY password, deliberately, and both
+# halves of that are now stated here rather than inherited by accident.
+#
+# "boat" gets its empty password from useradd -p '' further down. root's used
+# to come only from poky's stock EXTRA_IMAGE_FEATURES ?= "debug-tweaks" in
+# local.conf - a line this project does not manage, copied in from poky's
+# sample - which happens to suppress the zap_empty_root_password rootfs
+# postprocess. Anything that dropped debug-tweaks would have silently locked
+# root instead, which is not a thing that should happen by side effect.
+#
+# The three features named here are the specific ones that keep this working,
+# unbundled from the rest of debug-tweaks:
+#   empty-root-password  - do not run zap_empty_root_password, so root's
+#                          shadow field stays empty rather than becoming '*'
+#   allow-empty-password - sshd PermitEmptyPasswords yes
+#   allow-root-login     - sshd PermitRootLogin yes; without it sshd falls
+#                          back to prohibit-password and root cannot log in
+#                          over the network at all, password or not
+#
+# What this means in practice: anyone who can reach port 22 can log in as
+# root without a credential, and "boat" additionally has passwordless sudo.
+# That is a deliberate choice for a bench/development image. Reverse it by
+# removing these three (and debug-tweaks) and provisioning an SSH key -
+# docs/05 "Build-time user & SSH" covers what that would take.
+IMAGE_FEATURES += "empty-root-password allow-empty-password allow-root-login"
+
 IMAGE_INSTALL:append = " \
     packagegroup-boat \
     boat-docker-config \
@@ -52,15 +78,11 @@ DISTRO_FEATURES:append = " systemd"
 # real one on the boat; locked meant no string could ever authenticate, so
 # the account was reachable only through the tty1 autologin.
 #
-# SECURITY, and it is not subtle: an empty password combines badly with two
-# other things this image currently has. IMAGE_FEATURES still carries poky's
-# stock "debug-tweaks", whose ssh_allow_empty_password sets
-# PermitEmptyPasswords yes - and /etc/sudoers.d/boat grants this user
-# passwordless sudo. Together that is unauthenticated root over the network
-# for anyone who can reach port 22. Fine on a bench; wrong the moment the
-# board is on a marina LAN. Close it by either setting a password on first
-# boot (`passwd boat`) or dropping debug-tweaks from EXTRA_IMAGE_FEATURES -
-# console autologin and sudo keep working without it.
+# Empty rather than locked is intentional for this image, and the SSH side of
+# it is declared up top with empty-root-password / allow-empty-password /
+# allow-root-login. See that block for what the combination means: with
+# /etc/sudoers.d/boat also granting passwordless sudo, anyone who can reach
+# port 22 has root without a credential.
 inherit extrausers
 # i2c/spi groups: unlike video/render/input/dialout, no recipe on this
 # kirkstone snapshot creates them (it's a Debian/Raspbian convention, not
@@ -97,17 +119,15 @@ EXTRA_USERS_PARAMS = "\
 # package's (python3-jetson-stats) own postinstall, not by this recipe -
 # it already exists by the time this usermod runs.
 
-# Let the console/desktop user reach root. Without this the image is a dead
-# end: "boat" has a locked password ('*' above), so `su` cannot be satisfied
-# either, and the only reason root is reachable at all today is that
-# EXTRA_IMAGE_FEATURES still carries poky's stock "debug-tweaks" - which
-# leaves root with an EMPTY password and, via ssh_allow_empty_password +
-# ssh_allow_root_login, lets that empty password in over SSH as well. That is
-# fine on a bench and wrong on a boat; this rule is what makes it safe to drop
-# debug-tweaks.
+# Let the console/desktop user reach root without depending on the empty
+# passwords declared up top. Those make root reachable today, but they are a
+# deliberate bench-image choice that may be reversed; this rule is what keeps
+# the desktop session able to escalate either way, and is what would make
+# removing them survivable.
 #
-# NOPASSWD is not laziness - it is forced: the account's password is locked,
-# so any password prompt would be unsatisfiable. The grant is no wider than
+# NOPASSWD is not laziness. It was originally forced - the account's password
+# was locked, so no prompt could ever be satisfied - and it stays because an
+# empty password is no better a thing to prompt for. The grant is no wider than
 # what the login already implies, since tty1 autologs "boat" in and that user
 # is in the "docker" group, which is root-equivalent by design (a container
 # can bind-mount /). Physical access to the helm display is already root.
