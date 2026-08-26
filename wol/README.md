@@ -47,9 +47,12 @@ will not wake over Ethernet), `--delay N`. Plus `--no-wait` on either script,
 which is local: send the request and return rather than watching what happens.
 
 `--status` and `--dry-run` skip the "did it go quiet?" wait, because nothing
-was asked to go down — and `--status` also skips the liveness check that the
-other modes do first, so it is usable on precisely the board you need it for:
-one that is not answering.
+was asked to go down — and `--status` also skips the ICMP liveness check the
+other modes do first. That makes it usable on a board that does not answer
+ping: one behind a firewall that drops ICMP, or one you are not sure about.
+It does **not** make it usable on a board that is off or already asleep — it
+still runs `boat-sleep` over SSH, so SSH has to reach the board. On a sleeping
+board, wake it first.
 
 `BOAT_SSH_USER` may be `root` or `boat`; for anything other than root the
 wrapper prefixes `sudo -n`, which works because the `boat` account has

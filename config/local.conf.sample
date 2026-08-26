@@ -58,8 +58,12 @@ ROOTFSPART_SIZE = "17179869184"
 #   "End sector for APP, expected at: <N>, actual: 0"
 # 1 GiB of headroom over ROOTFSPART_SIZE is comfortably more than they need;
 # the value does not have to match the SSD's real capacity, only be >= what is
-# actually used. (17179869184 + 1073741824) / 512:
-TEGRA_EXTERNAL_DEVICE_SECTORS = "35651584"
+# actually used.
+#
+# Derived from ROOTFSPART_SIZE rather than hardcoded: raising the rootfs size
+# and forgetting this line would declare a capacity smaller than APP, and that
+# only fails at flash time - after the build.
+TEGRA_EXTERNAL_DEVICE_SECTORS = "${@(int(d.getVar('ROOTFSPART_SIZE')) + 1073741824) // 512}"
 
 # jetson-xavier-nx-devkit's default internal layout
 # (flash_l4t_t194_spi_sd_p3668.xml) still carries an internal APP partition

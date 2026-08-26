@@ -230,7 +230,7 @@ Practical wiring:
   key.
 - **Compose as config-as-code (git):** compose files live in a **git
   checkout on `/data`** (e.g. `/data/compose`) that you `git pull` on the
-  boat to update settings, then `docker-compose up -d`. This is why `git` is
+  boat to update settings, then `docker compose up -d`. This is why `git` is
   on the host (`-tools`). Requirements: `ca-certificates` + a correct clock
   for HTTPS (a wrong clock fails the TLS handshake, same as registry pulls);
   for a private repo use the `openssh` client with a **read-only deploy

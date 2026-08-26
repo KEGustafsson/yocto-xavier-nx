@@ -244,7 +244,13 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
     # to match the physical SSD's real capacity, only be >= what's
     # actually used - any leftover space on a larger real drive is
     # simply unpartitioned.
-    echo "TEGRA_EXTERNAL_DEVICE_SECTORS = \"$(( (ROOTFS_SIZE_BYTES + 1073741824) / 512 ))\""
+    # Derived from ROOTFSPART_SIZE by bitbake rather than precomputed here, so
+    # the two cannot drift: a ROOTFSPART_SIZE raised anywhere - including by
+    # hand in local.conf after this block - carries the capacity with it,
+    # instead of declaring a device smaller than the APP partition and failing
+    # at flash time. config/local.conf.sample and the kas profile use the same
+    # expression.
+    echo 'TEGRA_EXTERNAL_DEVICE_SECTORS = "${@(int(d.getVar("ROOTFSPART_SIZE")) + 1073741824) // 512}"'
     # jetson-xavier-nx-devkit's default PARTITION_LAYOUT_TEMPLATE_DEFAULT
     # (flash_l4t_t194_spi_sd_p3668.xml) still carries an internal "APP"
     # partition sized from ROOTFSPART_SIZE, even though TNSPEC_BOOTDEV

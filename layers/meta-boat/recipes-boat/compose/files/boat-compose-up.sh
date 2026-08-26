@@ -18,14 +18,23 @@ set -eu
 COMPOSE_DIR=/data/compose
 COMPOSE_FILE="${COMPOSE_DIR}/docker-compose.yml"
 
-# --down is boat-compose.service's ExecStop. Without it, `systemctl stop
-# boat-compose` only marks the unit inactive and leaves every container
-# running, so the stack and systemd's idea of it drift apart.
+# --stop is boat-compose.service's ExecStop. Without one, `systemctl stop
+# boat-compose` only marked the unit inactive and left every container running,
+# so the stack and systemd's idea of it drifted apart.
+#
+# --stop, NOT --down, for the unit: ExecStop also runs on `systemctl restart`
+# and on every system shutdown, and `compose down` REMOVES the containers and
+# networks. Anything a service kept only in its container's writable layer -
+# which is any stateful service whose operator did not give it a volume, and
+# /data/compose is operator-managed - would be destroyed by a reboot. `compose
+# stop` leaves the containers intact so they resume. --down stays available for
+# an explicit teardown by hand.
 ACTION=up
 case "${1:-}" in
     ''|--up)  ACTION=up ;;
+    --stop)   ACTION=stop ;;
     --down)   ACTION=down ;;
-    *)        echo "boat-compose: unknown argument '$1' (usage: boat-compose-up [--up|--down])" >&2
+    *)        echo "boat-compose: unknown argument '$1' (usage: boat-compose-up [--up|--stop|--down])" >&2
               exit 2 ;;
 esac
 
@@ -35,8 +44,9 @@ if [ ! -f "${COMPOSE_FILE}" ]; then
     exit 0
 fi
 
-if [ "$ACTION" = "down" ]; then
-    exec docker compose -f "${COMPOSE_FILE}" down
-fi
+case "$ACTION" in
+    stop) exec docker compose -f "${COMPOSE_FILE}" stop ;;
+    down) exec docker compose -f "${COMPOSE_FILE}" down ;;
+esac
 
 exec docker compose -f "${COMPOSE_FILE}" up -d

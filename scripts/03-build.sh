@@ -70,16 +70,21 @@ log "Build finished. Artifacts in: ${DEPLOY}"
 # The exact name first, any tegraflash artifact only as a fallback - a single
 # `ls -t` over both would sort by mtime and could name a DIFFERENT image's
 # tarball as this build's output. Same order 04-unpack-tegraflash.sh uses.
-# .tar.zst is not a naming meta-tegra produces on kirkstone (image_types_tegra
-# emits .tegraflash.tar.gz, or .tegraflash.zip with TEGRAFLASH_PACKAGE_FORMAT
-# = "zip"), so the glob covers gz and zip rather than a zst that never exists.
+# .tar.zst is not a naming meta-tegra produces on kirkstone: image_types_tegra
+# emits .tegraflash.tar.gz, or .tegraflash.zip with TEGRAFLASH_PACKAGE_FORMAT =
+# "zip". Only the tar.gz is looked for here, and only under the exact name,
+# because that is precisely what 04-unpack-tegraflash.sh will go on to
+# require - reporting anything else as "the flashing tarball" would promise a
+# handoff that does not exist.
 TARBALL="${DEPLOY}/${TARGET}-${MACHINE}.tegraflash.tar.gz"
-[[ -e "${TARBALL}" ]] || TARBALL="$(ls -t \
-  "${DEPLOY}"/*.tegraflash.tar.gz "${DEPLOY}"/*.tegraflash.zip \
-  2>/dev/null | head -n1 || true)"
-if [[ -n "${TARBALL}" ]]; then
+if [[ -e "${TARBALL}" ]]; then
   log "Flashing tarball: ${TARBALL}"
+elif compgen -G "${DEPLOY}/*.tegraflash.zip" >/dev/null; then
+  warn "This build produced a .tegraflash.zip, not the .tar.gz bundle these"
+  warn "scripts unpack (TEGRAFLASH_PACKAGE_FORMAT = \"zip\"). Unset that and"
+  warn "rebuild, or unpack the zip by hand."
 else
-  warn "No .tegraflash tarball found - check that MACHINE (${MACHINE}) is a Tegra machine."
+  warn "No ${TARGET}-${MACHINE}.tegraflash.tar.gz in ${DEPLOY} - check that"
+  warn "MACHINE (${MACHINE}) is a Tegra machine."
 fi
 log "Next: scripts/04-unpack-tegraflash.sh"

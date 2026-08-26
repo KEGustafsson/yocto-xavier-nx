@@ -28,16 +28,28 @@ log "IMAGE=${IMAGE} (pass it as an argument, or export it, if this isn't what yo
 # There is no .tar.zst on kirkstone - an earlier version of this script looked
 # for ".tegraflash-tar.zst", which is neither of those and matched nothing;
 # dead patterns like that read as coverage that isn't there.
+# The EXACT name for this IMAGE and MACHINE, with no fallback to "whatever is
+# newest". There used to be one, and it is the wrong shape of helpfulness for a
+# step that ends in writing firmware to a board: with IMAGE unset,
+# `04-unpack-tegraflash.sh boat-image` would happily unpack a core-image-base
+# tarball because that was the only one present. The name below is
+# meta-tegra's own IMAGE_LINK_NAME symlink, so it exists after any successful
+# build of this image - if it is missing, something is wrong and saying so is
+# more useful than picking a substitute.
 TARBALL="${DEPLOY}/${IMAGE}-${MACHINE}.tegraflash.tar.gz"
-[[ -e "${TARBALL}" ]] || TARBALL=""
-# Fall back to newest matching file.
-[[ -n "${TARBALL}" ]] || TARBALL="$(ls -t "${DEPLOY}"/*.tegraflash.tar.gz 2>/dev/null | head -n1 || true)"
-if [[ -z "${TARBALL}" ]]; then
-  if compgen -G "${DEPLOY}/*.tegraflash.zip" >/dev/null; then
-    die "only the .tegraflash.tar.gz bundle is handled, but this build produced
-      a .zip (TEGRAFLASH_PACKAGE_FORMAT = \"zip\"). Unset that and rebuild."
+if [[ ! -e "${TARBALL}" ]]; then
+  err "no ${IMAGE}-${MACHINE}.tegraflash.tar.gz in ${DEPLOY}"
+  if compgen -G "${DEPLOY}/*.tegraflash.tar.gz" >/dev/null; then
+    err "what is there:"
+    ls -1t "${DEPLOY}"/*.tegraflash.tar.gz | sed 's|.*/|      |' >&2
+    err "pass the image name as an argument to pick one, e.g."
+    err "  ./scripts/04-unpack-tegraflash.sh boat-image"
   fi
-  die "no tegraflash tarball in ${DEPLOY}; run scripts/03-build.sh"
+  if compgen -G "${DEPLOY}/*.tegraflash.zip" >/dev/null; then
+    err "this build produced a .tegraflash.zip; only the .tar.gz bundle is"
+    err "handled here (unset TEGRAFLASH_PACKAGE_FORMAT and rebuild)."
+  fi
+  die "run scripts/03-build.sh, or correct IMAGE"
 fi
 
 log "Using tarball: ${TARBALL}"

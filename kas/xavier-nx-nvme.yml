@@ -84,14 +84,24 @@ local_conf_header:
     UNINATIVE_MAXGLIBCVERSION:forcevariable = "2.44"
     UNINATIVE_CHECKSUM[x86_64] = "1a2749c1379fd9f60ea3c82f1bf4844924d5a99117b74a70c57036e94e2379d4"
     UNINATIVE_CHECKSUM[aarch64] = "8cf46c7ba75ebb1863fd6b74cf7d7ab910a3e99de4f01b1e9490babf8e6b9e05"
-    # kirkstone predates this host generation: point -native/-nativesdk builds
-    # at gcc-12/g++-12 (`sudo apt-get install gcc-12 g++-12`), the GCC
-    # generation kirkstone expects. Absolute paths because bitbake tasks run
-    # with a sanitized PATH. Drop these four lines if your host GCC is 12.
-    BUILD_CC = "${CCACHE}/usr/bin/gcc-12 ${BUILD_CC_ARCH}"
-    BUILD_CXX = "${CCACHE}/usr/bin/g++-12 ${BUILD_CC_ARCH}"
-    BUILD_CPP = "/usr/bin/gcc-12 ${BUILD_CC_ARCH} -E"
-    BUILD_CCLD = "/usr/bin/gcc-12 ${BUILD_CC_ARCH}"
+    # ---- Newer hosts: uncomment these four ----
+    # kirkstone predates current host toolchains: newer GCC defaults (C23)
+    # break old gnulib/K&R code in several -native recipes, so those builds
+    # want gcc-12/g++-12 (`sudo apt-get install gcc-12 g++-12`). Absolute paths
+    # because bitbake tasks run with a sanitized PATH.
+    #
+    # COMMENTED OUT ON PURPOSE, and this is the one thing kas cannot do that
+    # scripts/02-configure-build.sh can: that script emits these lines only
+    # when /usr/bin/gcc-12 actually exists. A static config has no such test,
+    # so setting them unconditionally would break every host WITHOUT gcc-12 -
+    # including Ubuntu 20.04, which this project supports and whose archive has
+    # no gcc-12 at all - with "/usr/bin/gcc-12: No such file or directory"
+    # twenty minutes into a build. Uncomment them if your host GCC is newer
+    # than 12 and you have installed gcc-12; leave them alone otherwise.
+    # BUILD_CC = "${CCACHE}/usr/bin/gcc-12 ${BUILD_CC_ARCH}"
+    # BUILD_CXX = "${CCACHE}/usr/bin/g++-12 ${BUILD_CC_ARCH}"
+    # BUILD_CPP = "/usr/bin/gcc-12 ${BUILD_CC_ARCH} -E"
+    # BUILD_CCLD = "/usr/bin/gcc-12 ${BUILD_CC_ARCH}"
     # Boot the rootfs from the first NVMe SSD:
     TNSPEC_BOOTDEV = "nvme0n1p1"
     ROOTFSPART_SIZE = "17179869184"
@@ -102,5 +112,9 @@ local_conf_header:
     # "End sector for APP, expected at: <N>, actual: 0" - after the whole build
     # has completed. Both are mandatory for this MACHINE, not tuning; see the
     # long comment in scripts/02-configure-build.sh.
-    TEGRA_EXTERNAL_DEVICE_SECTORS = "35651584"
+    #
+    # DERIVED from ROOTFSPART_SIZE rather than hardcoded, so raising the rootfs
+    # size cannot silently leave APP larger than the capacity declared here -
+    # which fails at flash time, long after the change that caused it.
+    TEGRA_EXTERNAL_DEVICE_SECTORS = "${@(int(d.getVar('ROOTFSPART_SIZE')) + 1073741824) // 512}"
     PARTITION_LAYOUT_TEMPLATE_DEFAULT = "flash_l4t_t194_qspi_p3668.xml"

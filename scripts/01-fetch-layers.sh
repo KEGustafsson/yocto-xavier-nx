@@ -57,7 +57,20 @@ clone_or_update() {
     # "pathspec did not match any file(s) known to git".
     git -C "${dst}" fetch --depth 1 origin \
       "+refs/heads/${YOCTO_BRANCH}:refs/remotes/origin/${YOCTO_BRANCH}"
-    git -C "${dst}" checkout -q -B "${YOCTO_BRANCH}" "origin/${YOCTO_BRANCH}"
+    # --force, and then clean: between them these are the two halves of what
+    # the prompt above promised, and neither is implied by a plain
+    # `checkout -B`. Without --force, checkout carries local modifications
+    # forward and REFUSES outright when they would be overwritten - which under
+    # `set -e` aborts the whole fetch rather than discarding anything. Without
+    # clean, untracked files survive; that matters here specifically because a
+    # stray .bbappend left in a layer is picked up by that layer's BBFILES and
+    # silently changes the build.
+    #
+    # Safe to force unconditionally: the porcelain check above reports tracked
+    # AND untracked changes, so we are either past an explicit confirmation or
+    # there was nothing to discard.
+    git -C "${dst}" checkout -q --force -B "${YOCTO_BRANCH}" "origin/${YOCTO_BRANCH}"
+    git -C "${dst}" clean -qfd
   else
     log "Cloning ${name} (${YOCTO_BRANCH})..."
     git clone --depth 1 -b "${YOCTO_BRANCH}" "${url}" "${dst}"
