@@ -349,7 +349,38 @@ toolchain, and the only natively packaged browser available (`epiphany`)
 drags in a WebKitGTK build that is one of the largest compiles in all of
 Yocto.
 
-There are two container answers, and they are not interchangeable:
+**The native answer: `boat-install-firefox`.** Mozilla publishes official,
+current **aarch64** Linux builds — `os=linux64-aarch64` on their download
+redirector (note it is *not* `linux-aarch64`, which 404s). The command
+downloads one, verifies it against Mozilla's published `SHA256SUMS`, installs
+it to `/opt/firefox` and adds an XFCE menu entry:
+
+```bash
+boat-install-firefox              # report installed vs latest, change nothing
+sudo boat-install-firefox --install
+```
+
+Re-run it later to upgrade; `--remove` uninstalls and leaves `~/.mozilla`
+profiles alone. It is not run at build or first boot on purpose — `do_rootfs`
+has no business reaching the internet, and a first-boot unit would block on
+DNS on a boat that may have no uplink for weeks. **So the browser is not in
+the flashed image; run the command once when there is a connection.**
+
+This needs no extra packages. Every shared library Mozilla's binaries link
+against — gtk3/gdk, pango, cairo, atk, gdk-pixbuf, fontconfig, freetype,
+alsa, dbus-1, libstdc++ and the X11 set — is already present via the XFCE
+desktop; NSS, NSPR and sqlite are bundled inside the tarball. Confirmed by
+`readelf`ing `firefox` and `libxul.so` against the built rootfs.
+
+Why not a Yocto recipe: meta-browser's `meta-firefox` still carries only
+`firefox_68.9.0esr` on kirkstone — **EOL since August 2020** — and wants
+meta-clang plus `python2.7` on the build host. A browser with six years of
+unpatched CVEs is the wrong thing to put on a boat that sits on marina wifi.
+
+The trade: the browser is a prebuilt binary Yocto did not build, so it sits
+outside the image's reproducibility and license manifests.
+
+There are also two container answers, useful for different reasons:
 
 | | `firefox.yml.example` | `browser.yml.example` |
 |---|---|---|

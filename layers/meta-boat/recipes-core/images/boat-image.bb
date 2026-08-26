@@ -13,6 +13,7 @@ IMAGE_INSTALL:append = " \
     boat-compose \
     boat-power \
     boat-grow-rootfs \
+    boat-firefox \
     kernel-modules \
     "
 
