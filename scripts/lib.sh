@@ -3,13 +3,52 @@
 
 set -euo pipefail
 
-_c() { printf '\033[%sm' "$1"; }
-log()   { printf '%s[+]%s %s\n' "$(_c '1;32')" "$(_c 0)" "$*"; }
-warn()  { printf '%s[!]%s %s\n' "$(_c '1;33')" "$(_c 0)" "$*" >&2; }
-err()   { printf '%s[x]%s %s\n' "$(_c '1;31')" "$(_c 0)" "$*" >&2; }
+# $1 = the fd the text is headed for, $2 = the SGR parameters. Colour is
+# decided per-fd: warn/err go to stderr, so testing stdout would both strip
+# colour from a warning on a terminal and write escape sequences into a
+# redirected stderr - which is how build logs and CI transcripts end up full
+# of \033[1;32m.
+_c() { [[ -t "$1" ]] && printf '\033[%sm' "$2" || true; }
+log()   { printf '%s[+]%s %s\n' "$(_c 1 '1;32')" "$(_c 1 0)" "$*"; }
+warn()  { printf '%s[!]%s %s\n' "$(_c 2 '1;33')" "$(_c 2 0)" "$*" >&2; }
+err()   { printf '%s[x]%s %s\n' "$(_c 2 '1;31')" "$(_c 2 0)" "$*" >&2; }
 die()   { err "$*"; exit 1; }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "required tool '$1' not found in PATH"; }
+
+# ---------------------------------------------------------------------------
+# Load the per-boat settings from wol/boat.conf (git-ignored; see
+# wol/boat.conf.example) WITHOUT letting the file override the environment.
+#
+# boat.conf is a plain list of VAR=value assignments, so sourcing it naively
+# overwrites anything already exported - the exact opposite of the documented
+# precedence, and silently. (Found the hard way: an override meant to point at
+# an unreachable test address suspended the real board.) So: snapshot every
+# BOAT_* the environment already carries, source the file, put the snapshot
+# back on top.
+#
+# The snapshot is taken from the environment itself rather than from a
+# hand-maintained list of names - an allowlist is how BOAT_WOL_BROADCAST,
+# BOAT_WOL_PORT and BOAT_WOL_COUNT came to be missing from it, and boat.conf
+# silently won over the environment for exactly those three.
+#
+# Testing "is it set" rather than "is it non-empty" is deliberate too:
+# BOAT_SSH_OPTS= on the command line is a legitimate "ignore what my config
+# says", and must not be treated as absent.
+load_boat_conf() {
+  local conf="$1" v
+  declare -A _from_env=()
+  while IFS= read -r v; do
+    _from_env["$v"]="${!v}"
+  done < <(compgen -v | grep '^BOAT_' || true)
+  if [[ -r "${conf}" ]]; then
+    # shellcheck source=/dev/null
+    source "${conf}"
+  fi
+  for v in "${!_from_env[@]}"; do
+    printf -v "$v" '%s' "${_from_env[$v]}"
+  done
+}
 
 confirm() {
   # confirm "message"  -> returns 0 if user types y/Y

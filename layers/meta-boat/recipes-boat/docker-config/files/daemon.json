@@ -6,5 +6,10 @@
       "runtimeArgs": []
     }
   },
-  "data-root": "/data/docker"
+  "data-root": "/data/docker",
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  }
 }

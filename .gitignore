@@ -1,10 +1,27 @@
 # Yocto working tree (layers cloned + build output) — never commit
 /yocto/
 
+# kas (README "kas build kas/xavier-nx-nvme.yml") defaults KAS_WORK_DIR to the
+# current directory, so it clones the upstream layers and builds *here*, not
+# under /yocto/. Without these, one documented command fills `git status` with
+# thousands of untracked upstream files.
+/build/
+/poky/
+/meta-openembedded/
+/meta-tegra/
+/meta-tegra-community/
+/meta-virtualization/
+/.kas/
+
 # Editor / OS cruft
 *.swp
 *~
 .DS_Store
+
+# Merge/patch leftovers - this repo carries .patch files under meta-boat, and a
+# stray .orig next to one is easy to commit by accident
+*.orig
+*.rej
 
 # Python bytecode cache (e.g. scripts/pyfix/sitecustomize.py)
 __pycache__/

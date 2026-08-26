@@ -18,6 +18,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${HERE}/lib.sh"
 
+# Per-boat settings live in wol/boat.conf (git-ignored; wol/boat.conf.example
+# is the template). Read them here too, so `./scripts/wake-boat.sh` - the
+# invocation README and docs/05 document - honours the same BOAT_MAC and
+# broadcast address as wol/boat-wake.sh instead of silently falling back to
+# 255.255.255.255 and refusing to wake a board on another subnet. The
+# environment still wins over the file; see load_boat_conf in lib.sh.
+load_boat_conf "${HERE}/../wol/boat.conf"
+
 MAC="${1:-${BOAT_MAC:-}}"
 # 255.255.255.255 reaches the board only from the SAME layer-2 segment: it is
 # never routed. From another subnet, pass that subnet's directed broadcast
@@ -26,7 +34,10 @@ MAC="${1:-${BOAT_MAC:-}}"
 # packet "does nothing". Over the internet, wake through a VPN endpoint on
 # the boat's LAN (wireguard-tools is on the image for exactly this) rather
 # than by port-forwarding UDP 9.
-BCAST="${2:-${BOAT_WOL_BROADCAST:-255.255.255.255}}"
+# Two spellings, one meaning: BOAT_WOL_BROADCAST is this script's own name for
+# it, BOAT_BROADCAST is what wol/boat.conf.example documents. Accept both
+# rather than have a value set in boat.conf be silently ignored here.
+BCAST="${2:-${BOAT_WOL_BROADCAST:-${BOAT_BROADCAST:-255.255.255.255}}}"
 PORT="${BOAT_WOL_PORT:-9}"
 COUNT="${BOAT_WOL_COUNT:-3}"
 

@@ -1,3 +1,8 @@
+# shellcheck shell=sh
+# No shebang: this is sourced by the login shell as /etc/profile.d/*.sh,
+# not executed. The directive above is what tells a static check which
+# dialect to hold it to.
+#
 # Installed as /etc/profile.d/boat-xfce-autostart.sh.
 #
 # Starts the helm display: an Xorg server plus the XFCE desktop, run as the
@@ -47,7 +52,21 @@ if [ "$(id -u)" = "@BOAT_HMI_UID@" ] && [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/
     #
     # X server log: ~/.local/share/xorg/Xorg.0.log (Xorg redirects there by
     # itself when it isn't running as root - /var/log isn't writable here).
-    # Session/desktop output goes to the file below.
+    # Session/desktop output goes next to it, in the session user's own
+    # directory rather than the fixed /tmp path this used to use: /tmp is 1777,
+    # so any local uid could pre-create that name, and the log records what the
+    # helm session is doing.
+    #
+    # The mkdir is what makes the redirect safe to `exec` into. If the
+    # redirection fails, `exec` fails, this non-interactive login shell exits,
+    # agetty respawns it, autologin runs it again - a tight loop with the helm
+    # display never coming up and nothing on screen to say why. Falling back to
+    # /dev/null keeps a missing log from costing the desktop.
+    BOAT_LOG_DIR="${HOME}/.local/share"
+    mkdir -p "$BOAT_LOG_DIR" 2>/dev/null || :
+    BOAT_LOG="${BOAT_LOG_DIR}/boat-xfce-session.log"
+    : >> "$BOAT_LOG" 2>/dev/null || BOAT_LOG=/dev/null
+
     exec startx /usr/bin/boat-xfce-session -- :0 vt1 \
-        >/tmp/boat-xfce-session.log 2>&1
+        >"$BOAT_LOG" 2>&1
 fi

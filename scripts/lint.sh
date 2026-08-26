@@ -39,9 +39,28 @@ skip_check()  {
 # uses on purpose - SC2016 (single-quoted '${...}' written verbatim into
 # local.conf by 02-configure-build.sh), SC2028 (the literal "\n" separators
 # SANITY_TESTED_DISTROS needs), SC1091 (oe-init-build-env, not in this repo).
+#
+# EVERY shell script in the repo, not just scripts/: wol/ is the host-side
+# sleep/wake tooling and layers/meta-boat/**/files/ is what actually runs on
+# the boat - including boat-grow-rootfs, which rewrites a partition table.
+# Those were the ones a lint pass most needed to cover and the ones it used to
+# skip. They are #!/bin/sh targets, so shellcheck also catches bashisms that
+# would only fail on the device.
+#
+# boat-xfce-session has no .sh suffix (it is /usr/bin/boat-xfce-session), so
+# it is named explicitly rather than found by the glob.
 log "shellcheck ..."
 if command -v shellcheck >/dev/null 2>&1; then
-    if shellcheck -x -S warning scripts/*.sh; then
+    mapfile -t SH_FILES < <(
+        printf '%s\n' scripts/*.sh wol/*.sh
+        find layers -name '*.sh' -print
+        printf '%s\n' layers/meta-boat/recipes-boat/hmi-autostart/files/boat-xfce-session
+    )
+    # -P: `# shellcheck source=lib.sh` directives are resolved relative to a
+    # source path, not to the file holding them, so both directories that hold
+    # a sourced helper have to be on that list.
+    if shellcheck -x -P scripts -P wol -S warning "${SH_FILES[@]}"; then
+        log "  ${#SH_FILES[@]} shell file(s) checked"
         log "  shellcheck: clean"
     else
         fail_check "shellcheck reported problems"
@@ -54,14 +73,26 @@ fi
 # The kas build config, this repo's own CI workflows, and every compose
 # example the boat-compose recipe ships to the target. A compose file that
 # doesn't parse is only discovered on the boat otherwise.
+# One guard for all three python-based checks. Without it a host with no
+# python3 does not SKIP them - the heredocs simply fail, and the script reports
+# "broken relative link(s)" and "recipe references a file:// that doesn't
+# exist", sending the reader after defects that do not exist. A check you
+# cannot run must never look like a check that failed.
+HAVE_PYTHON=0
+command -v python3 >/dev/null 2>&1 && HAVE_PYTHON=1
+
 log "YAML syntax ..."
-if python3 -c 'import yaml' 2>/dev/null; then
+if [[ "${HAVE_PYTHON}" == "0" ]]; then
+    skip_check "python3 not installed - YAML syntax not checked"
+elif python3 -c 'import yaml' 2>/dev/null; then
     if python3 - <<'PY'; then
 import glob, sys, yaml
 bad = 0
-files = sorted(glob.glob("kas/*.yml")
-               + glob.glob(".github/workflows/*.yml")
-               + glob.glob("layers/**/*.yml.example", recursive=True))
+files = sorted(set(glob.glob("kas/*.yml") + glob.glob("kas/*.yaml")
+                   + glob.glob(".github/workflows/*.yml")
+                   + glob.glob(".github/workflows/*.yaml")
+                   + glob.glob("layers/**/*.yml.example", recursive=True)
+                   + glob.glob("layers/**/*.yaml.example", recursive=True)))
 if not files:
     print("  no YAML files found - has the layout changed?", file=sys.stderr)
     sys.exit(1)
@@ -88,10 +119,16 @@ fi
 # scripts by relative path, so a rename silently rots them. Only file
 # existence is checked, not "#section" anchors.
 log "Markdown relative links ..."
-if python3 - <<'PY'; then
+if [[ "${HAVE_PYTHON}" == "0" ]]; then
+    skip_check "python3 not installed - Markdown links not checked"
+elif python3 - <<'PY'; then
 import os, re, sys, glob
 LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
-docs = sorted(glob.glob("*.md") + glob.glob("docs/*.md") + glob.glob("layers/**/*.md", recursive=True))
+# Every Markdown file in the repo except anything under the git-ignored
+# yocto/ working tree. An allowlist of directories is how wol/README.md
+# came to be the one document nobody link-checked.
+docs = sorted(d for d in glob.glob("**/*.md", recursive=True)
+              if not d.startswith("yocto/"))
 bad, checked = [], 0
 for doc in docs:
     base = os.path.dirname(doc)
@@ -123,7 +160,9 @@ fi
 # Entries containing ${...} are skipped - those are LIC_FILES_CHKSUM pointing
 # at ${COMMON_LICENSE_DIR} in poky, not files in this layer.
 log "Recipe file:// references ..."
-if python3 - <<'PY'; then
+if [[ "${HAVE_PYTHON}" == "0" ]]; then
+    skip_check "python3 not installed - recipe file:// references not checked"
+elif python3 - <<'PY'; then
 import os, re, sys, glob
 SRC = re.compile(r"file://([^\s\"'\;]+)")
 bad, checked = [], 0

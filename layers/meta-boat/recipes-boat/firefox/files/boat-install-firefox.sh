@@ -29,6 +29,18 @@
 # license manifests, and installing it needs working DNS and outbound HTTPS.
 # In exchange the boat gets a Firefox that is current on the day you run this,
 # and can be brought up to date later by running it again.
+#
+# WHAT THE CHECKSUM BELOW IS, AND IS NOT
+# It fetches SHA256SUMS from the SAME host over the SAME TLS connection as the
+# tarball. That catches a truncated or corrupted download, and a CDN edge
+# serving one stale file - it does NOT catch anyone who can serve content for
+# that host, because they can substitute both files consistently. Mozilla also
+# publishes SHA256SUMS.asc, signed with the Mozilla Software Release key; a
+# gpgv check against a pubkey shipped in this recipe is what would make this
+# an authenticity check rather than an integrity check, and is the obvious
+# next step. Until then: the trust anchor here is TLS to mozilla.net, nothing
+# more, and this comment says so rather than letting "verified" imply more
+# than it delivers.
 set -eu
 
 SELF=boat-install-firefox
@@ -76,6 +88,13 @@ while [ "$#" -gt 0 ]; do
         -i|--install) MODE=install ;;
         -r|--remove)  MODE=remove ;;
         -V|--version) [ "$#" -ge 2 ] || die "--version needs a value"
+                      # Goes straight into a URL path below, so keep it to what
+                      # a Mozilla release string can contain - "../.." would
+                      # otherwise walk out of /pub/firefox/releases.
+                      case "$2" in
+                          ''|*[!0-9.abcdefghijklmnopqrstuvwxyz]*)
+                              die "not a Firefox version: '$2' (expected e.g. 154.0.1 or 128.5.0esr)" ;;
+                      esac
                       WANT_VERSION="$2"; shift ;;
         -h|--help)    usage 0 ;;
         *)            echo "${SELF}: unknown argument '$1'" >&2; usage 1 ;;
@@ -99,8 +118,15 @@ installed_version() {
 # Resolve the redirector to a concrete version. Mozilla's URL carries it as
 # .../releases/<version>/linux-aarch64/... which is the only place the latest
 # version number is exposed without an API call.
+# Shared curl options. Without a timeout, a marina wifi that associates and
+# then blackholes (a captive portal, a weak link) leaves this hanging with no
+# output at all - the operator sees a wedged terminal, not "no network".
+# --proto '=https' refuses a redirect that downgrades to plain HTTP.
+CURL_OPTS="--proto =https --tlsv1.2 --connect-timeout 15 --retry 3 --retry-delay 5"
+
 latest_version() {
-    curl -sIL -o /dev/null -w '%{url_effective}' "$BASE_URL" 2>/dev/null \
+    # shellcheck disable=SC2086 # CURL_OPTS is a deliberately split option list
+    curl -sIL $CURL_OPTS --max-time 60 -o /dev/null -w '%{url_effective}' "$BASE_URL" 2>/dev/null \
         | sed -n 's|.*/releases/\([^/]*\)/.*|\1|p'
 }
 
@@ -150,18 +176,37 @@ fi
 TARBALL="firefox-${LATEST}.tar.xz"
 URL="${CDN}/${LATEST}/linux-aarch64/en-US/${TARBALL}"
 WORK="$(mktemp -d /var/tmp/boat-firefox.XXXXXX)"
-# Leave nothing behind on any exit path, including a failed download.
-trap 'rm -rf "$WORK"' EXIT INT TERM
+# Leave nothing behind on any exit path, including a failed download - and put
+# back the previous install if the swap below did not complete. Without that
+# rollback, a `mv` that fails (ENOSPC on the 16 GiB rootfs is realistic) leaves
+# NO /opt/firefox at all while the working copy sits unmentioned at
+# /opt/firefox.old - which the next run then starts by deleting.
+cleanup() {
+    rm -rf "$WORK"
+    if [ -d "${PREFIX}.old" ] && [ ! -d "$PREFIX" ]; then
+        mv "${PREFIX}.old" "$PREFIX" 2>/dev/null \
+            && echo "${SELF}: install failed - restored the previous Firefox" >&2
+    fi
+}
+# INT/TERM need their own handlers that EXIT: a POSIX shell RESUMES at the
+# interrupted point after a trap handler that does not exit, so Ctrl-C during
+# the download would remove $WORK and then fall into the checksum step against
+# a file that no longer exists.
+trap 'cleanup' EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 say "downloading ${TARBALL}"
-curl -fL --progress-bar -o "${WORK}/${TARBALL}" "$URL" \
+# shellcheck disable=SC2086 # CURL_OPTS is a deliberately split option list
+curl -fL $CURL_OPTS --max-time 1800 --progress-bar -o "${WORK}/${TARBALL}" "$URL" \
     || die "download failed: $URL"
 
 # Verify before unpacking, not after: this is a binary that will run as the
 # desktop user on a machine that steers a boat. Mozilla publishes SHA256SUMS
 # per release over the same HTTPS host.
 say "verifying checksum against Mozilla's SHA256SUMS"
-EXPECTED="$(curl -fsL "${CDN}/${LATEST}/SHA256SUMS" 2>/dev/null \
+# shellcheck disable=SC2086 # CURL_OPTS is a deliberately split option list
+EXPECTED="$(curl -fsL $CURL_OPTS --max-time 120 "${CDN}/${LATEST}/SHA256SUMS" 2>/dev/null \
     | awk -v p="linux-aarch64/en-US/${TARBALL}" '$2 == p {print $1}')"
 [ -n "$EXPECTED" ] || die "no SHA256SUMS entry for ${TARBALL} - refusing to install"
 ACTUAL="$(sha256sum "${WORK}/${TARBALL}" | cut -d' ' -f1)"
@@ -195,7 +240,10 @@ say "installing to ${PREFIX}"
 mkdir -p "$(dirname "$PREFIX")"
 rm -rf "${PREFIX}.old"
 [ -d "$PREFIX" ] && mv "$PREFIX" "${PREFIX}.old"
-mv "${WORK}/firefox" "$PREFIX"
+# If this fails, the EXIT trap puts ${PREFIX}.old back - which is why .old is
+# only removed AFTER the new tree is confirmed in place, not before the move.
+mv "${WORK}/firefox" "$PREFIX" || die "could not move the new Firefox into ${PREFIX}"
+[ -x "${PREFIX}/firefox" ] || die "${PREFIX}/firefox is not there after the move"
 rm -rf "${PREFIX}.old"
 
 mkdir -p "$(dirname "$BINLINK")"

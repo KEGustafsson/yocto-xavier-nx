@@ -13,10 +13,14 @@ INIT_MANAGER = "systemd"
 # virtualization -> Docker + nvidia-container-toolkit
 # x11 + opengl   -> the Xorg / XFCE helm desktop (packagegroup-boat-hmi)
 # pam            -> the systemd-logind session the autologin desktop needs
+# polkit         -> what lets the desktop user reboot/shut down/suspend at all.
+#                   logind authorizes those through polkit and poky gates that
+#                   on this exact distro feature, so without it XFCE's Log Out
+#                   dialog has Shut Down / Restart / Suspend greyed out.
 # Must be set globally like this, not in the image recipe: DISTRO_FEATURES is
 # evaluated per-recipe at parse time. Not needed for a Phase-1
 # core-image-base build.
-DISTRO_FEATURES:append = " virtualization opengl pam x11"
+DISTRO_FEATURES:append = " virtualization opengl pam x11 polkit"
 
 # ---- Newer-host accommodations (see docs/02 "Newer hosts") ----
 # kirkstone's tested-distro list stops at ubuntu-24.04; sanity.bbclass splits
@@ -46,6 +50,25 @@ TNSPEC_BOOTDEV = "nvme0n1p1"
 # non-sparse, so it dominates flash time. Run `boat-grow-rootfs --grow` on the
 # booted board to extend it over the rest of the drive.
 ROOTFSPART_SIZE = "17179869184"
+
+# Total capacity of the external (NVMe) device, in 512-byte sectors - NOT just
+# the rootfs partition. It has to leave room for the kernel/boot, recovery,
+# esp and UDA partitions that share the drive, or tegraparser_v2 cannot place
+# APP at all and initrd-flash dies with
+#   "End sector for APP, expected at: <N>, actual: 0"
+# 1 GiB of headroom over ROOTFSPART_SIZE is comfortably more than they need;
+# the value does not have to match the SSD's real capacity, only be >= what is
+# actually used. (17179869184 + 1073741824) / 512:
+TEGRA_EXTERNAL_DEVICE_SECTORS = "35651584"
+
+# jetson-xavier-nx-devkit's default internal layout
+# (flash_l4t_t194_spi_sd_p3668.xml) still carries an internal APP partition
+# sized from ROOTFSPART_SIZE even though TNSPEC_BOOTDEV redirects the rootfs to
+# NVMe - and tegraparser_v2 then rejects the generated flash.xml.bin with the
+# same "End sector for APP" error. Switch the INTERNAL template to the
+# QSPI-only variant, which has no APP partition; meta-tegra already wires up
+# the correct external/NVMe template by itself.
+PARTITION_LAYOUT_TEMPLATE_DEFAULT = "flash_l4t_t194_qspi_p3668.xml"
 
 # ---- Optional but recommended ----
 # Keep downloads and shared state outside the build dir.

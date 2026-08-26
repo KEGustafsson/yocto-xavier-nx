@@ -115,7 +115,9 @@ RDEPENDS:${PN}-nvidia-host = "\
 # packagegroup is safe: debian.bbclass only renames a package holding exactly
 # one shared library, and cuda-toolkit is an ALLOW_EMPTY metapackage while
 # cudnn/tensorrt-core/tensorrt-plugins each ship two or more.
-# OpenCV, and it comes out BETTER here than a JetPack install gives you:
+#
+# This group also carries OpenCV, and it comes out BETTER here than a JetPack
+# install gives you:
 # meta-tegra's opencv_4.5.%.bbappend turns on -DWITH_CUDA=ON with
 # CUDA_ARCH_BIN="7.2" (TEGRA_CUDA_ARCHITECTURE=72 for tegra194) and adds
 # "cuda dnn" to PACKAGECONFIG automatically, because "cuda" is in
@@ -143,9 +145,10 @@ RDEPENDS:${PN}-nvidia-host = "\
 #
 # `opencv` is a metapackage whose RDEPENDS is generated from every runtime
 # sub-package (libopencv-core, -imgproc, -dnn, -videoio, ...), so naming it
-# gets the whole library set. It also drags in opencv-samples, since the
-# default PACKAGECONFIG has "samples" - drop that with a PACKAGECONFIG:remove
-# bbappend if the rootfs gets tight. python3-opencv is the cv2 module.
+# gets the whole library set. meta-oe's default PACKAGECONFIG includes
+# "samples", which would drag opencv-samples in with it; this layer already
+# drops that in external/openembedded-layer/recipes-support/opencv/, so nothing
+# further is needed here. python3-opencv is the cv2 module.
 RDEPENDS:${PN}-cuda = "\
     cuda-toolkit \
     cudnn \
@@ -264,13 +267,16 @@ RDEPENDS:${PN}-connectivity = "\
 # xfce4-session starts them and they appear in the panel's systray plugin -
 # no wiring needed in boat-hmi-autostart.
 #
-# Neither needs polkit, which is deliberately not in this image's
-# DISTRO_FEATURES: NetworkManager is therefore built with -Dpolkit=false, so
-# it does no per-action authorization and the desktop user can manage
-# connections directly - the right trade for a single-operator appliance.
-# blueman's optional pulseaudio integration is likewise off (no "pulseaudio"
-# distro feature), so it brings in no audio stack; its thunar-sendto
-# integration IS on, and thunar is already here via packagegroup-xfce-base.
+# Neither needs polkit itself. Note that polkit IS in this image's
+# DISTRO_FEATURES (see the block below, and scripts/02-configure-build.sh) -
+# an earlier version of this comment said the opposite and concluded that
+# NetworkManager is built -Dpolkit=false. It is not: NM does real per-action
+# checks here. Its stock rules allow an active local session, which the tty1
+# autologin session is, so nm-applet keeps working - that is the one thing
+# worth re-testing after any change to the session's seat.
+# blueman's optional pulseaudio integration is off (no "pulseaudio" distro
+# feature), so it brings in no audio stack; its thunar-sendto integration IS
+# on, and thunar is already here via packagegroup-xfce-base.
 RDEPENDS:${PN}-hmi = "\
     packagegroup-core-x11-xserver \
     packagegroup-xfce-base \
@@ -292,7 +298,8 @@ RDEPENDS:${PN}-hmi = "\
 # one. `watchdog` is the right choice here: it can run custom health checks,
 # not just keep the hardware watchdog fed.
 # RAUC (A/B updates) needs the meta-rauc layer, not yet fetched by this
-# project - see docs/05 "Next steps" #7; add it as a deliberate follow-up.
+# project - see docs/05 "Updates (not implemented - future direction)"; add it
+# as a deliberate follow-up.
 # fake-hwclock is likewise not packaged in these kirkstone-era layers; fit a
 # hardware RTC (docs/05) or backport the recipe if the clock-at-boot gap
 # (1970 until the first NTP sync) matters before that lands.
@@ -301,12 +308,13 @@ RDEPENDS:${PN}-reliability = "\
 "
 
 # --- Field diagnostics / serviceability -------------------------------------
-# sudo: without it the image has NO route from the autologin session to root.
-# The "boat" user is created with a locked password ('*' in boat-image.bb),
-# and root's password is only empty while IMAGE_FEATURES carries
-# "debug-tweaks" - turn that off for a real deployment (which you should: it
-# also makes sshd accept empty passwords and root logins) and `su` stops
-# working too, leaving the console session with no way to escalate at all.
+# sudo: the route from the autologin session to root that survives tightening
+# the image. Today "boat" has an EMPTY password (useradd -p '' in
+# boat-image.bb) and root is reachable over SSH with no credential at all
+# (empty-root-password / allow-empty-password / allow-root-login, declared
+# explicitly in that recipe) - so `su` happens to work. Both of those are a
+# deliberate bench-image choice that a real deployment should reverse, and the
+# moment it is reversed `su` stops working and this is what is left.
 # boat-image.bb installs the matching /etc/sudoers.d/boat rule; sudo without
 # that rule would be equally useless.
 RDEPENDS:${PN}-security = "\

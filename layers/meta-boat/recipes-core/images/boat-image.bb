@@ -41,31 +41,45 @@ IMAGE_INSTALL:append = " \
     boat-grow-rootfs \
     boat-firefox \
     kernel-modules \
+    kernel-module-usb-serial \
     "
 
-# USB-serial and other local-sensor adapters a containerized app might need
-# passed through (docs/05 "Local device passthrough into containers").
+# kernel-module-usb-serial is in IMAGE_INSTALL above, NOT in
+# MACHINE_ESSENTIAL_EXTRA_RRECOMMENDS where it used to be: that variable is
+# read by packagegroup-core-boot.bb, a DIFFERENT recipe, which cannot see an
+# assignment made here - the same per-recipe parse trap this file warns about
+# for DISTRO_FEATURES a few lines down. It appeared to work only because
+# `kernel-modules` pulls in every module; the day that is dropped for size,
+# USB-serial support would have disappeared with no error.
+#
 # CAN kernel modules dropped: NMEA 2000/CAN is provided by an external
 # interface now, not this host (docs/05 "What changed from the earlier
 # scaffold").
-MACHINE_ESSENTIAL_EXTRA_RRECOMMENDS += " \
-    kernel-module-usb-serial \
-    "
 
 # Give the rootfs headroom for Docker's local image cache, logs, and compose
 # state before /data (docs/05 "Reliability") is provisioned and dockerd's
 # data-root actually moves there. Bump if `docker pull` starts failing ENOSPC.
 IMAGE_ROOTFS_EXTRA_SPACE = "4194304"
 
-# Reproducible, serviceable systemd system.
-# NOTE: "virtualization x11 opengl pam" (docker/nvidia-container-toolkit's
-# REQUIRED_DISTRO_FEATURES + the Xorg/XFCE helm desktop) live in local.conf,
-# not here -
-# DISTRO_FEATURES is evaluated per-recipe at parse time against the global
-# distro config, so an image-recipe-local append can't retroactively
-# unskip another recipe that already parsed as "missing required distro
-# feature". See scripts/02-configure-build.sh.
-DISTRO_FEATURES:append = " systemd"
+# What this image cannot be built without. DISTRO_FEATURES is evaluated
+# per-recipe at parse time against the global distro config, so an
+# image-recipe-local append cannot retroactively unskip another recipe that
+# already parsed as "missing required distro feature" - which is why these live
+# in local.conf (scripts/02-configure-build.sh writes them) and why the
+# `DISTRO_FEATURES:append = " systemd"` that used to sit here was not merely
+# redundant but actively misleading: it would have made THIS recipe parse as if
+# systemd were enabled while every package in the image had been built for
+# sysvinit, producing an inconsistent rootfs rather than an error.
+#
+# features_check turns each of those into a legible parse-time skip naming the
+# missing feature, instead of a failure somewhere downstream:
+#   systemd        - INIT_MANAGER = "systemd" in local.conf
+#   virtualization - docker-ce and nvidia-container-toolkit
+#   x11 + opengl   - the Xorg/XFCE helm desktop
+#   pam            - the logind session the autologin desktop needs
+#   polkit         - reboot/shutdown/suspend from that desktop
+inherit features_check
+REQUIRED_DISTRO_FEATURES = "systemd virtualization x11 opengl pam polkit"
 
 # Login user for the console/XFCE session (docs/05 "Boot flow for the
 # display"). Fixed scaffold user for now - replace with docs/05's interactive
@@ -126,8 +140,9 @@ EXTRA_USERS_PARAMS = "\
 # removing them survivable.
 #
 # NOPASSWD is not laziness. It was originally forced - the account's password
-# was locked, so no prompt could ever be satisfied - and it stays because an
-# empty password is no better a thing to prompt for. The grant is no wider than
+# was locked ('*'), so no prompt could ever be satisfied - and it stays now
+# that the password is empty instead, because an empty password is no better a
+# thing to prompt for. The grant is no wider than
 # what the login already implies, since tty1 autologs "boat" in and that user
 # is in the "docker" group, which is root-equivalent by design (a container
 # can bind-mount /). Physical access to the helm display is already root.
@@ -145,8 +160,9 @@ install_boat_sudoers() {
     # redirection here would not stop the rest of the postprocess.
     rm -f ${IMAGE_ROOTFS}${sysconfdir}/sudoers.d/boat
     cat > ${IMAGE_ROOTFS}${sysconfdir}/sudoers.d/boat <<EOF
-# Installed by boat-image.bb. The account's password is locked, so this has
-# to be NOPASSWD to be usable at all.
+# Installed by boat-image.bb. NOPASSWD because the account's password is EMPTY
+# (useradd -p '' in that recipe) - prompting for an empty password buys
+# nothing, and this grant is no wider than the tty1 autologin already implies.
 ${BOAT_HMI_USER} ALL=(ALL) NOPASSWD: ALL
 EOF
     # sudo refuses to read a drop-in that is group- or world-writable.
@@ -169,6 +185,14 @@ ROOTFS_POSTPROCESS_COMMAND += "install_boat_sudoers; "
 # ~110s every boot for no reason - masking it (equivalent to `systemctl
 # mask`) cuts docker+compose startup from ~135s to ~22s after boot.
 mask_unused_networkd() {
+    # Guarded on NetworkManager actually being in the image. Masking both
+    # networkd units in an image that then turns out to have no network manager
+    # at all leaves it with no networking and no error to explain why - and
+    # this recipe cannot see what packagegroup-boat-connectivity installs.
+    if [ ! -e ${IMAGE_ROOTFS}${systemd_system_unitdir}/NetworkManager.service ]; then
+        bbwarn "NetworkManager is not in this image; leaving systemd-networkd unmasked"
+        return
+    fi
     install -d ${IMAGE_ROOTFS}${sysconfdir}/systemd/system
     for u in systemd-networkd.service systemd-networkd-wait-online.service; do
         ln -sf /dev/null ${IMAGE_ROOTFS}${sysconfdir}/systemd/system/$u

@@ -11,11 +11,14 @@ HOMEPAGE = "https://github.com/docker/compose"
 LICENSE = "Apache-2.0"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/Apache-2.0;md5=89aea4e17d99a7cacdbeed46a0096b10"
 
-COMPOSE_PV = "5.3.1"
+# PV, not a private COMPOSE_PV: the package version, the license manifest and
+# `rpm -q` on the device all report PV, and reporting 1.0 for a 5.3.1 payload
+# makes "which compose is on this boat?" unanswerable from the image itself.
+PV = "5.3.1"
 
 # Prebuilt static Go binary, arm64 only - this project only ever targets
 # aarch64 Jetson machines, so no multi-arch SRC_URI branching.
-SRC_URI = "https://github.com/docker/compose/releases/download/v${COMPOSE_PV}/docker-compose-linux-aarch64;downloadfilename=docker-compose-v${COMPOSE_PV}-linux-aarch64;name=compose"
+SRC_URI = "https://github.com/docker/compose/releases/download/v${PV}/docker-compose-linux-aarch64;downloadfilename=docker-compose-v${PV}-linux-aarch64;name=compose"
 SRC_URI[compose.sha256sum] = "aa611e811d0ea25897839c404bfb5bf93ce706dc51c500a4457890f5d0606a86"
 
 COMPATIBLE_HOST = "aarch64.*-linux"
@@ -30,7 +33,7 @@ do_install() {
     # Docker's CLI plugin search path list includes this system-wide
     # directory (matches the official docker-compose-plugin .deb layout).
     install -d ${D}${libexecdir}/docker/cli-plugins
-    install -m 0755 ${WORKDIR}/docker-compose-v${COMPOSE_PV}-linux-aarch64 \
+    install -m 0755 ${WORKDIR}/docker-compose-v${PV}-linux-aarch64 \
         ${D}${libexecdir}/docker/cli-plugins/docker-compose
 }
 

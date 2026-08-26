@@ -46,8 +46,14 @@ FILES:${PN} = "${bindir}/boat-install-firefox"
 # already pulled in by packagegroup-boat-hmi's desktop, and NSS/NSPR/sqlite
 # are bundled inside the tarball itself. Nothing extra is needed; if that ever
 # changes, the symptom is the binary failing at exec with a missing .so.
+# ca-certificates is not optional here even though curl "works" without it on
+# some images: the script pins --proto '=https', so an empty trust store turns
+# every download into a TLS failure rather than a silent downgrade. It is in
+# packagegroup-boat-containers too, but this package must not depend on that
+# packagegroup being installed.
 RDEPENDS:${PN} = "\
     curl \
+    ca-certificates \
     tar \
     xz \
     coreutils \

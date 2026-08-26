@@ -72,10 +72,23 @@ case "$BOAT_SLEEP_DELAY" in
     ''|*[!0-9]*) die "the suspend delay must be a whole number of seconds (--delay, or BOAT_SLEEP_DELAY in $CONF), got '$BOAT_SLEEP_DELAY'" ;;
 esac
 
-[ "$(id -u)" = "0" ] || die "must run as root (arming WoL and selecting the sleep state both write to /sys) - try 'ssh root@<boat>'"
+# Every mode except --status writes: --dry-run still arms Wake-on-LAN with
+# `ethtool -s`, and a real run also selects the sleep state in /sys. --status
+# writes nothing at all - /sys/power/mem_sleep is world-readable and
+# `boat-wol-arm --check` only reads back - so requiring root for it made the
+# one command you would reach for from the unprivileged "boat" account fail for
+# no reason. boat-grow-rootfs gates root on its writing mode alone; this now
+# matches.
+if [ "$STATUS_ONLY" != "1" ]; then
+    [ "$(id -u)" = "0" ] || die "must run as root (arming WoL and selecting the sleep state both write to /sys) - try 'ssh root@<boat>'. 'boat-sleep --status' reports readiness and needs no privileges."
+fi
 
 # --- Is suspend-to-RAM there at all? ---------------------------------------
-[ -w /sys/power/state ] || die "/sys/power/state is missing - this kernel has no suspend support (CONFIG_SUSPEND)"
+# -e, not -w: the file is 0644 root:root, so -w would fail for an unprivileged
+# `boat-sleep --status` and report "this kernel has no suspend support", which
+# is both wrong and unrelated to the real problem. Writability is root's to
+# have, and root is already required for every mode that writes.
+[ -e /sys/power/state ] || die "/sys/power/state is missing - this kernel has no suspend support (CONFIG_SUSPEND)"
 grep -qw mem /sys/power/state || die "'mem' is not in /sys/power/state ($(cat /sys/power/state)) - suspend-to-RAM is not available on this kernel"
 
 # --- Deep (SC7) rather than s2idle -----------------------------------------
@@ -105,6 +118,21 @@ if [ -e /sys/power/mem_sleep ]; then
             fi ;;
     esac
     sleep_state=$(cat /sys/power/mem_sleep)
+    # Re-reading is not the same as re-checking. `echo deep > mem_sleep` can
+    # succeed and be ignored, and the script would then print "entering SC7"
+    # and suspend to s2idle - silently, which is exactly the outcome the block
+    # above exists to prevent. Skipped under --status, which wrote nothing and
+    # has already said what a real run would do.
+    if [ "$STATUS_ONLY" != "1" ]; then
+        case "$sleep_state" in
+            *"[deep]"*) ;;
+            *)  if [ "$FORCE" = "1" ]; then
+                    say "WARNING: 'deep' is still not the selected state (/sys/power/mem_sleep: $sleep_state) - --force given, continuing"
+                else
+                    die "asked the kernel for 'deep' in /sys/power/mem_sleep but it did not take (still: $sleep_state) - this would suspend to s2idle, not SC7. Re-run with --force to accept that."
+                fi ;;
+        esac
+    fi
 fi
 
 # --- Arm Wake-on-LAN before, not after, deciding to suspend ----------------

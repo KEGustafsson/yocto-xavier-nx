@@ -177,7 +177,7 @@ if command -v dumpe2fs >/dev/null 2>&1; then
     fi
 fi
 if [ "$FS_EXACT" -eq 0 ]; then
-    FS_1K="$(df -k / 2>/dev/null | awk 'NR==2 {print $2}')"
+    FS_1K="$(df -Pk / 2>/dev/null | awk 'NR==2 {print $2}')"
     [ -n "$FS_1K" ] || FS_1K=0
     FS_SECTORS=$(( FS_1K * 2 ))
 fi
@@ -187,8 +187,14 @@ FS_GAP=$(( PART_SECTORS - FS_SECTORS ))
 # --- Is anything allocated past the rootfs? --------------------------------
 # Only blocks the partition-growing half; a filesystem resize inside the
 # partition it already has is unaffected.
+# Iterate the disk's OWN children under /sys/block/<disk>/, not a prefix glob
+# over every block device: /sys/class/block/sda* also matches sdaa1, sdab1...
+# and /sys/class/block/nvme0n1* also matches nvme0n10p1 - partitions of
+# completely unrelated drives. It fails safe (a spurious blocker only ever
+# prevents a grow) but it would refuse the grow, on a real boat with a large
+# enclosure attached, for a reason that is not true.
 BLOCKERS=""
-for pfile in /sys/class/block/"${DISK_KNAME}"*/partition; do
+for pfile in /sys/block/"${DISK_KNAME}"/*/partition; do
     [ -e "$pfile" ] || continue
     pdir="$(dirname "$pfile")"
     pname="$(basename "$pdir")"
@@ -200,8 +206,11 @@ for pfile in /sys/class/block/"${DISK_KNAME}"*/partition; do
 done
 
 # --- Report -----------------------------------------------------------------
-FS_USED="$(df -h / | awk 'NR==2 {print $3}')"
-FS_SIZE="$(df -h / | awk 'NR==2 {print $2}')"
+# -P (POSIX output): plain `df` wraps onto a second line when the device name
+# is long, and then `awk NR==2` reads the wrapped device name instead of the
+# sizes. -P guarantees one line per filesystem.
+FS_USED="$(df -Ph / | awk 'NR==2 {print $3}')"
+FS_SIZE="$(df -Ph / | awk 'NR==2 {print $2}')"
 [ "$FS_EXACT" -eq 1 ] && APPROX="" || APPROX=" (approx)"
 
 echo "${SELF}: disk        ${DISK}  $(human "$DISK_SECTORS")"
@@ -219,14 +228,23 @@ NEED_FS=0
 [ "$FREE_SECTORS" -ge "$MIN_WORTH_IT" ] && NEED_PART=1
 [ "$FS_GAP" -ge "$MIN_WORTH_IT" ] && NEED_FS=1
 
+BLOCKED=0
 if [ "$NEED_PART" -eq 1 ] && [ -n "$BLOCKERS" ]; then
     say "cannot extend the partition - these are allocated after it:${BLOCKERS}"
     say "growing into them would destroy them. The filesystem can still be"
     say "resized inside the partition it already has, if that gap is non-zero."
     NEED_PART=0
+    BLOCKED=1
 fi
 
 if [ "$NEED_PART" -eq 0 ] && [ "$NEED_FS" -eq 0 ]; then
+    # BLOCKED distinguishes "there was nothing to reclaim" from "there was, and
+    # this script refused to". Reporting the first for the second - which is
+    # what it used to do, having just printed the refusal - reads as
+    # everything being fine, and exits 0 to say so.
+    if [ "$BLOCKED" -eq 1 ]; then
+        die "reclaimable space exists but is blocked by the partitions listed above - nothing was changed"
+    fi
     say "nothing to do - the filesystem already fills the disk"
     exit 0
 fi
@@ -296,6 +314,14 @@ if [ "$NEED_PART" -eq 1 ]; then
     say "relocating the GPT backup header to the end of the disk"
     sgdisk --move-second-header "$DISK" >/dev/null
 
+    # --force is not bravado: sfdisk refuses to touch a disk that is in use,
+    # and / is mounted from this very disk, which is the whole premise of an
+    # online grow. It does NOT disable the overlap check - sfdisk still refuses
+    # to extend an entry over a following partition (verified against a
+    # synthetic GPT with a partition after the target: it changed nothing and
+    # exited 0). The BLOCKERS scan above is what turns that silent no-op into a
+    # message.
+    #
     # sfdisk -N edits exactly one entry and leaves every field it is not
     # given alone - crucially the type GUID, unique GUID (PARTUUID) and name,
     # which the bootloader and any PARTUUID= reference depend on. ", +" means
@@ -327,4 +353,4 @@ fi
 say "resizing the ${ROOT_FS} filesystem on ${ROOT_SRC}"
 resize2fs "$ROOT_SRC"
 
-say "done - / is now $(df -h / | awk 'NR==2 {print $2}')"
+say "done - / is now $(df -Ph / | awk 'NR==2 {print $2}')"

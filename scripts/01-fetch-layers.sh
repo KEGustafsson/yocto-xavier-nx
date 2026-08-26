@@ -38,10 +38,26 @@ LAYERS=(
 clone_or_update() {
   local name="$1" url="$2" dst="${LAYERS_DIR}/$1"
   if [[ -d "${dst}/.git" ]]; then
+    # The update below is `reset --hard`, which discards local modifications
+    # without asking. That matters here: this project's own docs tell you to
+    # patch fetched layers (README "Package names ... adjust", docs/06), and
+    # losing such a patch silently produces a build failure somewhere else
+    # entirely.
+    if [[ -n "$(git -C "${dst}" status --porcelain)" ]]; then
+      warn "${name} has local modifications:"
+      git -C "${dst}" status --short | sed 's/^/    /' >&2
+      confirm "Discard them and reset ${name} to origin/${YOCTO_BRANCH}?" \
+        || die "aborted - ${name} left as it is"
+    fi
     log "Updating ${name} (${YOCTO_BRANCH})..."
-    git -C "${dst}" fetch --depth 1 origin "${YOCTO_BRANCH}"
-    git -C "${dst}" checkout -q "${YOCTO_BRANCH}"
-    git -C "${dst}" reset --hard -q "origin/${YOCTO_BRANCH}"
+    # An explicit refspec, not a bare branch name: `git clone --depth 1 -b X`
+    # implies --single-branch, so remote.origin.fetch covers only X. Changing
+    # YOCTO_BRANCH afterwards then leaves no origin/<new> ref for the checkout
+    # below to use, and the script dies with an unexplained
+    # "pathspec did not match any file(s) known to git".
+    git -C "${dst}" fetch --depth 1 origin \
+      "+refs/heads/${YOCTO_BRANCH}:refs/remotes/origin/${YOCTO_BRANCH}"
+    git -C "${dst}" checkout -q -B "${YOCTO_BRANCH}" "origin/${YOCTO_BRANCH}"
   else
     log "Cloning ${name} (${YOCTO_BRANCH})..."
     git clone --depth 1 -b "${YOCTO_BRANCH}" "${url}" "${dst}"

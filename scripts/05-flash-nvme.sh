@@ -20,17 +20,39 @@ source "${HERE}/lib.sh"
 source "${HERE}/env.sh"
 
 [[ -d "${FLASH_DIR}" ]] || die "nothing unpacked; run scripts/04-unpack-tegraflash.sh first"
+# The stamp 04 writes after tar returns. Without it the bundle is a partial
+# extraction (interrupted, or out of disk), and the failure would surface deep
+# inside NVIDIA's tooling with the board already in recovery mode.
+[[ -e "${FLASH_DIR}/.boat-unpack-complete" ]] \
+  || die "${FLASH_DIR} is not a complete unpack - re-run scripts/04-unpack-tegraflash.sh"
 cd "${FLASH_DIR}"
 
 if [[ "${1:-}" == "--host-drive" ]]; then
   DEV="${2:-}"
   [[ -b "${DEV}" ]] || die "usage: $0 --host-drive /dev/sdX   (block device not found)"
   [[ -x ./doexternal.sh ]] || die "doexternal.sh not found - was the image built with TNSPEC_BOOTDEV set to an NVMe device?"
+  # Refuse outright if this disk carries anything currently mounted. There is
+  # no undo on the write below, and "I picked the wrong /dev/sdX" is the
+  # mistake this whole block exists to prevent - a confirmation prompt is not a
+  # backstop when the wrong answer destroys the host's own root filesystem.
+  MOUNTED="$(lsblk -nro MOUNTPOINT "${DEV}" 2>/dev/null | grep -v '^$' || true)"
+  if [[ -n "${MOUNTED}" ]]; then
+    err "${DEV} (or one of its partitions) is currently mounted at:"
+    # shellcheck disable=SC2086 # deliberate splitting: one mountpoint per line
+    printf '    %s\n' ${MOUNTED} >&2
+    die "refusing to erase a disk that is in use"
+  fi
   warn "This will ERASE ${DEV}:"
-  lsblk -o NAME,SIZE,MODEL "${DEV}" || true
+  # MOUNTPOINT and LABEL as well as the model: without them the "double-check
+  # the device" prompt withholds the one piece of information that would catch
+  # a wrong /dev/sdX.
+  lsblk -o NAME,SIZE,MODEL,LABEL,MOUNTPOINT "${DEV}" || true
   confirm "Overwrite ${DEV}?" || die "aborted"
   log "Writing external rootfs to ${DEV} via doexternal.sh ..."
-  sudo ./doexternal.sh "${DEV}"
+  # shift past the mode and its argument, so extra flags are passed through as
+  # this script's own header promises.
+  shift 2
+  sudo ./doexternal.sh "${DEV}" "$@"
   log "Done. Install this drive in the Jetson's NVMe slot and boot."
   exit 0
 fi

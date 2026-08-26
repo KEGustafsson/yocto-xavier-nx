@@ -61,8 +61,13 @@ local_conf_header:
     # boat-image needs these; see the long explanation in
     # scripts/02-configure-build.sh. "virtualization" gates Docker and
     # nvidia-container-toolkit, "x11"/"opengl" the Xorg + XFCE helm desktop,
-    # "pam" the logind session that unprivileged Xorg needs.
-    DISTRO_FEATURES:append = " virtualization opengl pam x11"
+    # "pam" the logind session that unprivileged Xorg needs, and "polkit" is
+    # what lets the desktop user reboot/shut down/suspend at all (without it
+    # XFCE's Log Out dialog has those three greyed out).
+    DISTRO_FEATURES:append = " virtualization opengl pam x11 polkit"
+    # Same rm_work / shared-dir choices the scripts make, so a kas build does
+    # not need 50GB+ of work directories or re-download on every re-init.
+    INHERIT += "rm_work"
     # ---- Newer-host accommodations (see docs/02 "Newer hosts") ----
     # kirkstone's tested-distro list stops at ubuntu-24.04; sanity.bbclass splits
     # this on the literal two-character sequence \n. Append your release rather
@@ -79,6 +84,23 @@ local_conf_header:
     UNINATIVE_MAXGLIBCVERSION:forcevariable = "2.44"
     UNINATIVE_CHECKSUM[x86_64] = "1a2749c1379fd9f60ea3c82f1bf4844924d5a99117b74a70c57036e94e2379d4"
     UNINATIVE_CHECKSUM[aarch64] = "8cf46c7ba75ebb1863fd6b74cf7d7ab910a3e99de4f01b1e9490babf8e6b9e05"
+    # kirkstone predates this host generation: point -native/-nativesdk builds
+    # at gcc-12/g++-12 (`sudo apt-get install gcc-12 g++-12`), the GCC
+    # generation kirkstone expects. Absolute paths because bitbake tasks run
+    # with a sanitized PATH. Drop these four lines if your host GCC is 12.
+    BUILD_CC = "${CCACHE}/usr/bin/gcc-12 ${BUILD_CC_ARCH}"
+    BUILD_CXX = "${CCACHE}/usr/bin/g++-12 ${BUILD_CC_ARCH}"
+    BUILD_CPP = "/usr/bin/gcc-12 ${BUILD_CC_ARCH} -E"
+    BUILD_CCLD = "/usr/bin/gcc-12 ${BUILD_CC_ARCH}"
     # Boot the rootfs from the first NVMe SSD:
     TNSPEC_BOOTDEV = "nvme0n1p1"
     ROOTFSPART_SIZE = "17179869184"
+    # Total external-device capacity in 512-byte sectors - ROOTFSPART_SIZE plus
+    # 1 GiB of headroom for the kernel/recovery/esp/UDA partitions that share
+    # the drive. Without it (and without the QSPI-only internal template below)
+    # tegraparser_v2 rejects the layout and initrd-flash fails with
+    # "End sector for APP, expected at: <N>, actual: 0" - after the whole build
+    # has completed. Both are mandatory for this MACHINE, not tuning; see the
+    # long comment in scripts/02-configure-build.sh.
+    TEGRA_EXTERNAL_DEVICE_SECTORS = "35651584"
+    PARTITION_LAYOUT_TEMPLATE_DEFAULT = "flash_l4t_t194_qspi_p3668.xml"

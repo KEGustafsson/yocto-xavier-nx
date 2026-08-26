@@ -48,7 +48,7 @@ if wait_for_state up "$BOAT_WAKE_TIMEOUT"; then
     log "board is awake."
     log "ssh ${BOAT_SSH_USER}@${BOAT_HOST}"
 else
-    err "no answer after ${BOAT_WAKE_TIMEOUT}s."
+    err "no answer after ${WAIT_ELAPSED}s."
     err "Things to check, in the order they actually go wrong:"
     err "  1. was Wake-on-LAN armed BEFORE it slept?  ethtool eth0 | grep Wake-on"
     err "     (it must read 'g', not 'd' - and it has to be that way at the"

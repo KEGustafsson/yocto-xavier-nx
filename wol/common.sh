@@ -15,31 +15,13 @@ set -euo pipefail
 WOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${WOL_DIR}/.." && pwd)"
 
-_c()   { [[ -t 1 ]] && printf '\033[%sm' "$1" || true; }
-log()  { printf '%s[+]%s %s\n' "$(_c '1;32')" "$(_c 0)" "$*"; }
-warn() { printf '%s[!]%s %s\n' "$(_c '1;33')" "$(_c 0)" "$*" >&2; }
-err()  { printf '%s[-]%s %s\n' "$(_c '1;31')" "$(_c 0)" "$*" >&2; }
-die()  { err "$*"; exit 1; }
+# log/warn/err/die/need/confirm and the "environment beats boat.conf" loader
+# all live in scripts/lib.sh - one definition, so the two halves of this repo
+# cannot drift into printing differently or resolving config differently.
+# shellcheck source=../scripts/lib.sh
+source "${REPO_ROOT}/scripts/lib.sh"
 
-# boat.conf is a file of plain VAR=value assignments, so sourcing it would
-# overwrite anything already exported - the exact opposite of the precedence
-# documented above, and silently: `BOAT_HOST=x wol/boat-sleep.sh` would act on
-# whatever boat.conf says instead. (Found the hard way: an override meant to
-# point at an unreachable test address suspended the real board.) Snapshot
-# what the environment set, source the file, then put the environment back on
-# top.
-WOL_VARS=(BOAT_HOST BOAT_MAC BOAT_BROADCAST BOAT_SSH_USER BOAT_SSH_OPTS
-          BOAT_WAKE_TIMEOUT BOAT_SLEEP_TIMEOUT)
-declare -A _wol_from_env=()
-for _v in "${WOL_VARS[@]}"; do
-    [[ -n "${!_v:-}" ]] && _wol_from_env["$_v"]="${!_v}"
-done
-# shellcheck source=/dev/null
-[[ -r "${WOL_DIR}/boat.conf" ]] && source "${WOL_DIR}/boat.conf"
-for _v in "${!_wol_from_env[@]}"; do
-    printf -v "$_v" '%s' "${_wol_from_env[$_v]}"
-done
-unset _v _wol_from_env
+load_boat_conf "${WOL_DIR}/boat.conf"
 
 : "${BOAT_HOST:=}"
 : "${BOAT_MAC:=}"
@@ -48,7 +30,11 @@ unset _v _wol_from_env
 # Extra ssh options, word-split on purpose: a jump host, an identity file,
 # a non-standard port, or a separate known_hosts while a board is being
 # reflashed and its host key keeps changing. Example:
-#   BOAT_SSH_OPTS="-i ~/.ssh/boat_ed25519 -p 2222"
+#   BOAT_SSH_OPTS="-i $HOME/.ssh/boat_ed25519 -p 2222"
+# Write $HOME rather than ~ : the value is word-split, not tilde-expanded, so
+# a bare ~ reaches ssh literally. It happens to work for IdentityFile and
+# UserKnownHostsFile (ssh expands those itself) and fails confusingly for
+# anything else, e.g. -F.
 : "${BOAT_SSH_OPTS:=}"
 # How long boat-wake.sh waits for the board to answer before giving up. A
 # resume from SC7 took about 7 seconds on a Xavier NX devkit; 90 leaves room
@@ -57,8 +43,32 @@ unset _v _wol_from_env
 # How long boat-sleep.sh waits for the board to actually go quiet.
 : "${BOAT_SLEEP_TIMEOUT:=60}"
 
+# Sender knobs, read by scripts/wake-boat.sh in a CHILD process - so they have
+# to be exported, not merely set. boat.conf is a file of plain assignments, so
+# without this a BOAT_WOL_COUNT set there reached nothing.
+: "${BOAT_WOL_BROADCAST:=${BOAT_BROADCAST}}"
+: "${BOAT_WOL_PORT:=9}"
+: "${BOAT_WOL_COUNT:=3}"
+export BOAT_HOST BOAT_MAC BOAT_BROADCAST BOAT_SSH_USER BOAT_SSH_OPTS \
+       BOAT_WAKE_TIMEOUT BOAT_SLEEP_TIMEOUT \
+       BOAT_WOL_BROADCAST BOAT_WOL_PORT BOAT_WOL_COUNT
+
+# A timeout that is not a whole number of seconds turns every wait below into
+# an instant no-op - `(( elapsed < 90s ))` fails on its first evaluation - and
+# the caller is then handed a "the board never answered" diagnosis for what is
+# really a typo in boat.conf. Catch it here, the way the target-side
+# boat-sleep already validates its own delay.
+for _t in BOAT_WAKE_TIMEOUT BOAT_SLEEP_TIMEOUT; do
+    case "${!_t}" in
+        ''|*[!0-9]*) err "${_t} must be a whole number of seconds, got '${!_t}'"
+                     err "check wol/boat.conf, or the value in your environment"
+                     exit 1 ;;
+    esac
+done
+unset _t
+
 require_conf() {
-    local missing=()
+    local missing=() v
     for v in "$@"; do
         [[ -n "${!v:-}" ]] || missing+=("$v")
     done
@@ -76,19 +86,33 @@ require_conf() {
 boat_is_up() { ping -c1 -W1 "$BOAT_HOST" >/dev/null 2>&1; }
 
 # Wait for boat_is_up to become $1 ("up"/"down"), up to $2 seconds. Prints a
-# dot per second so a long wait does not look like a hang.
+# dot per probe so a long wait does not look like a hang.
+#
+# The deadline is against the WALL CLOCK, not a count of loop iterations: each
+# pass is a `ping -W1` (up to a second against an unreachable host) plus a one
+# second sleep, so counting sleeps made the real timeout roughly twice the
+# configured one - and the "no answer after 90s" message that followed was off
+# by the same factor. SECONDS is bash's own counter and needs no date(1).
+#
+# WAIT_ELAPSED is left holding the number of seconds actually spent, so the
+# caller's give-up message can report what happened rather than what was asked
+# for.
+WAIT_ELAPSED=0
+# shellcheck disable=SC2034  # WAIT_ELAPSED is read by the sourcing scripts
 wait_for_state() {
-    local want="$1" limit="$2" waited=0 state
-    while (( waited < limit )); do
+    local want="$1" limit="$2" started=$SECONDS probes=0 state
+    while (( SECONDS - started < limit )); do
         if boat_is_up; then state=up; else state=down; fi
         if [[ "$state" == "$want" ]]; then
-            (( waited > 0 )) && printf '\n'
+            (( probes > 0 )) && printf '\n'
+            WAIT_ELAPSED=$(( SECONDS - started ))
             return 0
         fi
         printf '.'
+        probes=$((probes + 1))
         sleep 1
-        waited=$((waited + 1))
     done
-    printf '\n'
+    (( probes > 0 )) && printf '\n'
+    WAIT_ELAPSED=$(( SECONDS - started ))
     return 1
 }

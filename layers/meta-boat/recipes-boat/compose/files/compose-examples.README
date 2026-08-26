@@ -1,0 +1,42 @@
+Compose examples for the boat computer
+======================================
+
+Installed read-only at /usr/share/boat/compose-examples/. Nothing in here runs
+by itself: these are reference stacks to copy and edit, not a deployment.
+
+How the pieces fit
+------------------
+  boat-compose.service   runs /usr/bin/boat-compose-up at boot
+  boat-compose-up        brings up /data/compose/docker-compose.yml, if one
+                         has been seeded there, and does nothing otherwise
+  /data/compose          YOUR stack - hand-managed config-as-code, meant to be
+                         kept under git so an update is a pull and a restart
+
+To deploy one of these:
+
+    mkdir -p /data/compose
+    cp /usr/share/boat/compose-examples/signalk.yml.example \
+       /data/compose/docker-compose.yml
+    $EDITOR /data/compose/docker-compose.yml     # read the header first
+    systemctl start boat-compose
+
+The CLI is the v2 plugin: `docker compose` (a space), not the hyphenated v1
+`docker-compose`. The v1 client that this project's kirkstone-era
+meta-virtualization packages is broken on this image; boat-docker-compose-plugin
+vendors the official static v2 binary and that is what boat-compose-up runs.
+
+The files
+---------
+  signalk.yml.example      Signal K server. READ ITS HEADER: it runs
+                           privileged and mounts the docker socket, which is
+                           root-equivalent control of the host.
+  browser.yml.example      a browser in a container on the HDMI screen, with
+                           the X cookie mounted from /run/boat-x11
+  firefox.yml.example      minimal Firefox-on-X11 variant of the above
+  x11-app.yml.example      the smallest thing that proves the X path works
+  deepstream.yml.example   NVIDIA DeepStream, GPU + camera
+  Dockerfile.firefox.example  what browser.yml.example builds from
+
+Every one of them mounts host resources. Read the header of each file before
+running it: they document what is being handed to the container and why, and
+several of those grants are wide.

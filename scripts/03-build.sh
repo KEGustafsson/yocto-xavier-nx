@@ -67,11 +67,15 @@ bitbake "${TARGET}" 9>&-
 
 DEPLOY="${BUILD_DIR}/tmp/deploy/images/${MACHINE}"
 log "Build finished. Artifacts in: ${DEPLOY}"
-# Match the naming accepted by 04-unpack-tegraflash.sh (both .tar.gz and .tar.zst).
-TARBALL="$(ls -t \
-  "${DEPLOY}/${TARGET}-${MACHINE}.tegraflash.tar.gz" \
-  "${DEPLOY}/${TARGET}-${MACHINE}.tegraflash-tar.zst" \
-  "${DEPLOY}"/*.tegraflash.tar.gz "${DEPLOY}"/*.tegraflash-tar.zst \
+# The exact name first, any tegraflash artifact only as a fallback - a single
+# `ls -t` over both would sort by mtime and could name a DIFFERENT image's
+# tarball as this build's output. Same order 04-unpack-tegraflash.sh uses.
+# .tar.zst is not a naming meta-tegra produces on kirkstone (image_types_tegra
+# emits .tegraflash.tar.gz, or .tegraflash.zip with TEGRAFLASH_PACKAGE_FORMAT
+# = "zip"), so the glob covers gz and zip rather than a zst that never exists.
+TARBALL="${DEPLOY}/${TARGET}-${MACHINE}.tegraflash.tar.gz"
+[[ -e "${TARBALL}" ]] || TARBALL="$(ls -t \
+  "${DEPLOY}"/*.tegraflash.tar.gz "${DEPLOY}"/*.tegraflash.zip \
   2>/dev/null | head -n1 || true)"
 if [[ -n "${TARBALL}" ]]; then
   log "Flashing tarball: ${TARBALL}"

@@ -9,44 +9,73 @@ source "${HERE}/lib.sh"
 # shellcheck source=env.sh
 source "${HERE}/env.sh"
 
+# Accept the image name positionally, exactly as 03-build.sh does. Without
+# this, `./scripts/03-build.sh boat-image; ./scripts/04-unpack-tegraflash.sh`
+# - a completely natural sequence given 03's own usage line - resolves IMAGE to
+# core-image-base and unpacks a stale Phase-1 tarball.
+IMAGE="${1:-${IMAGE}}"
+
 DEPLOY="${BUILD_DIR}/tmp/deploy/images/${MACHINE}"
 # IMAGE defaults to core-image-base (env.sh) unless exported - if you built a
 # different IMAGE (e.g. boat-image) and forget to export it here too, this
 # silently unpacks a *different, possibly stale* tarball instead of failing
 # loudly. Always echo what was actually resolved so that mismatch is visible
 # before you flash it.
-log "IMAGE=${IMAGE} (unset it and re-export explicitly if this isn't what you built)"
+log "IMAGE=${IMAGE} (pass it as an argument, or export it, if this isn't what you built)"
 
-# Accept either the kirkstone .tar.gz or the newer .tar.zst naming.
-TARBALL=""
-for cand in \
-  "${DEPLOY}/${IMAGE}-${MACHINE}.tegraflash.tar.gz" \
-  "${DEPLOY}/${IMAGE}-${MACHINE}.tegraflash-tar.zst"; do
-  [[ -e "${cand}" ]] && TARBALL="${cand}" && break
-done
+# meta-tegra's image_types_tegra.bbclass produces <IMAGE_NAME>.tegraflash.tar.gz
+# and, with TEGRAFLASH_PACKAGE_FORMAT = "zip", <IMAGE_NAME>.tegraflash.zip.
+# There is no .tar.zst on kirkstone - an earlier version of this script looked
+# for ".tegraflash-tar.zst", which is neither of those and matched nothing;
+# dead patterns like that read as coverage that isn't there.
+TARBALL="${DEPLOY}/${IMAGE}-${MACHINE}.tegraflash.tar.gz"
+[[ -e "${TARBALL}" ]] || TARBALL=""
 # Fall back to newest matching file.
-[[ -n "${TARBALL}" ]] || TARBALL="$(ls -t "${DEPLOY}"/*.tegraflash.tar.gz "${DEPLOY}"/*.tegraflash-tar.zst 2>/dev/null | head -n1 || true)"
-[[ -n "${TARBALL}" ]] || die "no tegraflash tarball in ${DEPLOY}; run scripts/03-build.sh"
+[[ -n "${TARBALL}" ]] || TARBALL="$(ls -t "${DEPLOY}"/*.tegraflash.tar.gz 2>/dev/null | head -n1 || true)"
+if [[ -z "${TARBALL}" ]]; then
+  if compgen -G "${DEPLOY}/*.tegraflash.zip" >/dev/null; then
+    die "only the .tegraflash.tar.gz bundle is handled, but this build produced
+      a .zip (TEGRAFLASH_PACKAGE_FORMAT = \"zip\"). Unset that and rebuild."
+  fi
+  die "no tegraflash tarball in ${DEPLOY}; run scripts/03-build.sh"
+fi
 
 log "Using tarball: ${TARBALL}"
 
-# Warn if a *newer* tarball for a *different* IMAGE exists in the same deploy
+# Stop if a *newer* tarball for a *different* IMAGE exists in the same deploy
 # dir - the exact trap above: IMAGE resolved to something with an existing
 # tarball, but it isn't the most recently built one, so you're about to flash
-# stale content without any error.
-NEWEST="$(ls -t "${DEPLOY}"/*.tegraflash.tar.gz "${DEPLOY}"/*.tegraflash-tar.zst 2>/dev/null | head -n1 || true)"
+# stale content. This used to be a warning, which is not enough: the next step
+# writes firmware to a board, the message scrolls past behind the extraction
+# listing, and there is no undo.
+NEWEST="$(ls -t "${DEPLOY}"/*.tegraflash.tar.gz 2>/dev/null | head -n1 || true)"
 if [[ -n "${NEWEST}" && "${NEWEST}" != "${TARBALL}" ]]; then
   warn "A newer tegraflash tarball exists but wasn't selected: ${NEWEST}"
   warn "  (selected instead: ${TARBALL})"
-  warn "If you meant to unpack the newer one, re-run with IMAGE set to match it."
+  warn "Pass the image name as an argument to pick a different one, e.g."
+  warn "  ./scripts/04-unpack-tegraflash.sh boat-image"
+  confirm "Unpack the older ${TARBALL##*/} anyway?" || die "aborted"
 fi
 # FLASH_DIR is env-overridable; canonicalize and refuse dangerous targets before
 # the recursive delete so a typo/bad override can't wipe an important directory.
 FLASH_DIR="$(realpath -m -- "${FLASH_DIR}")"
+WORKROOT_ABS="$(realpath -m -- "${WORKROOT}")"
 case "${FLASH_DIR}" in
-  ""|/|"${REPO_ROOT}"|"${WORKROOT}"|"${BUILD_DIR}"|"${LAYERS_DIR}"|"${HOME}")
+  ""|/|"${REPO_ROOT}"|"${WORKROOT_ABS}"|"${BUILD_DIR}"|"${LAYERS_DIR}"|"${HOME}")
     die "refusing to remove unsafe FLASH_DIR: '${FLASH_DIR}'" ;;
 esac
+# A blocklist only catches the mistakes someone thought of. `FLASH_DIR=.` from
+# a home directory resolves to something that matches none of the names above
+# and would be recursively deleted - with sudo, for anything the user cannot
+# unlink. So require the target to live under WORKROOT, which is this project's
+# own scratch tree, and make anything else an explicit, informed decision.
+if [[ "${FLASH_DIR}" != "${WORKROOT_ABS}"/* ]]; then
+  warn "FLASH_DIR is outside this project's work tree (${WORKROOT_ABS}):"
+  warn "    ${FLASH_DIR}"
+  warn "It is about to be DELETED RECURSIVELY and replaced with the unpacked"
+  warn "flashing bundle."
+  confirm "Really delete and overwrite ${FLASH_DIR}?" || die "aborted"
+fi
 # Two-step removal. initrd-flash runs under sudo (scripts/05-flash-nvme.sh)
 # and leaves root-owned directories behind in here - bootloader_staging/,
 # signed/, __pycache__/, pyfdt/__pycache__/, device-logs-*/ - all mode 0755
@@ -65,6 +94,13 @@ fi
 mkdir -p "${FLASH_DIR}"
 log "Extracting into ${FLASH_DIR} ..."
 tar -C "${FLASH_DIR}" -xf "${TARBALL}"
+
+# Stamp the unpack only once tar has returned successfully, and have
+# 05-flash-nvme.sh require the stamp. tar extracts in archive order, so an
+# interrupted or ENOSPC extraction very plausibly leaves `initrd-flash` present
+# and the payload blobs missing - and "the script exists" was the only thing
+# the flash step used to check before running it against a board.
+: > "${FLASH_DIR}/.boat-unpack-complete"
 
 # initrd-flash bug (NVIDIA L4T R35.6.4): write_to_device() checks
 # `[ -e external-secureflash.xml ]` (file exists) instead of `-s` (file
