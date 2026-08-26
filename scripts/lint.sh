@@ -22,8 +22,14 @@ cd "${REPO_ROOT}"
 
 FAILED=0
 SKIPPED=0
+SOFT_SKIPPED=0
 
 fail_check()  { err "$1"; FAILED=$((FAILED + 1)); }
+# A skip that never fails, even under LINT_STRICT. Only for a check whose tool
+# this project does NOT ask anyone to install - see the compose check below.
+# Counted separately so the footer does not tell a LINT_STRICT user to set
+# LINT_STRICT, which is the advice a plain SKIPPED count would produce.
+soft_skip()   { warn "SKIP: $1"; SOFT_SKIPPED=$((SOFT_SKIPPED + 1)); }
 skip_check()  {
   if [[ "${LINT_STRICT:-0}" == "1" ]]; then
     fail_check "$1 (LINT_STRICT=1)"
@@ -112,6 +118,48 @@ PY
     fi
 else
     skip_check "PyYAML not installed (pip install pyyaml)"
+fi
+
+# --- 2b. Compose examples against the real Compose schema -------------------
+# The YAML check above only proves the file parses. `docker compose config`
+# proves it is a valid COMPOSE file: unknown top-level keys, a malformed
+# `devices:` or `volumes:` entry, a bad `logging:` block - none of which
+# yaml.safe_load has any opinion about. These examples are copied verbatim onto
+# a boat and run, so a schema error in one is only discovered there.
+#
+# soft_skip, not skip_check: unlike shellcheck and PyYAML, a Compose client is
+# not something this project asks a contributor or the CI image to install. The
+# YAML parse is the floor that must always run; this is the stronger check when
+# a client happens to be present.
+log "Compose examples ..."
+if [[ "${HAVE_PYTHON}" == "0" ]]; then
+    soft_skip "python3 not installed - compose examples not schema-checked"
+elif ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+    soft_skip "no 'docker compose' client - compose examples not schema-checked"
+else
+    compose_bad=0
+    compose_n=0
+    compose_tmp="$(mktemp -d)"
+    # shellcheck disable=SC2064 # expand compose_tmp now, not at trap time
+    trap "rm -rf '${compose_tmp}'" EXIT
+    while IFS= read -r example; do
+        compose_n=$((compose_n + 1))
+        # -f names the file, but Compose derives the project name from the
+        # directory, so a copy into a scratch dir keeps the examples' own
+        # filenames out of the picture and avoids touching the repo.
+        cp "${example}" "${compose_tmp}/docker-compose.yml"
+        if ! out="$(docker compose -f "${compose_tmp}/docker-compose.yml" config --quiet 2>&1)"; then
+            err "  ${example}"
+            printf '%s\n' "${out}" | sed 's/^/      /' >&2
+            compose_bad=$((compose_bad + 1))
+        fi
+    done < <(find layers -name '*.yml.example' -print | sort)
+    echo "  ${compose_n} compose example(s) checked"
+    if [[ "${compose_bad}" -eq 0 ]]; then
+        log "  compose: clean"
+    else
+        fail_check "${compose_bad} compose example(s) rejected by 'docker compose config'"
+    fi
 fi
 
 # --- 3. Relative links in Markdown ----------------------------------------
@@ -211,6 +259,7 @@ fi
 # --- Result ----------------------------------------------------------------
 echo
 [[ "${SKIPPED}" -gt 0 ]] && warn "${SKIPPED} check(s) skipped - install the tools above, or set LINT_STRICT=1 to treat this as failure"
+[[ "${SOFT_SKIPPED}" -gt 0 ]] && warn "${SOFT_SKIPPED} optional check(s) skipped (tool absent); LINT_STRICT does not make these fatal"
 if [[ "${FAILED}" -gt 0 ]]; then
     die "${FAILED} check(s) failed"
 fi

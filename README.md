@@ -99,8 +99,10 @@ All knobs are in [`scripts/env.sh`](scripts/env.sh) and override from the shell:
 
 `./scripts/lint.sh` runs the fast repository checks — shellcheck over every
 shell script in the repo (the host scripts, `wol/`, and everything shipped to
-the boat), YAML syntax, relative links in the docs, and that every recipe's
-`file://` reference actually exists. Seconds, no layers fetched, no bitbake.
+the boat), YAML syntax, the shipped compose examples against the real Compose
+schema when a `docker compose` client is present, relative links in the docs,
+and that every recipe's `file://` reference actually exists. Seconds, no
+layers fetched, no bitbake.
 `.github/workflows/lint.yml` runs exactly this script on every push, so CI
 and your machine can't drift apart.
 
