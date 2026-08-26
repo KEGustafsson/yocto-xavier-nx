@@ -9,6 +9,7 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda
 
 SRC_URI = " \
     file://boat-wol-arm.sh \
+    file://boat-wol-dispatcher.sh \
     file://boat-sleep.sh \
     file://boat-power-sleep-hook.sh \
     file://boat-wol.service \
@@ -59,6 +60,12 @@ do_install() {
             match="$match,interface-name:$i"
         fi
     done
+    # NM refuses to run a dispatcher script that is group- or world-writable,
+    # and does so silently - hence the explicit 0755 root-owned install.
+    install -d ${D}${sysconfdir}/NetworkManager/dispatcher.d
+    install -m 0755 ${WORKDIR}/boat-wol-dispatcher.sh \
+        ${D}${sysconfdir}/NetworkManager/dispatcher.d/90-boat-wol
+
     install -d ${D}${sysconfdir}/NetworkManager/conf.d
     install -m 0644 ${WORKDIR}/90-boat-wol.conf \
         ${D}${sysconfdir}/NetworkManager/conf.d/90-boat-wol.conf
@@ -74,6 +81,7 @@ FILES:${PN} = "\
     ${bindir}/boat-sleep \
     ${sysconfdir}/default/boat-power \
     ${sysconfdir}/NetworkManager/conf.d/90-boat-wol.conf \
+    ${sysconfdir}/NetworkManager/dispatcher.d/90-boat-wol \
     ${systemd_system_unitdir}/boat-wol.service \
     ${systemd_unitdir}/system-sleep/boat-power \
 "
