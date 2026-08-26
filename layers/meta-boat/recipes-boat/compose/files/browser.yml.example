@@ -60,6 +60,31 @@ services:
       # sudo. See docs/05 "Container file ownership" for why 1000 - the
       # usual container default - would be the wrong choice here.
       - /data/browser/profile:/home/boat/.mozilla
+    # GPU: leave the runtime alone and this gets the NVIDIA one, because
+    # boat-docker-config sets "default-runtime": "nvidia" in daemon.json.
+    # That is what you want here. tegra-configs-container-csv's l4t.csv
+    # injects the GLVND *vendor* libraries - libGLX_nvidia.so.0,
+    # libEGL_nvidia.so.0, libGLESv2_nvidia.so.2 plus
+    # glvnd/egl_vendor.d/10-nvidia.json - and Debian's libgl1 is itself
+    # GLVND-based, so the container's libGL.so.1 dispatches straight to the
+    # Tegra driver. That is exactly the arrangement the CSV exists for.
+    #
+    # If GL misbehaves, pin `runtime: runc` to opt out of the injection
+    # entirely: Firefox then falls back to software rendering (llvmpipe),
+    # which is perfectly fine for Signal K dashboards, charts and gauges and
+    # poor for video or WebGL. docs/05 lists nvidia-container-toolkit on this
+    # kirkstone/L4T combination as an OPEN RISK, so expect to try both.
+    #
+    # Note that hardware *video* decode is out of reach either way: Firefox
+    # on Tegra has no VA-API/VDPAU path to NVDEC, so streaming video is
+    # software-decoded on the Carmel cores whether it runs in a container or
+    # natively. That is a Firefox-on-Tegra limitation, not a container one.
+    #
+    # No audio is wired up: this image has no PulseAudio or PipeWire and
+    # nothing mounts /dev/snd, so Firefox will be mute. Add a
+    # "- /dev/snd:/dev/snd" device mapping and an audio server if you need
+    # sound.
+    #
     # Firefox's content processes use shared memory heavily. Docker's default
     # /dev/shm is 64MB, which on this hardware was CONFIRMED to be exactly
     # what produced a black-but-alive Chromium window in
