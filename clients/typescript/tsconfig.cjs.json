@@ -1,0 +1,19 @@
+// Second build, CommonJS, so a `require()`-based host can consume this.
+//
+// SignalK plugins are the motivating case: most are CommonJS, and CJS cannot
+// require() an ESM-only package at all - it fails with ERR_REQUIRE_ESM, which
+// looks like a broken install rather than a format mismatch. Shipping both and
+// letting package.json "exports" pick is the standard way out.
+//
+// The tests are excluded: they are ESM-only (node:test with import.meta) and
+// nothing consumes them from a package entry point.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node10",
+    "outDir": "dist/cjs",
+    "declaration": false
+  },
+  "exclude": ["src/**/*.test.ts"]
+}

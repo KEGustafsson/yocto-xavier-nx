@@ -993,9 +993,12 @@ This is one more open UDP port than the image had before. To remove it, drop
 `boat-sleep-listener` from `IMAGE_INSTALL` in `boat-image.bb`; `wol/boat-sleep.sh`
 over SSH is unaffected either way.
 
-`clients/typescript/` implements both directions for a phone app or panel UI,
-and its `cross-check.mjs` runs the real `boat-sleepd.py` on loopback to prove
-the two agree on the wire format.
+`clients/typescript/` implements the whole protocol — both directions plus an
+embeddable receiver — for a phone app, a panel UI, or a SignalK plugin. It is
+pure TypeScript; the two implementations are held together by conformance
+vectors generated from `boat-sleepd.py` (`scripts/gen-sleep-vectors.py`), which
+the TypeScript suite replays and must match on every case. `boat-sleepd.py`
+remains the authority and the only one installed on the boat.
 
 Deliberately not implemented: **no RTC wake alarm** (`rtcwake` needs a
 working RTC and the devkit has none — see [Time](#time-without-a-gps-or-rtc)),

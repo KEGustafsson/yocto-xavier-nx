@@ -126,11 +126,17 @@ more so.
 
 ## Other clients
 
-`clients/typescript/` is a dependency-free TypeScript implementation of both
-directions — `wake()` builds the magic packet, `sleep()` builds the signed
-packet — for a phone app, a boat-panel web UI, or a Node service. Its
-`cross-check.mjs` runs the real `boat-sleepd.py` on loopback and verifies that
-what it sends is accepted and that a magic packet is not.
+`clients/typescript/` is a dependency-free TypeScript implementation of the
+whole protocol — `wake()` builds the magic packet, `sleep()` builds the signed
+one, and `listen()` is a receiver you can embed — for a phone app, a boat-panel
+web UI, or a SignalK plugin. It ships ESM and CommonJS, since most SignalK
+plugins are CommonJS and those cannot `require()` an ESM-only package.
+
+It is pure TypeScript, and the two implementations are kept in step by
+conformance vectors rather than by a live cross-process check: 19 packets and
+their expected verdicts, generated from `boat-sleepd.py` — the one that ships —
+by `scripts/gen-sleep-vectors.py`. The TypeScript suite replays them and must
+reach the same verdict on every one.
 
 `BOAT_SSH_USER` may be `root` or `boat`; for anything other than root the
 wrapper prefixes `sudo -n`, which works because the `boat` account has

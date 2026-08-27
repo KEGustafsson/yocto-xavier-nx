@@ -221,7 +221,7 @@ log "Python syntax ..."
 if [[ "${HAVE_PYTHON}" == "0" ]]; then
     skip_check "python3 not installed - shipped Python not syntax-checked"
 else
-    mapfile -t PY_FILES < <(find layers -name '*.py' -print | sort)
+    mapfile -t PY_FILES < <(find layers scripts -name '*.py' -print | sort)
     if (( ${#PY_FILES[@]} == 0 )); then
         echo "  no Python files under layers/"
     elif python3 -m py_compile "${PY_FILES[@]}"; then
@@ -229,7 +229,7 @@ else
         log "  Python: clean"
         # py_compile leaves __pycache__ next to each source; .gitignore covers
         # it, but leaving build droppings in the tree after a lint run is rude.
-        find layers -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+        find layers scripts -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
     else
         fail_check "  Python: syntax errors above"
     fi

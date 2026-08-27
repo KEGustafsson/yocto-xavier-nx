@@ -90,8 +90,14 @@ export function parseMac(mac: string): Buffer {
   return Buffer.from(hex, 'hex');
 }
 
-/** Accept the key as the hex string from the file, or as raw bytes. */
-function parseKey(key: string | Buffer): Buffer {
+/**
+ * Accept the key as the hex string from the file, or as raw bytes.
+ *
+ * Exported because listener.ts needs the identical parse: a receiver that read
+ * the key even slightly differently from the sender would fail every packet
+ * with "bad signature" and give no hint why.
+ */
+export function parseKey(key: string | Buffer): Buffer {
   if (Buffer.isBuffer(key)) return key;
   const text = key.trim();
   if (!/^[0-9a-fA-F]+$/.test(text) || text.length % 2 !== 0) {

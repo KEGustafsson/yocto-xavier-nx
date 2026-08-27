@@ -1,42 +1,90 @@
 # `clients/typescript` — wake and sleep the boat from TypeScript
 
-Dependency-free reference implementation of both directions. `node:dgram` and
-`node:crypto`, nothing else; TypeScript is a devDependency for the build only.
+A complete, dependency-free TypeScript implementation of the boat power
+protocol: the sender (`wake`, `sleep`) **and** the receiver (`listen`). Runtime
+dependencies: none. `node:dgram`, `node:crypto`, `node:net` only; TypeScript is
+a devDependency for the build.
+
+Ships both ESM and CommonJS, because the motivating consumer — a SignalK plugin
+— is usually CommonJS, and CJS cannot `require()` an ESM-only package at all.
 
 ```bash
 npm install
-npm run build
-npm test              # 8 unit tests
-node cross-check.mjs  # runs the REAL target daemon and checks it accepts us
+npm test     # builds, then runs 19 tests including the conformance vectors
 ```
 
-```ts
-import { wake, sleep } from '@boat/power-client';
+## What runs where
 
-await wake({ mac: '48:b0:2d:11:22:33', broadcast: '192.168.1.255' });
-await sleep({ host: '192.168.1.42', key: readFileSync('sleep.key', 'utf8') });
-```
+| | |
+|---|---|
+| **On the boat** | `boat-sleepd.py`, installed by meta-boat's `boat-sleep-listener` recipe. Unchanged by anything here. |
+| **This package** | The client, for anything that wants to wake or sleep the boat — and a receiver, for embedding in a Node process of your own. |
+
+Nothing here is installed by the Yocto image. The image already carries
+python3; adding a ~40 MB Node runtime to replace a working 300-line daemon
+would be a poor trade. `listen()` is here for when the receiver belongs inside
+a Node service you are *already* running.
 
 ## The two directions are not symmetrical
 
-They look it from the outside. They are not, and the asymmetry is the whole
-design:
+They look it from outside. They are not, and the asymmetry is the design:
 
 **`wake()` sends a Wake-on-LAN magic packet.** The board is off. Nothing on it
-is running. The NIC itself, still powered in a low-power state, pattern-matches
-the frame in firmware and asserts PME to bring the host up. There is no
-authentication because there is nowhere in the format to put any — the payload
-is defined as six `0xFF` bytes followed by the target MAC sixteen times.
+is running. The NIC itself, still powered in a low-power state, matches the
+frame in firmware and asserts PME. There is no authentication because the
+format has nowhere to put any — the payload is six `0xFF` bytes then the target
+MAC sixteen times.
 
 **`sleep()` sends a signed datagram to a service on the running board.** There
 is no hardware "sleep on LAN" — no NIC filter, no ACPI primitive, nothing in
-the WoL spec — so this cannot be a magic packet. It has to be software on a
-running system, and software on a running system that suspends the boat's
-navigation computer had better know who is asking. A magic packet is forgeable
-by anyone who has seen a single frame from the board.
+the WoL spec — so this has to be software on a running system. And software
+that suspends the boat's navigation computer had better know who is asking: a
+magic packet is forgeable by anyone who has seen one frame from the board, so
+an unauthenticated "suspend now" port means any guest on the marina wifi can
+black out the helm at will.
 
-So each sleep packet carries an HMAC-SHA256 over a timestamp and a nonce, keyed
-by the board's `/etc/boat-sleep.key`.
+Hence HMAC-SHA256 over a timestamp and a nonce, keyed by the board's
+`/etc/boat-sleep.key`.
+
+## Using it
+
+```ts
+import { wake, sleep, waitForPort } from '@boat/power-client';
+
+await wake({ mac: '48:b0:2d:11:22:33', broadcast: '192.168.1.255' });
+await waitForPort('192.168.1.42', 22, 'open', 90_000);
+
+await sleep({ host: '192.168.1.42', key: readFileSync('sleep.key', 'utf8') });
+```
+
+### In a SignalK plugin
+
+```js
+const { sleep } = require('@boat/power-client');
+const { listen } = require('@boat/power-client/listener');
+
+module.exports = function (app) {
+  let listener;
+  return {
+    id: 'boat-power',
+    name: 'Boat power',
+    start: async (settings) => {
+      listener = await listen({
+        key: settings.sleepKey,
+        onSleep: (from) => app.debug(`suspend requested by ${from.address}`),
+        // Structured events rather than preformatted strings, so the host
+        // logs them the way it wants to.
+        logger: (e) => (e.level === 'error' ? app.error(e.msg) : app.debug(e.msg)),
+      });
+    },
+    stop: async () => listener?.close(),
+  };
+};
+```
+
+`listen()` never binds a port you did not ask for, never writes to stdout, and
+routes every line through `logger` — the three things that make a library
+unpleasant to embed.
 
 ## Wire format (protocol v1, 60 bytes, big-endian)
 
@@ -50,16 +98,47 @@ by the board's `/etc/boat-sleep.key`.
 | 20 | 8 | nonce, random |
 | 28 | 32 | HMAC-SHA256(key, bytes 0..27) |
 
-The receiver checks the MAC first and in constant time, *then* the timestamp
-against a 30-second window, *then* the nonce against everything it has seen
-inside that window. That order matters: an unauthenticated packet must not be
-able to burn a nonce the real sender is about to use, or steer the clock
-comparison. `cross-check.mjs` proves the ordering holds against the real
-daemon, not just against this file's own idea of it.
+The receiver checks the MAC **first and in constant time**, *then* the
+timestamp against a 30-second window, *then* the nonce against everything seen
+inside that window. That order is load-bearing: admit the nonce before checking
+the signature and anyone who can guess a nonce can burn the one a real sender
+is about to use — denying exactly the command you need when the boat is
+unreachable. There is a test for it.
 
-The authority on this format is
-`layers/meta-boat/recipes-boat/power/files/boat-sleepd.py`. If the two ever
-disagree, that one is right and `cross-check.mjs` will say so.
+## How the two implementations are kept honest
+
+`src/vectors.json` holds 19 conformance vectors — packets and expected verdicts
+— **generated from `boat-sleepd.py`**, the implementation that actually ships.
+It is the authority; this package is what conforms.
+
+They exist because two implementations that only ever test themselves will each
+pass their own suite forever and still disagree on the wire — and that
+disagreement surfaces as a sleep command that silently does nothing, on a boat,
+which is the worst possible place to find it. The vectors cover every refusal
+path (bad signature, bad magic, bad version, wrong length, stale timestamp,
+replayed nonce, unknown opcode), both window edges at exactly ±30s, and a real
+Wake-on-LAN magic packet as input.
+
+Cases run **in order against one shared replay cache** — case 2 is case 1's
+bytes a second time, and is only a replay because of that.
+
+Regenerate after any protocol change:
+
+```bash
+scripts/gen-sleep-vectors.py    # from the repo root
+```
+
+If regenerating changes an expected verdict, you changed the protocol — whether
+or not you meant to.
+
+## Deliberate divergence from `boat-sleepd`
+
+One, and it is not on the wire: `ReplayCache` here is bounded by entry count as
+well as by window. Only a key holder can grow that cache, so window-only
+bounding is not an unauthenticated memory attack — but "nobody can exhaust our
+heap" beats "only an insider can", it costs one comparison, and in a
+long-lived Node process shared with other things an unbounded `Map` is a worse
+neighbour than it is in a dedicated daemon.
 
 ## Getting the key
 
@@ -71,24 +150,24 @@ ssh root@boat cat /etc/boat-sleep.key > ~/.config/boat/sleep.key
 chmod 0600 ~/.config/boat/sleep.key
 ```
 
-Read it from a **file**, not an environment variable. An env var is readable
+Read it from a **file**, not an environment variable: an env var is readable
 from `/proc/<pid>/environ`, is inherited by every child process, and ends up in
 shell history and CI logs. `src/example.ts` does it the right way.
 
 ## What these functions can and cannot tell you
 
-Both resolve once the packet is away. Neither can tell you it worked:
+`wake()` and `sleep()` resolve once the packet is away. Neither can tell you it
+worked:
 
 - A magic packet is unacknowledged, and the board is not running any software
   that could answer.
-- The sleep listener deliberately answers **nothing** — valid or not — so it
-  cannot be used as a reflection amplifier and a prober cannot distinguish "bad
-  signature" from "replayed nonce".
+- The listener deliberately answers **nothing** — valid or not — so it cannot
+  be used as a reflection amplifier and a prober cannot distinguish "bad
+  signature" from "replayed nonce". There is a test asserting it stays silent.
 
-`waitForPort()` is the honest way to find out: poll TCP 22 until it starts or
-stops accepting. Note that a board merely dropping the port — a firewall —
-looks identical to one that is asleep. When a sleep request seems to vanish,
-the reason is in the board's journal:
+`waitForPort()` is the honest way to find out. Note that a board merely
+dropping the port — a firewall — looks identical to one that is asleep. When a
+sleep request seems to vanish, the reason is in the board's journal:
 
 ```bash
 ssh root@boat journalctl -u boat-sleep-listener -n 20
