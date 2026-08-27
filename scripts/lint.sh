@@ -137,7 +137,14 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
 else
     compose_bad=0
     compose_n=0
-    compose_tmp="$(mktemp -d)"
+    # Under REPO_ROOT, not /tmp. Ubuntu's docker is commonly the snap
+    # (/snap/bin/docker), and snap confinement cannot read /tmp outside its
+    # own sandbox: `docker compose -f /tmp/xxx/docker-compose.yml config`
+    # fails with "no such file or directory" for a file that demonstrably
+    # exists. The same file under $HOME reads fine. Every example failed this
+    # check on such a host, which looks like five broken examples rather than
+    # one unreadable directory.
+    compose_tmp="$(mktemp -d "${REPO_ROOT}/.lint-compose.XXXXXX")"
     # shellcheck disable=SC2064 # expand compose_tmp now, not at trap time
     trap "rm -rf '${compose_tmp}'" EXIT
     while IFS= read -r example; do

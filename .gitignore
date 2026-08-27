@@ -29,3 +29,8 @@ __pycache__/
 
 # Per-boat WoL settings (MAC / LAN addresses) - copy boat.conf.example
 /wol/boat.conf
+
+# scripts/lint.sh scratch dir for `docker compose config` (see the comment
+# there: snap-packaged docker cannot read /tmp). Removed on exit; this only
+# catches an interrupted run.
+/.lint-compose.*
