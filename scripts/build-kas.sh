@@ -129,5 +129,8 @@ log "PYTHONPATH carries scripts/pyfix (Python 3.14 / kirkstone shim)"
 # arguments the latter expands to one EMPTY string rather than to nothing,
 # and kas forwards it to bitbake as a target - so the plain
 # `scripts/build-kas.sh` and `scripts/build-kas.sh shell` invocations, the
-# two this script exists for, ran `bitbake -c build '' boat-image`.
+# two this script exists for, ran `bitbake -c build '' boat-image` and died
+# after a full 40-second parse with "Nothing PROVIDES ''". The give-away is
+# the double space in the command line kas echoes. The `+` form expands to
+# nothing at all for an unset or empty array, and is safe under `set -u`.
 exec kas "${SUBCMD}" "${KAS_CONFIGS}" ${KAS_ARGS[@]+"${KAS_ARGS[@]}"}
