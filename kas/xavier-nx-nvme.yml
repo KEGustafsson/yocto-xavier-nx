@@ -5,6 +5,12 @@
 #   export PYTHONPATH="$PWD/scripts/pyfix"
 #   export BB_ENV_PASSTHROUGH_ADDITIONS=PYTHONPATH
 #   kas build kas/xavier-nx-nvme.yml           # build boat-image
+#
+# Or let scripts/build-kas.sh do all of that for you - it sets both
+# exports, adds kas/host-gcc12.yml when the host needs it, and can share
+# the manual flow's sstate with --share:
+#
+#   scripts/build-kas.sh --share
 #   kas shell kas/xavier-nx-nvme.yml           # drop into a configured bitbake shell
 #
 # This mirrors what scripts/01..03 do, but pins layers and centralises config.
@@ -115,7 +121,12 @@ local_conf_header:
     UNINATIVE_MAXGLIBCVERSION:forcevariable = "2.44"
     UNINATIVE_CHECKSUM[x86_64] = "1a2749c1379fd9f60ea3c82f1bf4844924d5a99117b74a70c57036e94e2379d4"
     UNINATIVE_CHECKSUM[aarch64] = "8cf46c7ba75ebb1863fd6b74cf7d7ab910a3e99de4f01b1e9490babf8e6b9e05"
-    # ---- Newer hosts: uncomment these four ----
+    # ---- Newer hosts: see kas/host-gcc12.yml ----
+    # scripts/build-kas.sh adds that fragment automatically when
+    # /usr/bin/gcc-12 exists, which is the host test a static YAML cannot make.
+    # Uncommenting the four lines below by hand does the same thing for a bare
+    # `kas build`, but breaks any host without gcc-12 - so prefer the wrapper.
+    # ---- (left commented on purpose) ----
     # kirkstone predates current host toolchains: newer GCC defaults (C23)
     # break old gnulib/K&R code in several -native recipes, so those builds
     # want gcc-12/g++-12 (`sudo apt-get install gcc-12 g++-12`). Absolute paths

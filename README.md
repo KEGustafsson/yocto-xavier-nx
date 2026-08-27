@@ -42,8 +42,18 @@ export IMAGE=boat-image   # keep it exported for unpack + flash too, not just bu
 ./scripts/05-flash-nvme.sh --skip-bootloader
 ```
 
-Prefer a single-command reproducible build? Use kas:
-`kas build kas/xavier-nx-nvme.yml`.
+Prefer a single-command reproducible build? Use kas — via the wrapper, which
+sets the two environment variables kirkstone needs on a modern host and adds
+the gcc-12 fragment when your host has it:
+
+```bash
+scripts/build-kas.sh            # build boat-image (target is in the YAML — no IMAGE to export)
+scripts/build-kas.sh --share    # reuse the scripts' downloads/sstate instead of building from scratch
+```
+
+`kas build kas/xavier-nx-nvme.yml` directly also works, but needs
+`PYTHONPATH=$PWD/scripts/pyfix` and `BB_ENV_PASSTHROUGH_ADDITIONS=PYTHONPATH`
+exported first, or bitbake dies before parsing anything.
 
 ## How it works (short version)
 

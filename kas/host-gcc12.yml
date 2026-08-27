@@ -1,0 +1,43 @@
+# Optional kas fragment: build -native recipes with gcc-12.
+#
+# Combined onto the main config only when /usr/bin/gcc-12 exists, by
+# scripts/build-kas.sh:
+#
+#   kas build kas/xavier-nx-nvme.yml:kas/host-gcc12.yml
+#
+# WHY THIS IS A SEPARATE FILE
+# kirkstone predates current host toolchains: newer GCC defaults (C23) break
+# old gnulib and K&R-style code in several -native recipes (m4-native,
+# unzip-native, gmp-native), and LLVM 13 - which rustc 1.59 bundles, needed
+# for python3-cryptography's Rust extension - does not compile cleanly against
+# a libstdc++ this new. Pointing -native/-nativesdk builds at gcc-12/g++-12
+# fixes all of it at once.
+#
+# But it cannot go in the main config unconditionally: a host WITHOUT gcc-12 -
+# including Ubuntu 20.04, which this project supports and whose archive has no
+# gcc-12 at all - would then fail with "/usr/bin/gcc-12: No such file or
+# directory" twenty minutes into a build. scripts/02-configure-build.sh emits
+# these lines only when the compiler is actually present; a static YAML has no
+# way to test that, which is exactly why the main config carries them
+# commented out.
+#
+# A wrapper script can test it, so it does. This file is the half that gets
+# added when the answer is yes.
+#
+# NOTE these settings change native task signatures, so a build with them
+# shares almost no sstate with one without. That is also why the manual flow
+# and a bare `kas build` on this host reuse so little of each other's cache.
+#
+# Install with: sudo apt-get install gcc-12 g++-12
+header:
+  version: 14
+
+local_conf_header:
+  # Distinct key from the main config's "nvme-boot", or one would replace the
+  # other rather than both being emitted.
+  host-gcc12: |
+    # Absolute paths: bitbake tasks run with a sanitized PATH.
+    BUILD_CC = "${CCACHE}/usr/bin/gcc-12 ${BUILD_CC_ARCH}"
+    BUILD_CXX = "${CCACHE}/usr/bin/g++-12 ${BUILD_CC_ARCH}"
+    BUILD_CPP = "/usr/bin/gcc-12 ${BUILD_CC_ARCH} -E"
+    BUILD_CCLD = "/usr/bin/gcc-12 ${BUILD_CC_ARCH}"
