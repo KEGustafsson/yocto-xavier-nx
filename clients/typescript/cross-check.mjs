@@ -17,13 +17,20 @@
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
 import { buildMagicPacket, buildSleepPacket, sleep } from './dist/boat-power.js';
 
+// fileURLToPath(import.meta.url), not import.meta.dirname: the latter arrived
+// in Node 20.11, and package.json declares ">=18" because the library itself
+// genuinely runs there. On 18 it is `undefined`, and resolve() then throws
+// ERR_INVALID_ARG_TYPE ("paths[0] must be of type string") from a line that
+// looks nothing like a version problem.
+const HERE = dirname(fileURLToPath(import.meta.url));
 const DAEMON = resolve(
-  import.meta.dirname,
+  HERE,
   '../../layers/meta-boat/recipes-boat/power/files/boat-sleepd.py',
 );
 const PORT = 19095;
