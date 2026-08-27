@@ -246,6 +246,113 @@ test('listen(): answers nothing at all, to anyone', async () => {
   }
 });
 
+test('listen(): a throwing onReject cannot kill the process', async () => {
+  // The one an attacker controls. onReject fires on exactly the packets a
+  // stranger can send - forged, malformed, replayed - so if a throw here
+  // escaped the dgram handler, anyone able to reach the port could stop the
+  // host process by sending it rubbish. Before this was guarded, one forged
+  // packet exited Node with code 1.
+  const key = 'cd'.repeat(32);
+  const logged: string[] = [];
+  const listener = await listen({
+    key,
+    port: 0,
+    address: '127.0.0.1',
+    onSleep: () => {},
+    onReject: () => {
+      throw new Error('the embedding app threw');
+    },
+    logger: (e) => void logged.push(e.msg),
+  });
+
+  try {
+    await sendTo(listener.port, buildSleepPacket({ host: 'x', key: 'ef'.repeat(32) }));
+    await settle();
+    await sendTo(listener.port, Buffer.alloc(3));
+    await settle();
+
+    // Still serving: a valid packet after two throwing rejections still works.
+    let slept = false;
+    const survivor = await listen({
+      key,
+      port: 0,
+      address: '127.0.0.1',
+      onSleep: () => void (slept = true),
+      logger: () => {},
+    });
+    await sendTo(survivor.port, buildSleepPacket({ host: 'x', key }));
+    await settle();
+    await survivor.close();
+
+    assert.equal(slept, true, 'the process must still be alive and serving');
+    assert.ok(
+      logged.some((m) => m.includes('onReject')),
+      `the throw should be logged; saw ${JSON.stringify(logged)}`,
+    );
+  } finally {
+    await listener.close();
+  }
+});
+
+test('listen(): a throwing logger cannot kill the process either', async () => {
+  // The last resort. If the logger throws while reporting that a callback
+  // threw, there is nowhere left to report to - but the process must still
+  // not die.
+  const key = 'cd'.repeat(32);
+  let slept = false;
+  const listener = await listen({
+    key,
+    port: 0,
+    address: '127.0.0.1',
+    onSleep: () => void (slept = true),
+    onReject: () => {
+      throw new Error('reject handler threw');
+    },
+    logger: () => {
+      throw new Error('and so did the logger');
+    },
+  });
+
+  try {
+    await sendTo(listener.port, buildSleepPacket({ host: 'x', key: 'ef'.repeat(32) }));
+    await settle();
+    await sendTo(listener.port, buildSleepPacket({ host: 'x', key }));
+    await settle();
+    assert.equal(slept, true, 'still alive after both callbacks threw');
+  } finally {
+    await listener.close();
+  }
+});
+
+test('listen(): a rejecting async onSleep is logged, not fatal', async () => {
+  // Distinct from a synchronous throw: an async handler returns a rejected
+  // promise instead, which try/catch around the call does not see.
+  const key = 'cd'.repeat(32);
+  const logged: string[] = [];
+  let calls = 0;
+  const listener = await listen({
+    key,
+    port: 0,
+    address: '127.0.0.1',
+    onSleep: async () => {
+      calls++;
+      throw new Error('async boat-sleep exploded');
+    },
+    logger: (e) => void logged.push(e.msg),
+  });
+
+  try {
+    await sendTo(listener.port, buildSleepPacket({ host: 'x', key }));
+    await settle();
+    await sendTo(listener.port, buildSleepPacket({ host: 'x', key }));
+    await settle();
+    assert.equal(calls, 2, 'still serving after an async rejection');
+    assert.ok(logged.some((m) => m.includes('sleep action threw')));
+  } finally {
+    await listener.close();
+  }
+});
+
 test('listen(): a throwing onSleep is logged, not fatal', async () => {
   const key = 'cd'.repeat(32);
   let second = false;

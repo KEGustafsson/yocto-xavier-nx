@@ -243,7 +243,7 @@ export function listen(options: ListenerOptions): Promise<Listener> {
   const window = options.window ?? DEFAULT_WINDOW_SECONDS;
   const cache = new ReplayCache(window);
 
-  const log: (event: ListenerEvent) => void =
+  const rawLog: (event: ListenerEvent) => void =
     options.logger ??
     ((event) => {
       const { level, msg, ...rest } = event;
@@ -254,6 +254,42 @@ export function listen(options: ListenerOptions): Promise<Listener> {
       console.error(`boat-sleep-listener: ${msg}${tail ? ` ${tail}` : ''}`);
       void level;
     });
+
+  // `logger` is supplied by the embedding application, so it can throw too -
+  // and a logger that throws from inside the catch below would re-escape and
+  // undo the whole point. Swallowing is the correct last resort here: there is
+  // nowhere left to report to.
+  const log = (event: ListenerEvent): void => {
+    try {
+      rawLog(event);
+    } catch {
+      /* nothing left to log to */
+    }
+  };
+
+  /**
+   * Run an embedder's callback so that throwing cannot kill the host process.
+   *
+   * Not defensive programming for its own sake. `socket.on('message')` runs
+   * these on the dgram event loop, and an exception escaping there is an
+   * uncaught exception, which by default terminates Node. Every one of these
+   * callbacks is reachable from an UNAUTHENTICATED packet - onReject most of
+   * all, since it fires precisely on the forged and malformed ones - so
+   * without this, anyone able to send a datagram can stop a SignalK server by
+   * sending it rubbish. Verified: before this guard, one forged packet exited
+   * the process with code 1.
+   */
+  const guard = (what: string, fn: () => void): void => {
+    try {
+      fn();
+    } catch (err) {
+      log({
+        level: 'error',
+        msg: `the ${what} callback threw`,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
 
   const onReject =
     options.onReject ??
@@ -272,29 +308,29 @@ export function listen(options: ListenerOptions): Promise<Listener> {
 
     socket.on('message', (packet, rinfo) => {
       const from = { address: rinfo.address, port: rinfo.port };
-      // Guard before any parsing. A datagram can be up to 64KiB and ours is
-      // exactly 60; refusing on length first means an oversized packet costs
-      // one comparison rather than an HMAC over attacker-chosen bytes.
+      // Length is checked before anything else inside verify(): a datagram can
+      // be 64KiB and ours is exactly 60, so an oversized one costs a single
+      // comparison rather than an HMAC over attacker-chosen bytes.
       const result = verify(packet, key, window, cache);
       if (!result.ok) {
-        onReject(result, from);
+        guard('onReject', () => onReject(result, from));
         return;
       }
       log({
         level: 'info',
         msg: `authenticated sleep request from ${from.address}:${from.port}`,
       });
-      void (async () => {
-        try {
-          await options.onSleep(from);
-        } catch (err) {
+      // onSleep may be async, so its rejection needs catching separately from
+      // a synchronous throw - guard() covers the latter, .catch the former.
+      guard('onSleep', () => {
+        void Promise.resolve(options.onSleep(from)).catch((err: unknown) =>
           log({
             level: 'error',
             msg: 'the sleep action threw',
             detail: err instanceof Error ? err.message : String(err),
-          });
-        }
-      })();
+          }),
+        );
+      });
     });
 
     socket.bind(options.port ?? DEFAULT_SLEEP_PORT, options.address ?? '0.0.0.0', () => {

@@ -3,7 +3,7 @@
  *
  *   npm install && npm run build
  *   BOAT_HOST=192.168.1.42 BOAT_MAC=48:b0:2d:11:22:33 \
- *     BOAT_SLEEP_KEY_FILE=~/.config/boat/sleep.key node dist/example.js wake
+ *     BOAT_SLEEP_KEY_FILE=~/.config/boat/sleep.key node dist/esm/example.js wake
  *
  * Subcommands: wake | sleep | packet
  */
