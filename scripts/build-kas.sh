@@ -87,12 +87,16 @@ export PYTHONPATH="${HERE}/pyfix${PYTHONPATH:+:${PYTHONPATH}}"
 # (bb.utils.clean_environment), so PYTHONPATH never reaches the forked server
 # process unless it is named here.
 #
-# The rest of this list is not padding. kas appends these itself when
-# BB_ENV_PASSTHROUGH_ADDITIONS is unset, but CONFIRMED by inspection of
-# libkas.py and by reading the value back inside `kas shell`: once this
-# variable is set, only what we put in it survives. Dropping them would
+# The rest of the list is belt-and-braces, and deliberately kept. Reading
+# libkas.py at kas 5.5, kas APPENDS its own names (SSTATE_DIR, SSTATE_MIRRORS,
+# BB_HASHSERVE*, DL_DIR, TMPDIR, plus every key of the config's `env:` block)
+# to whatever this variable already holds, rather than replacing it - so on
+# that version naming them here is redundant. It is not free to rely on that:
+# the split is one line of a third-party tool, it differs across kas versions,
+# and if a version ever replaced instead of appended, dropping these would
 # silently disable kas's own DL_DIR/SSTATE_DIR/TMPDIR handling - including the
-# --share option below, which works by exporting exactly those.
+# --share option below, which works by exporting exactly those. Duplicates in
+# the list are harmless; a missing name is not.
 export BB_ENV_PASSTHROUGH_ADDITIONS="PYTHONPATH SSTATE_DIR SSTATE_MIRRORS \
 BB_HASHSERVE_DB_DIR BB_HASHSERVE BB_HASHSERVE_UPSTREAM DL_DIR TMPDIR"
 
@@ -121,4 +125,9 @@ log "PYTHONPATH carries scripts/pyfix (Python 3.14 / kirkstone shim)"
 # kas clones the upstream layers into the repository root, not under yocto/;
 # .gitignore covers them. Note this is a SECOND checkout of poky and friends,
 # independent of what scripts/01-fetch-layers.sh puts in yocto/layers.
-exec kas "${SUBCMD}" "${KAS_CONFIGS}" "${KAS_ARGS[@]:-}"
+# ${KAS_ARGS[@]+"${KAS_ARGS[@]}"}, not "${KAS_ARGS[@]:-}": with no extra
+# arguments the latter expands to one EMPTY string rather than to nothing,
+# and kas forwards it to bitbake as a target - so the plain
+# `scripts/build-kas.sh` and `scripts/build-kas.sh shell` invocations, the
+# two this script exists for, ran `bitbake -c build '' boat-image`.
+exec kas "${SUBCMD}" "${KAS_CONFIGS}" ${KAS_ARGS[@]+"${KAS_ARGS[@]}"}
