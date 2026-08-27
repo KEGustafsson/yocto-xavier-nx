@@ -10,7 +10,7 @@ Ships both ESM and CommonJS, because the motivating consumer — a SignalK plugi
 
 ```bash
 npm install
-npm test     # builds, then runs 19 tests including the conformance vectors
+npm test     # builds, then runs the unit, conformance and live-socket tests
 ```
 
 ## What runs where

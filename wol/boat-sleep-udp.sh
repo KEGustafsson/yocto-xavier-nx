@@ -52,10 +52,21 @@ require_conf BOAT_HOST
 : "${BOAT_SLEEP_PORT:=9099}"
 : "${BOAT_SLEEP_KEY_FILE:=${WOL_DIR}/boat-sleep.key}"
 
+# Digits AND range. Out of range is not silent - python's sendto raises, and
+# `set -e` stops us - but what the user sees is a five-line traceback ending in
+# "OSError: [Errno 22] Invalid argument", which names neither the variable nor
+# the file it came from. Every other setting in this repo fails with a sentence
+# saying what to fix; this one should too.
 case "${BOAT_SLEEP_PORT}" in
     ''|*[!0-9]*) err "BOAT_SLEEP_PORT must be a whole number, got '${BOAT_SLEEP_PORT}'"
+                 err "check wol/boat.conf, or the value in your environment"
                  exit 1 ;;
 esac
+if (( BOAT_SLEEP_PORT < 1 || BOAT_SLEEP_PORT > 65535 )); then
+    err "BOAT_SLEEP_PORT must be between 1 and 65535, got '${BOAT_SLEEP_PORT}'"
+    err "it must match ListenDatagram= in boat-sleep-listener.socket on the board"
+    exit 1
+fi
 
 if [[ ! -r "${BOAT_SLEEP_KEY_FILE}" ]]; then
     err "no key at ${BOAT_SLEEP_KEY_FILE}"
