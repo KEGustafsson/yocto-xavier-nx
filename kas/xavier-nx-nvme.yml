@@ -1,6 +1,9 @@
 # Optional: reproducible build via kas (https://kas.readthedocs.io).
 #
 #   pip3 install kas
+#   # kirkstone + Python 3.14 needs the sitecustomize shim (see env: below)
+#   export PYTHONPATH="$PWD/scripts/pyfix"
+#   export BB_ENV_PASSTHROUGH_ADDITIONS=PYTHONPATH
 #   kas build kas/xavier-nx-nvme.yml           # build boat-image
 #   kas shell kas/xavier-nx-nvme.yml           # drop into a configured bitbake shell
 #
@@ -12,6 +15,32 @@ header:
 machine: jetson-xavier-nx-devkit
 distro: poky
 target: boat-image
+
+# Python 3.14 breaks kirkstone-era bitbake before it parses a single recipe:
+# 3.14 changed multiprocessing's POSIX default start method from "fork" to
+# "forkserver", and kirkstone's hash-equivalence server passes a function
+# local to another function to multiprocessing.Process - picklable under fork,
+# not under forkserver. The symptom is not a clear error but a server that
+# dies on startup, leaving
+#
+#   resource_tracker: process died unexpectedly, relaunching
+#   AttributeError: 'NoneType' object has no attribute 'terminate'
+#
+# scripts/pyfix/sitecustomize.py restores the fork default (and shims ast.Str,
+# which 3.12 removed and kirkstone's license parser still uses). Python
+# auto-imports it when its directory is on PYTHONPATH.
+#
+# BB_ENV_PASSTHROUGH_ADDITIONS is not optional here: bitbake scrubs its
+# environment down to a whitelist on startup (bb.utils.clean_environment), so
+# PYTHONPATH is dropped before it can reach the forked server process unless
+# it is explicitly named.
+#
+# These are declared with empty defaults, which kas passes through from the
+# calling environment. scripts/03-build.sh sets them itself; for kas, export
+# them first - see the header comment above for the exact command.
+env:
+  PYTHONPATH: ""
+  BB_ENV_PASSTHROUGH_ADDITIONS: ""
 
 repos:
   meta-boat:
