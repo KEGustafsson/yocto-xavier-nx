@@ -928,6 +928,75 @@ and its wiring rather than of this layer:
   suspend, but anything holding a network connection (an MQTT bridge, a
   registry pull) sees it drop and has to reconnect on resume.
 
+### Sleeping without SSH: `boat-sleep-listener`
+
+`wol/boat-sleep.sh` suspends the board over SSH. That is the right tool when
+something is wrong — it can run `boat-sleep --status` and put the answer on
+your terminal — and the wrong one for a phone app or a panel button, because
+reflashing the board changes its host key and there is nobody there to accept
+the new one.
+
+`boat-sleep-listener` is the alternative: one UDP datagram (port 9099), and on
+a valid one it runs `boat-sleep`. Same fire-and-forget shape as
+`wol/boat-wake.sh`, no login involved.
+
+It is deliberately **not** a magic packet, and the reason decides the whole
+design. Waking happens inside the NIC: the board is off, nothing on it is
+running, and the NIC pattern-matches the frame in its own firmware and asserts
+PME. Sleeping has no hardware counterpart — there is no sleep-on-LAN in the WoL
+spec, in ACPI, or in any NIC's filter engine — so it has to be a service on the
+running board. And a magic packet carries no secret whatsoever: it is the
+target MAC repeated sixteen times, forgeable by anyone who has seen one frame
+from the board. "Suspend the navigation computer" on those terms means any
+guest on the marina wifi can do it, repeatedly.
+
+So every packet carries an HMAC-SHA256 over a timestamp and a nonce, keyed by
+`/etc/boat-sleep.key`:
+
+- The key is **32 random bytes generated per board on first boot**, by the
+  recipe's `pkg_postinst_ontarget`. Nothing is baked into the image — a secret
+  shared by every board built from one image is not a secret. `boat-sleepd`
+  refuses to start if the file is readable by group or others.
+- The signature is checked **first, in constant time**, before the timestamp is
+  trusted and before the nonce is admitted to the replay cache. An
+  unauthenticated packet therefore cannot burn a nonce the real sender is about
+  to use.
+- Then a **30-second clock window**, then the **nonce cache**. A captured packet
+  is good exactly once, and only for 30 seconds.
+- **Nothing is ever sent back** — not to a valid packet, not to an invalid one.
+  The port cannot be used as a reflection amplifier, and a prober cannot tell
+  "bad signature" from "replayed nonce".
+
+The service is `Type=exec`, socket-activated by `boat-sleep-listener.socket`,
+and hardened (`ProtectSystem=strict`, `NoNewPrivileges`,
+`SystemCallFilter=@system-service`, `MemoryDenyWriteExecute`, and an address
+family restricted to what the listener and `boat-sleep` actually use). The
+socket uses `Accept=no` on purpose: `Accept=yes` would spawn one process per
+datagram, which on a port that anyone can send to is a spawn amplifier, and the
+`TriggerLimit` would then stop the socket outright — turning a flood into a
+lasting denial of the one command you need when the board is unreachable.
+
+It never suspends anything itself. It only ever execs `boat-sleep`, which
+still refuses to suspend a board that nothing can wake again. The most common
+"the packet did nothing" is that refusal, working correctly; the journal says
+so:
+
+```bash
+journalctl -u boat-sleep-listener -n 20
+```
+
+Setting `BOAT_SLEEP_ARGS=--force` in `/etc/default/boat-sleep-listener` defeats
+the entire point, since you would then be able to sleep a board you cannot
+wake.
+
+This is one more open UDP port than the image had before. To remove it, drop
+`boat-sleep-listener` from `IMAGE_INSTALL` in `boat-image.bb`; `wol/boat-sleep.sh`
+over SSH is unaffected either way.
+
+`clients/typescript/` implements both directions for a phone app or panel UI,
+and its `cross-check.mjs` runs the real `boat-sleepd.py` on loopback to prove
+the two agree on the wire format.
+
 Deliberately not implemented: **no RTC wake alarm** (`rtcwake` needs a
 working RTC and the devkit has none — see [Time](#time-without-a-gps-or-rtc)),
 and **no scheduled sleep**. Both belong on a board that has an RTC fitted;

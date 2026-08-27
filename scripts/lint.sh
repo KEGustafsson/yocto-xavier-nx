@@ -211,6 +211,30 @@ else
     fail_check "broken relative link(s) in Markdown"
 fi
 
+# --- 3b. Python shipped to the target parses -------------------------------
+# boat-sleepd is Python that runs as root on the boat, parsing packets from the
+# network. A SyntaxError in it is not caught by anything else here: bitbake
+# installs the file without executing it, so the first thing to notice would be
+# the service failing to start on a board that is already flashed. py_compile
+# is the same check python(1) makes at import, without running a line of it.
+log "Python syntax ..."
+if [[ "${HAVE_PYTHON}" == "0" ]]; then
+    skip_check "python3 not installed - shipped Python not syntax-checked"
+else
+    mapfile -t PY_FILES < <(find layers -name '*.py' -print | sort)
+    if (( ${#PY_FILES[@]} == 0 )); then
+        echo "  no Python files under layers/"
+    elif python3 -m py_compile "${PY_FILES[@]}"; then
+        echo "  ${#PY_FILES[@]} Python file(s) checked"
+        log "  Python: clean"
+        # py_compile leaves __pycache__ next to each source; .gitignore covers
+        # it, but leaving build droppings in the tree after a lint run is rude.
+        find layers -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+    else
+        fail_check "  Python: syntax errors above"
+    fi
+fi
+
 # --- 4. Recipe file:// entries exist --------------------------------------
 # CONFIRMED WORTH HAVING: renaming a file under a recipe's files/ directory
 # without updating its SRC_URI is a real and easy mistake (this repo renamed

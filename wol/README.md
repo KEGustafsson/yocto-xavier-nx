@@ -28,6 +28,7 @@ back to `255.255.255.255`.
 | | |
 |---|---|
 | `boat-sleep.sh` | Runs `boat-sleep` on the board over SSH, then watches from outside until it stops answering |
+| `boat-sleep-udp.sh` | Same thing without SSH: one signed UDP packet to `boat-sleep-listener` on the board |
 | `boat-wake.sh` | Sends the magic packet, then waits until it answers again |
 | `common.sh` | Shared config loading and the wait helpers; sourced, not run |
 | `boat.conf.example` | Template with every setting explained |
@@ -53,6 +54,83 @@ ping: one behind a firewall that drops ICMP, or one you are not sure about.
 It does **not** make it usable on a board that is off or already asleep — it
 still runs `boat-sleep` over SSH, so SSH has to reach the board. On a sleeping
 board, wake it first.
+
+## Sleeping without SSH
+
+`wol/boat-sleep-udp.sh` does what `boat-sleep.sh` does, with one UDP packet
+instead of a login:
+
+```bash
+ssh root@boat cat /etc/boat-sleep.key > wol/boat-sleep.key   # once, per boat
+chmod 0600 wol/boat-sleep.key
+wol/boat-sleep-udp.sh
+```
+
+### Why it is not a magic packet
+
+The obvious question is why sleeping cannot work the way waking does. It
+cannot, and the reason is worth stating because it decides everything else
+about this:
+
+**Waking happens inside the NIC.** The board is off. Nothing on it is running.
+The NIC stays powered in a low-power state, pattern-matches the magic packet in
+its own firmware, and asserts PME to bring the host up.
+
+**Sleeping has no hardware counterpart.** There is no "sleep-on-LAN" in the WoL
+spec, in ACPI, or in any NIC's filter engine. When the host is up, the NIC just
+hands frames to the kernel. A magic packet aimed at a running Xavier is an
+ordinary broadcast frame that lands nowhere.
+
+So the sleep direction has to be a service on the running board — and being a
+service, it has to be authenticated. A magic packet carries no secret at all:
+it is the target MAC repeated sixteen times, forgeable by anyone who has seen a
+single frame from the board. An unauthenticated "suspend now" port would mean
+any guest on the marina wifi can black out the navigation computer at will.
+
+Every packet therefore carries an HMAC-SHA256 over a timestamp and a nonce,
+keyed by `/etc/boat-sleep.key` — 32 random bytes the board generates for itself
+on first boot, never baked into the image. The board checks the signature in
+constant time first, then the timestamp against a 30-second window, then the
+nonce against everything it has seen inside that window. A captured packet is
+good exactly once, and only for 30 seconds.
+
+Nothing is ever sent back — not to a valid packet and not to an invalid one —
+so the port cannot be used as a reflection amplifier and a prober cannot tell
+"bad signature" from "replayed nonce". The board going quiet is the only
+confirmation there is, which is why `boat-sleep-udp.sh` watches for it by
+default. When it does not go quiet, the reason is in the board's journal:
+
+```bash
+ssh root@boat journalctl -u boat-sleep-listener -n 20
+```
+
+### Which one to use
+
+| | over SSH (`boat-sleep.sh`) | signed UDP (`boat-sleep-udp.sh`) |
+|---|---|---|
+| Needs | an SSH credential | `wol/boat-sleep.key` |
+| After a reflash | host key changed — fails until you clear it | keeps working |
+| Tells you *why* it refused | yes, on your terminal | no, only in the board's journal |
+| Works when sshd is down | no | yes |
+| Network surface | sshd, already open | one more UDP port (9099) |
+
+`boat-sleep.sh` remains the one to reach for when something is wrong, because
+it can answer `--status`. `boat-sleep-udp.sh` is the one for scripts, phones
+and boat-panel buttons, where re-accepting a host key is not something the
+caller can do.
+
+Change the port in `boat-sleep-listener.socket` on the board
+(`systemctl edit boat-sleep-listener.socket`) and set `BOAT_SLEEP_PORT` here to
+match. `wol/boat-sleep.key` is git-ignored, like `wol/boat.conf` and rather
+more so.
+
+## Other clients
+
+`clients/typescript/` is a dependency-free TypeScript implementation of both
+directions — `wake()` builds the magic packet, `sleep()` builds the signed
+packet — for a phone app, a boat-panel web UI, or a Node service. Its
+`cross-check.mjs` runs the real `boat-sleepd.py` on loopback and verifies that
+what it sends is accepted and that a magic packet is not.
 
 `BOAT_SSH_USER` may be `root` or `boat`; for anything other than root the
 wrapper prefixes `sudo -n`, which works because the `boat` account has

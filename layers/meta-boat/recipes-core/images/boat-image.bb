@@ -38,10 +38,23 @@ IMAGE_INSTALL:append = " \
     boat-hmi-autostart \
     boat-compose \
     boat-power \
+    boat-sleep-listener \
     boat-grow-rootfs \
     boat-firefox \
     kernel-modules \
     "
+
+# boat-sleep-listener opens ONE UDP port (9099 by default) on which a packet
+# signed with this board's own /etc/boat-sleep.key - generated per board on
+# first boot, never baked into the image - runs `boat-sleep`. That is a
+# deliberate widening of the network surface, and it is here because the
+# alternative for "suspend from ashore" is an SSH session whose host key
+# changes on every reflash. An unsigned packet, a replayed one, or one outside
+# a 30s clock window is dropped without a reply; boat-sleep's own refusal to
+# suspend a board that nothing can wake still applies on top.
+#
+# Drop this one line to remove the port entirely; wol/boat-sleep.sh (over SSH)
+# keeps working either way.
 
 # USB-serial (docs/05 "Local device passthrough into containers") comes from
 # `kernel-modules` above, which installs every module the kernel built - and

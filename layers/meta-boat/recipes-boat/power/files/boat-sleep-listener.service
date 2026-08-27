@@ -1,0 +1,55 @@
+[Unit]
+Description=Authenticated remote-suspend listener for the boat computer
+Documentation=file:///usr/share/doc/boat-sleep-listener/README
+Requires=boat-sleep-listener.socket
+After=boat-sleep-listener.socket
+# boat-sleep is what this actually runs; without it the service is pointless.
+ConditionPathExists=/usr/bin/boat-sleep
+# Refuse to start rather than run unauthenticated: no key, no listener.
+ConditionPathExists=/etc/boat-sleep.key
+
+[Service]
+Type=exec
+EnvironmentFile=-/etc/default/boat-sleep-listener
+ExecStart=/usr/bin/boat-sleepd
+Restart=on-failure
+RestartSec=5s
+
+# --- Hardening -------------------------------------------------------------
+# This parses attacker-supplied bytes and runs as root (boat-sleep needs to be
+# able to talk to logind). The parsing is 60 bytes of struct.unpack in Python,
+# but "small attack surface" is not "no attack surface", so the service is
+# confined to almost nothing: it needs one UDP socket, one key file, and the
+# ability to exec one program.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+# ProtectKernelTunables is deliberately ABSENT, and this is the one directive
+# here that would break the feature rather than harden it: it remounts /sys
+# read-only, and boat-sleep writes `deep` to /sys/power/mem_sleep to select SC7
+# over s2idle. With it set, every packet would be authenticated correctly and
+# then die on "could not select 'deep' in /sys/power/mem_sleep" - on hardware,
+# on the boat, and nowhere earlier.
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# IPv4 UDP for the listener; AF_UNIX because boat-sleep talks to logind over
+# the system bus, and AF_NETLINK because it reads the WoL flag with ethtool.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# No [Install] section on purpose. The SOCKET is what gets enabled; this is
+# pulled in by it. An empty [Install] would make `systemctl enable` on this
+# unit look meaningful and do nothing. Starting it by hand is supported - it
+# binds the port itself when systemd has not passed one - but that is the test
+# path, not the deployed one.

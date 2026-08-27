@@ -34,3 +34,12 @@ __pycache__/
 # there: snap-packaged docker cannot read /tmp). Removed on exit; this only
 # catches an interrupted run.
 /.lint-compose.*
+
+# Shared secret for the UDP sleep listener - copied from the board, per
+# boat, and the thing that decides who may suspend it. Never commit.
+/wol/boat-sleep.key
+
+# TypeScript client build output and dependencies
+/clients/typescript/node_modules/
+/clients/typescript/dist/
+/clients/typescript/package-lock.json

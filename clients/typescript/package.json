@@ -1,0 +1,22 @@
+{
+  "name": "@boat/power-client",
+  "version": "1.0.0",
+  "description": "Wake and sleep the boat computer: Wake-on-LAN out, signed UDP back",
+  "type": "module",
+  "main": "dist/boat-power.js",
+  "types": "dist/boat-power.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/boat-power.test.js",
+    "check": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.0"
+  }
+}
