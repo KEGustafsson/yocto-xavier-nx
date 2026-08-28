@@ -28,15 +28,41 @@
 # logged and swallowed.
 set -eu
 
+# Snapshot BOAT_WOL_WAIT before sourcing the config, and put it back after:
+# the file is plain `VAR=value` assignments, so it would otherwise overwrite a
+# value passed in the environment - and the systemd-sleep hook passes
+# BOAT_WOL_WAIT=0 on resume precisely to avoid a per-interface stall while the
+# sleep operation is still open. An operator who sets BOAT_WOL_WAIT in this
+# CONFFILE (which its own comments invite) would silently get that stall back.
+# Same "environment beats the file" rule load_boat_conf applies on the host.
+_env_wol_wait="${BOAT_WOL_WAIT-}"
+_env_wol_wait_set="${BOAT_WOL_WAIT+set}"
+
 CONF=/etc/default/boat-power
 if [ -r "$CONF" ]; then
     # shellcheck source=/dev/null
     . "$CONF"
 fi
+[ "$_env_wol_wait_set" = "set" ] && BOAT_WOL_WAIT="$_env_wol_wait"
+unset _env_wol_wait _env_wol_wait_set
+
 : "${BOAT_WOL_INTERFACES:=eth0}"
 # Seconds to wait for a driver to advertise magic-packet support before
 # giving up on an interface. Only used when actually arming.
 : "${BOAT_WOL_WAIT:=15}"
+# /etc/default/boat-power is a CONFFILE, meant to be hand-edited on the boat,
+# so this can arrive as anything. It has to be validated: `[ "$waited" -ge 15s ]`
+# is an error, not a false, and the `&&` list it sits in swallows that under
+# `set -e` - so the break never fires and the wait loop below spins forever at
+# one second per turn. That hangs boat-wol.service to its systemd start
+# timeout, hangs NetworkManager's dispatcher queue, and hangs the pre-suspend
+# hook mid-suspend.
+case "$BOAT_WOL_WAIT" in
+    ''|*[!0-9]*)
+        echo "boat-wol: BOAT_WOL_WAIT must be a whole number of seconds, got '$BOAT_WOL_WAIT'" >&2
+        echo "boat-wol: fix it in $CONF" >&2
+        exit 2 ;;
+esac
 
 say() { echo "boat-wol: $*"; }
 
@@ -109,8 +135,14 @@ for ifc in $BOAT_WOL_INTERFACES; do
             waited=$((waited + 1))
             caps=$(wol_supported "$ifc")
         done
-        [ "$waited" -gt 0 ] && [ -n "$caps" ] \
-            && say "$ifc: waited ${waited}s for the driver to advertise Wake-on-LAN"
+        # Only when the wait actually achieved something. The old condition
+        # was satisfied by a TIMEOUT with caps still "d", so the journal read
+        # "waited 15s for the driver to advertise Wake-on-LAN" and then
+        # "supports Wake-on 'd' ... skipped" - success followed by failure.
+        case "$caps" in
+            *g*) [ "$waited" -gt 0 ] \
+                     && say "$ifc: waited ${waited}s for the driver to advertise Wake-on-LAN" ;;
+        esac
     fi
     case "$caps" in
         *g*) ;;

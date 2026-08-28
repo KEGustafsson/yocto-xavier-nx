@@ -23,10 +23,12 @@
 #
 # The export lives in /run/boat-x11, a 0700 directory owned by this user that
 # systemd-tmpfiles creates at boot (see boat-x11-cookie.conf in this recipe):
-# no other unprivileged uid can even traverse into it, so the cookie file
-# itself can stay readable to whatever uid a container image happens to run
-# its app as (many don't run as root). dockerd does the bind-mount as root, so
-# the 0700 directory is no obstacle to it.
+# no other unprivileged uid can even traverse into it. dockerd does the
+# bind-mount as root, so the 0700 directory is no obstacle to it, and a
+# container reads the cookie if it runs as root or as this same uid - which is
+# what the shipped X11 examples do. Widening either the directory or this file
+# to let an arbitrary local uid read the cookie would hand out full X access,
+# which is exactly the `xhost +local:` grant this replaced.
 #
 # Note this is the session's own cookie, i.e. FULL X-server access for
 # anything holding it - input injection, screen capture and window
@@ -55,18 +57,21 @@ if [ -w "$BOAT_X11_DIR" ]; then
         | xauth -f "$BOAT_X11_COOKIE" nmerge - 2>/dev/null \
         && [ -s "$BOAT_X11_COOKIE" ]
     then
-        # Readable inside the container whatever uid it runs as; the 0700
-        # parent above is what keeps other local users out.
-        chmod 0644 "$BOAT_X11_COOKIE" 2>/dev/null || :
+        # 0600, matching the 0700 parent. A wider mode on the file buys
+        # nothing while the directory is 0700 (only this uid and root can
+        # reach it at all) and would become a real exposure the moment
+        # anything loosened the directory.
+        chmod 0600 "$BOAT_X11_COOKIE" 2>/dev/null || :
     else
         echo "boat-xfce-session: could not export X cookie to $BOAT_X11_COOKIE" >&2
         echo "boat-xfce-session: containerized GUI apps will fail to open $DISPLAY" >&2
     fi
 else
-    echo "boat-xfce-session: $BOAT_X11_DIR is missing or not writable - no X" >&2
-    echo "boat-xfce-session: cookie exported; is the tmpfiles.d entry from" >&2
-    echo "boat-xfce-session: boat-hmi-autostart installed? (systemd-tmpfiles" >&2
-    echo "boat-xfce-session: --create /usr/lib/tmpfiles.d/boat-x11.conf)" >&2
+    echo "boat-xfce-session: $BOAT_X11_DIR is missing or not writable" >&2
+    echo "boat-xfce-session: no X cookie was exported, so containerized GUI" >&2
+    echo "boat-xfce-session: apps will fail to open $DISPLAY" >&2
+    echo "boat-xfce-session: is boat-hmi-autostart's tmpfiles.d entry installed?" >&2
+    echo "boat-xfce-session: systemd-tmpfiles --create /usr/lib/tmpfiles.d/boat-x11.conf" >&2
 fi
 
 # XFCE needs a D-Bus session bus (xfconf, xfsettingsd, thunar, notifyd all

@@ -1,6 +1,7 @@
 # Reference bblayers.conf for a manual build. scripts/02-configure-build.sh
 # writes this automatically with absolute paths. Adjust ${TOPDIR}/../layers
-# to wherever you cloned poky, meta-openembedded, meta-tegra and this repo.
+# to wherever you cloned poky, meta-openembedded, meta-tegra,
+# meta-virtualization, meta-tegra-community and this repo.
 
 POKY_BBLAYERS_CONF_VERSION = "2"
 BBPATH = "${TOPDIR}"
@@ -18,9 +19,18 @@ BBLAYERS ?= " \
   ${TOPDIR}/../layers/meta-openembedded/meta-gnome \
   ${TOPDIR}/../layers/meta-openembedded/meta-xfce \
   ${TOPDIR}/../layers/meta-tegra \
+  ${TOPDIR}/../layers/meta-virtualization \
+  ${TOPDIR}/../layers/meta-tegra-community \
   /path/to/yocto-xavier-nx/layers/meta-boat \
   "
 
 # meta-multimedia/meta-gnome are here only because meta-xfce (the XFCE helm
 # desktop, Phase 2) declares them as LAYERDEPENDS. Drop all three for a
 # Phase-1 core-image-base build if you want a smaller layer set.
+#
+# meta-virtualization and meta-tegra-community are Phase-2 requirements, not
+# optional extras: docker-ce and python3-docker-compose come from the first,
+# python3-jetson-stats (jtop) from the second, and meta-tegra only enables its
+# own nvidia-container-toolkit overlay when meta-virtualization is present.
+# Without them boat-image fails to resolve with "Nothing PROVIDES ...". They
+# can be dropped for a Phase-1 core-image-base build.

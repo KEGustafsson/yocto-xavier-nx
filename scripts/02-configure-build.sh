@@ -10,6 +10,22 @@ source "${HERE}/env.sh"
 
 [[ -d "${LAYERS_DIR}/poky" ]] || die "layers missing; run scripts/01-fetch-layers.sh first"
 
+# Validate before anything is written. ROOTFS_SIZE_BYTES is arithmetic below
+# (TEGRA_EXTERNAL_DEVICE_SECTORS), and env.sh discusses it in GiB throughout,
+# so "16G" is a natural thing to type - it would abort the shell mid-way
+# through appending the managed block, leaving local.conf with a begin marker
+# and no end marker.
+[[ "${ROOTFS_SIZE_BYTES}" =~ ^[0-9]+$ ]] \
+  || die "ROOTFS_SIZE_BYTES must be a plain byte count, got '${ROOTFS_SIZE_BYTES}'"
+# BBLAYERS is a whitespace-separated list, so a checkout under "~/My Projects"
+# produces a bblayers.conf bitbake splits into layer paths that do not exist -
+# and the error names those fragments, never the space that caused them.
+for _p in "${REPO_ROOT}" "${WORKROOT}" "${LAYERS_DIR}" "${BUILD_DIR}"; do
+  [[ "${_p}" == *[[:space:]]* ]] \
+    && die "path contains whitespace, which bitbake's BBLAYERS cannot express: '${_p}'"
+done
+unset _p
+
 # oe-init-build-env creates/uses BUILD_DIR and drops us in it. Run in a subshell
 # so we don't pollute the caller, but we only need the side effect (conf/*).
 log "Initialising build dir at ${BUILD_DIR} ..."
@@ -17,6 +33,13 @@ log "Initialising build dir at ${BUILD_DIR} ..."
 # default), so relax -u just for this sourced script.
 # shellcheck disable=SC1091
 ( set +u; source "${LAYERS_DIR}/poky/oe-init-build-env" "${BUILD_DIR}" >/dev/null )
+
+# Same lock 03-build.sh holds for the whole build. Rewriting bblayers.conf and
+# local.conf under a live cooker is exactly the "one bitbake per build
+# directory" rule this lock exists to enforce; without it, re-running this
+# script from a second terminal mutates the configuration a running build is
+# reading. See acquire_build_lock in lib.sh.
+acquire_build_lock "${BUILD_DIR}"
 
 CONF="${BUILD_DIR}/conf"
 mkdir -p "${CONF}"
@@ -113,10 +136,17 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
   # core-image-base build too (it just makes a few common recipes' optional
   # x11/virtualization PACKAGECONFIGs available, it doesn't install anything
   # by itself).
-  # "wayland" is deliberately NOT in this list any more: the helm display was
-  # a Weston/Wayland session in earlier versions of this image and is now
-  # XFCE on Xorg. Leaving it in would only build unused Wayland backends into
-  # GTK and friends. Add it back if you reintroduce a Wayland compositor.
+  # "wayland" is deliberately NOT in this append any more: the helm display
+  # was a Weston/Wayland session in earlier versions of this image and is now
+  # XFCE on Xorg.
+  #
+  # Be clear about what that does and does not achieve: the poky DISTRO still
+  # carries "wayland" in its own POKY_DEFAULT_DISTRO_FEATURES, so it is in
+  # DISTRO_FEATURES either way and GTK and friends still build their Wayland
+  # backends. Dropping it here only stops this project ASSERTING a dependency
+  # it no longer has - actually removing it needs a
+  # DISTRO_FEATURES:remove = "wayland" (or a different DISTRO), which is a
+  # bigger change than it looks and is not made here.
   echo 'DISTRO_FEATURES:append = " virtualization opengl pam x11 polkit"'
   # Keep downloads / sstate outside the build dir so re-inits are cheap.
   echo "DL_DIR = \"${WORKROOT}/downloads\""
@@ -141,10 +171,20 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
   # a whitelist of symlinks) that doesn't include arbitrary host binaries
   # like a bare "gcc-12", so a bare name here fails with "No such file or
   # directory" even though it resolves fine in an interactive shell.
-  echo 'BUILD_CC = "${CCACHE}/usr/bin/gcc-12 ${BUILD_CC_ARCH}"'
-  echo 'BUILD_CXX = "${CCACHE}/usr/bin/g++-12 ${BUILD_CC_ARCH}"'
-  echo 'BUILD_CPP = "/usr/bin/gcc-12 ${BUILD_CC_ARCH} -E"'
-  echo 'BUILD_CCLD = "/usr/bin/gcc-12 ${BUILD_CC_ARCH}"'
+  # Only emitted when those binaries actually exist. Writing them
+  # unconditionally made every host need gcc-12, including the Ubuntu
+  # 20.04/22.04 hosts this project calls best-tested (where it is not
+  # installed by default, and on 20.04 not in the archive at all) - and the
+  # failure came 20 minutes into a build, as "/usr/bin/gcc-12: No such file or
+  # directory" from some unrelated -native recipe. scripts/00-install-host-deps.sh
+  # installs them where the archive has them; the warning below is for
+  # everywhere else.
+  if [[ -x /usr/bin/gcc-12 && -x /usr/bin/g++-12 ]]; then
+    echo 'BUILD_CC = "${CCACHE}/usr/bin/gcc-12 ${BUILD_CC_ARCH}"'
+    echo 'BUILD_CXX = "${CCACHE}/usr/bin/g++-12 ${BUILD_CC_ARCH}"'
+    echo 'BUILD_CPP = "/usr/bin/gcc-12 ${BUILD_CC_ARCH} -E"'
+    echo 'BUILD_CCLD = "/usr/bin/gcc-12 ${BUILD_CC_ARCH}"'
+  fi
   # --- Host-age accommodations (see docs/02 "Newer hosts") ------------
   # kirkstone's SANITY_TESTED_DISTROS (meta-poky/conf/distro/poky.conf)
   # stops at ubuntu-24.04, so anything newer warns "Host distribution ...
@@ -204,7 +244,16 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
     # to match the physical SSD's real capacity, only be >= what's
     # actually used - any leftover space on a larger real drive is
     # simply unpartitioned.
-    echo "TEGRA_EXTERNAL_DEVICE_SECTORS = \"$(( (ROOTFS_SIZE_BYTES + 1073741824) / 512 ))\""
+    # Derived from ROOTFSPART_SIZE by bitbake rather than precomputed here, so
+    # the two cannot drift: a ROOTFSPART_SIZE raised anywhere - including by
+    # hand in local.conf after this block - carries the capacity with it,
+    # instead of declaring a device smaller than the APP partition and failing
+    # at flash time. config/local.conf.sample and the kas profile use the same
+    # expression.
+    # The '\''...'\'' sequences are single quotes embedded in this single-quoted
+    # shell string; what reaches local.conf is d.getVar('ROOTFSPART_SIZE'),
+    # matching config/local.conf.sample and the kas profile exactly.
+    echo 'TEGRA_EXTERNAL_DEVICE_SECTORS = "${@(int(d.getVar('\''ROOTFSPART_SIZE'\'')) + 1073741824) // 512}"'
     # jetson-xavier-nx-devkit's default PARTITION_LAYOUT_TEMPLATE_DEFAULT
     # (flash_l4t_t194_spi_sd_p3668.xml) still carries an internal "APP"
     # partition sized from ROOTFSPART_SIZE, even though TNSPEC_BOOTDEV

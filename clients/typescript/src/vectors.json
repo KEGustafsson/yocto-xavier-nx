@@ -1,0 +1,114 @@
+{
+  "_comment": [
+    "Conformance vectors for the boat sleep protocol (v1).",
+    "GENERATED FROM boat-sleepd.py, which is what ships on the boat -",
+    "it is the authority here, and the TypeScript side must conform.",
+    "Cases run IN ORDER against ONE shared replay cache: case 2 is",
+    "case 1's bytes a second time and expects replayed-nonce for that",
+    "reason. Running them out of order or with a fresh cache each time",
+    "silently weakens the suite rather than failing it.",
+    "Regenerate with: scripts/gen-sleep-vectors.py"
+  ],
+  "key": "4b1e4b1e4b1e4b1e4b1e4b1e4b1e4b1e4b1e4b1e4b1e4b1e4b1e4b1e4b1e4b1e",
+  "window": 30,
+  "now": 1700000000,
+  "cases": [
+    {
+      "name": "a valid request",
+      "packet": "424f4154534c503101010000000000006553f1001122334455667788077be12ca336458d860dae1ee04eb7a26f23008a107b181a1eaf495afd5c3b9d",
+      "expect": "accept"
+    },
+    {
+      "name": "the same packet again",
+      "packet": "424f4154534c503101010000000000006553f1001122334455667788077be12ca336458d860dae1ee04eb7a26f23008a107b181a1eaf495afd5c3b9d",
+      "expect": "replayed-nonce",
+      "note": "replay: identical bytes, second time"
+    },
+    {
+      "name": "wrong key",
+      "packet": "424f4154534c503101010000000000006553f100000000000000aaaa80f364d7f25da4e7d6079a3ce4d26263a8d47f72b17d276edb04e8df3ecab17e",
+      "expect": "bad-signature"
+    },
+    {
+      "name": "flipped magic byte",
+      "packet": "434f4154534c503101010000000000006553f1001122334455667788077be12ca336458d860dae1ee04eb7a26f23008a107b181a1eaf495afd5c3b9d",
+      "expect": "bad-magic"
+    },
+    {
+      "name": "flipped version byte",
+      "packet": "424f4154534c503100010000000000006553f1001122334455667788077be12ca336458d860dae1ee04eb7a26f23008a107b181a1eaf495afd5c3b9d",
+      "expect": "bad-version"
+    },
+    {
+      "name": "flipped timestamp byte",
+      "packet": "424f4154534c503101010000010000006553f1001122334455667788077be12ca336458d860dae1ee04eb7a26f23008a107b181a1eaf495afd5c3b9d",
+      "expect": "bad-signature"
+    },
+    {
+      "name": "flipped nonce byte",
+      "packet": "424f4154534c503101010000000000006553f1001022334455667788077be12ca336458d860dae1ee04eb7a26f23008a107b181a1eaf495afd5c3b9d",
+      "expect": "bad-signature"
+    },
+    {
+      "name": "flipped first mac byte",
+      "packet": "424f4154534c503101010000000000006553f1001122334455667788067be12ca336458d860dae1ee04eb7a26f23008a107b181a1eaf495afd5c3b9d",
+      "expect": "bad-signature"
+    },
+    {
+      "name": "flipped last mac byte",
+      "packet": "424f4154534c503101010000000000006553f1001122334455667788077be12ca336458d860dae1ee04eb7a26f23008a107b181a1eaf495afd5c3b9c",
+      "expect": "bad-signature"
+    },
+    {
+      "name": "truncated by one",
+      "packet": "424f4154534c503101010000000000006553f1001122334455667788077be12ca336458d860dae1ee04eb7a26f23008a107b181a1eaf495afd5c3b",
+      "expect": "wrong-length"
+    },
+    {
+      "name": "one byte too long",
+      "packet": "424f4154534c503101010000000000006553f1001122334455667788077be12ca336458d860dae1ee04eb7a26f23008a107b181a1eaf495afd5c3b9d00",
+      "expect": "wrong-length"
+    },
+    {
+      "name": "empty datagram",
+      "packet": "",
+      "expect": "wrong-length"
+    },
+    {
+      "name": "a real Wake-on-LAN magic packet",
+      "packet": "ffffffffffff48b02d11223348b02d11223348b02d11223348b02d11223348b02d11223348b02d11223348b02d11223348b02d11223348b02d11223348b02d11223348b02d11223348b02d11223348b02d11223348b02d11223348b02d11223348b02d112233",
+      "expect": "wrong-length",
+      "note": "the packet this protocol exists BECAUSE anyone can forge"
+    },
+    {
+      "name": "exactly at the window edge, behind",
+      "packet": "424f4154534c503101010000000000006553f0e200000000000000b08e57bc5db5b5d5152875ae5e8730887ea5fcd70e36887a80a51913a4cf7b4aff",
+      "expect": "accept"
+    },
+    {
+      "name": "exactly at the window edge, ahead",
+      "packet": "424f4154534c503101010000000000006553f11e00000000000000b18bb45a68f88019ee50f73f7acf926c9f5803cfaeb4e897e0e4e1997631479f0d",
+      "expect": "accept"
+    },
+    {
+      "name": "one second past the window, behind",
+      "packet": "424f4154534c503101010000000000006553f0e100000000000000b2d1e9c7cc2f107d035f3ef77007878101eb8de3ff6d15c39eb2943de45a14b600",
+      "expect": "stale-timestamp"
+    },
+    {
+      "name": "one second past the window, ahead",
+      "packet": "424f4154534c503101010000000000006553f11f00000000000000b316e4c8e8096aa7c495a0482925efe9c2112ca220614172cc1ff71899a4c10039",
+      "expect": "stale-timestamp"
+    },
+    {
+      "name": "unknown opcode",
+      "packet": "424f4154534c503101630000000000006553f10000000000000000c0c19ebd91ae023f0b98f1df491df76a091b4cc9510e70c9023790ccc1114cc286",
+      "expect": "unknown-opcode"
+    },
+    {
+      "name": "unsupported version",
+      "packet": "424f4154534c503102010000000000006553f10000000000000000d01a151e14e82c2cc7f16a111cc0a6ff5cf7d6167a22a8f72285c07ede11fea186",
+      "expect": "bad-version"
+    }
+  ]
+}

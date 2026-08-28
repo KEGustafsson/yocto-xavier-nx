@@ -1,0 +1,27 @@
+[Unit]
+Description=Authenticated remote-suspend listener socket for the boat computer
+Documentation=file:///usr/share/doc/boat-sleep-listener/README
+# Wake-on-LAN's counterpart, one layer up: waking is done by the NIC, which no
+# software here is involved in; sleeping cannot be, so it is done by a signed
+# datagram to this socket instead. See boat-sleepd for why it is not a magic
+# packet.
+
+[Socket]
+# Arbitrary, and the one place to change it - boat-sleepd is told the port only
+# for the non-socket-activated test path. Whatever you pick, change it in the
+# sender too (BOAT_SLEEP_PORT in wol/boat.conf).
+ListenDatagram=9099
+# Accept=no: systemd passes the listening socket itself as fd 3 and the daemon
+# reads every datagram from it. Accept=yes would mean one process per packet,
+# which for an unauthenticated-until-parsed UDP port is a spawn amplifier -
+# anyone able to send to the port could drive process creation, and the
+# TriggerLimit below would then stop the socket outright, turning a flood into
+# a lasting denial of the one command you need when the board is unreachable.
+Accept=no
+# A flood cannot spawn anything (Accept=no), but it can still churn the
+# service; stop reacting rather than restarting in a loop.
+TriggerLimitIntervalSec=10s
+TriggerLimitBurst=50
+
+[Install]
+WantedBy=sockets.target

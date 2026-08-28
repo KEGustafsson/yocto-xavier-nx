@@ -1,0 +1,38 @@
+{
+  "name": "@boat/power-client",
+  "version": "1.1.0",
+  "description": "Wake and sleep the boat computer: Wake-on-LAN out, signed UDP back",
+  "type": "module",
+  "main": "./dist/cjs/boat-power.js",
+  "module": "./dist/esm/boat-power.js",
+  "types": "./dist/esm/boat-power.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/boat-power.d.ts",
+      "import": "./dist/esm/boat-power.js",
+      "require": "./dist/cjs/boat-power.js"
+    },
+    "./listener": {
+      "types": "./dist/esm/listener.d.ts",
+      "import": "./dist/esm/listener.js",
+      "require": "./dist/cjs/listener.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "npm run build:esm && npm run build:cjs && npm run build:assets",
+    "build:esm": "tsc",
+    "build:cjs": "tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist/cjs/package.json', JSON.stringify({type:'commonjs'})+'\\n')\"",
+    "build:assets": "node -e \"require('fs').copyFileSync('src/vectors.json','dist/esm/vectors.json')\"",
+    "test": "npm run build && node --test dist/esm/*.test.js",
+    "check": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.0"
+  }
+}

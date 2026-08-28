@@ -19,7 +19,13 @@ SRC_URI = " \
 
 S = "${WORKDIR}"
 
-inherit systemd allarch
+inherit systemd allarch features_check
+
+# boat-wol.service and the systemd-sleep hook are the whole mechanism here. On
+# a sysvinit build they would be installed and packaged and then silently never
+# run, which for a package whose job is "the board can be woken again" is the
+# worst way to fail. boat-hmi-autostart sets the same precedent for x11.
+REQUIRED_DISTRO_FEATURES = "systemd"
 
 SYSTEMD_SERVICE:${PN} = "boat-wol.service"
 

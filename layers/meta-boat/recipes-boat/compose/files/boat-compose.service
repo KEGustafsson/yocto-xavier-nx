@@ -1,14 +1,32 @@
 [Unit]
 Description=Bring up the boat's docker-compose stack from /data/compose
 Documentation=file:///usr/share/boat/compose-examples/README
-After=docker.service network-online.target data.mount
+After=docker.service network-online.target
 Wants=network-online.target
 Requires=docker.service
+# The compose files live on /data (see boat-compose-up). RequiresMountsFor
+# resolves to whatever unit actually provides the closest mount point, so it is
+# correct both today, when /data is a directory on the rootfs and this pulls in
+# the always-active -.mount, and later when /data becomes its own partition -
+# without the unit having to name a data.mount that may not exist. An
+# "After=data.mount" naming a non-existent unit, which is what this used to
+# say, is silently no ordering at all.
+RequiresMountsFor=/data/compose
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/boat-compose-up
+# Without this, `systemctl stop boat-compose` marks the unit inactive and
+# leaves every container running - and the next `start` is then a no-op against
+# a stack nobody is tracking.
+#
+# --stop, not --down: this also runs on `systemctl restart` and on every system
+# shutdown, and `compose down` would REMOVE the containers and networks - so a
+# reboot would discard anything a service kept only in its container's writable
+# layer. `compose stop` leaves them intact to resume. `boat-compose-up --down`
+# is there for an explicit teardown by hand.
+ExecStop=/usr/bin/boat-compose-up --stop
 
 [Install]
 WantedBy=multi-user.target

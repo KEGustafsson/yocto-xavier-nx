@@ -1,10 +1,27 @@
 # Yocto working tree (layers cloned + build output) — never commit
 /yocto/
 
+# kas (README "kas build kas/xavier-nx-nvme.yml") defaults KAS_WORK_DIR to the
+# current directory, so it clones the upstream layers and builds *here*, not
+# under /yocto/. Without these, one documented command fills `git status` with
+# thousands of untracked upstream files.
+/build/
+/poky/
+/meta-openembedded/
+/meta-tegra/
+/meta-tegra-community/
+/meta-virtualization/
+/.kas/
+
 # Editor / OS cruft
 *.swp
 *~
 .DS_Store
+
+# Merge/patch leftovers - this repo carries .patch files under meta-boat, and a
+# stray .orig next to one is easy to commit by accident
+*.orig
+*.rej
 
 # Python bytecode cache (e.g. scripts/pyfix/sitecustomize.py)
 __pycache__/
@@ -12,3 +29,17 @@ __pycache__/
 
 # Per-boat WoL settings (MAC / LAN addresses) - copy boat.conf.example
 /wol/boat.conf
+
+# scripts/lint.sh scratch dir for `docker compose config` (see the comment
+# there: snap-packaged docker cannot read /tmp). Removed on exit; this only
+# catches an interrupted run.
+/.lint-compose.*
+
+# Shared secret for the UDP sleep listener - copied from the board, per
+# boat, and the thing that decides who may suspend it. Never commit.
+/wol/boat-sleep.key
+
+# TypeScript client build output and dependencies
+/clients/typescript/node_modules/
+/clients/typescript/dist/
+/clients/typescript/package-lock.json

@@ -11,9 +11,15 @@ The work is split into two phases:
 1. **Phase 1 — first bootable NVMe image.** A minimal console image
    (`core-image-base`) that boots from the SSD. Prove the toolchain, flashing
    and boot path end-to-end before adding complexity.
-2. **Phase 2 — the boat computer.** Add the `meta-boat` layer: GNSS, NMEA 2000
-   (CAN), MQTT, Wi-Fi access point, a Node.js runtime for Signal K, watchdog,
-   and service tooling.
+2. **Phase 2 — the boat computer.** Add the `meta-boat` layer: a Jetson
+   **container host**. The host provides Docker plus the NVIDIA container
+   runtime, an XFCE desktop on the HDMI screen, connectivity
+   (NetworkManager/Wi-Fi/Bluetooth/WireGuard), CUDA + TensorRT, Jetson tooling
+   and a watchdog. The applications — Signal K, DeepStream, a browser HMI —
+   run as **containers you compose yourself**, not as baked-in packages. GNSS,
+   NMEA 2000/CAN and MQTT come from outside this host: an external NMEA 2000
+   interface on the boat's network, and brokers inside containers. See
+   [`05-phase2-boat-computer-layer.md`](05-phase2-boat-computer-layer.md).
 
 ## How the Xavier NX boots
 
@@ -48,9 +54,11 @@ separate from the OS storage. That is the key to NVMe boot:
 | Layer | Provides | Branch |
 |-------|----------|--------|
 | **poky** (OE-Core + bitbake) | build system, base recipes | `kirkstone` |
-| **meta-openembedded** | gpsd, can-utils, mosquitto, nodejs, chrony … | `kirkstone` |
-| **meta-tegra** (OE4T) | Jetson BSP: kernel, UEFI, `tegraflash`, `initrd-flash` | `kirkstone` |
-| **meta-boat** (this repo) | marine software + image | — |
+| **meta-openembedded** | NetworkManager, chrony, the diagnostics set; and via `meta-xfce` (+ its `meta-gnome`/`meta-multimedia` dependencies) the helm desktop | `kirkstone` |
+| **meta-tegra** (OE4T) | Jetson BSP: kernel, UEFI, `tegraflash`, `initrd-flash`, CUDA/TensorRT | `kirkstone` |
+| **meta-virtualization** | `docker-ce` — and its presence is what makes meta-tegra enable `nvidia-container-toolkit` | `kirkstone` |
+| **meta-tegra-community** | `python3-jetson-stats` (jtop) | `kirkstone` |
+| **meta-boat** (this repo) | the container-host image, packagegroups and on-device tooling | — |
 
 ### Why the `kirkstone` branch?
 
