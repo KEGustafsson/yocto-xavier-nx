@@ -1,0 +1,17 @@
+[Unit]
+Description=Restore the Bluetooth adapter power state after resume
+Documentation=file:/usr/bin/boat-bt-power
+# Ordering only, and only if both land in the same transaction: this unit is
+# started by the system-sleep hook after the resume, by which point
+# bluetooth.service and D-Bus are long since up. boat-bt-power does not
+# assume that anyway - it waits for bluetoothd to publish an adapter.
+After=dbus.service bluetooth.service
+
+# Deliberately NO [Install] section, and deliberately not in the recipe's
+# SYSTEMD_SERVICE: nothing should ever `systemctl enable` this. It is a
+# one-shot started by name from system-sleep/boat-bluetooth on every resume,
+# and enabling it would only mean running it once at boot as well - where
+# [Policy] AutoEnable=true in /etc/bluetooth/main.conf already has the job.
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/boat-bt-power restore
