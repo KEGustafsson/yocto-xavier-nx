@@ -40,9 +40,11 @@ this project's kirkstone snapshot — `fail2ban`, `wavemon`, `bind-utils`,
   `scripts/02-configure-build.sh`, not here — the recipe declares them with
   `REQUIRED_DISTRO_FEATURES` so a missing one is a legible parse-time skip
   rather than a broken rootfs. **Note the credential posture:** root and
-  `boat` both have an empty password, sshd permits root logins and empty
-  passwords, and `boat` has passwordless sudo. Deliberate for a bench image,
-  and the first thing to reverse for a deployed one.
+  `boat` share the password `Xavier` (`BOAT_PASSWORD_HASH`, overridable in
+  `local.conf`), sshd permits root logins, and `boat` has passwordless sudo.
+  A real credential rather than the empty passwords this image used to ship,
+  but the hash is public and the same on every board — for a deployed one,
+  provision an SSH key and lock the passwords.
 - `recipes-core/packagegroups/packagegroup-boat.bb` — grouped by concern
   (`-containers`, `-nvidia-container`, `-jetson`, `-hmi`, ...) so an image
   can pull just what it needs.

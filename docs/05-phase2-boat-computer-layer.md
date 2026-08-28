@@ -1230,12 +1230,22 @@ UI" above.)
   packaged in this project's fetched kirkstone-era layers.
 - ❌ RAUC A/B updates, the `/data` partition itself, and the interactive
   build-time user/SSH-key provisioning flow — later hardening, not started.
-- ⚠️ **Credentials.** Root and `boat` both have an *empty* password, sshd
-  accepts root logins and empty passwords, and `boat` has passwordless sudo
-  and `docker` group membership (root-equivalent). Anyone who can reach port
-  22 has root with no credential. Deliberate for a bench image, declared
-  explicitly in `boat-image.bb` rather than inherited from `debug-tweaks` —
-  and the thing to reverse first before this goes near an untrusted network.
-  See "Build-time user & SSH" above.
+- ⚠️ **Credentials.** Root and `boat` share the password `Xavier`
+  (`BOAT_PASSWORD_HASH` in `boat-image.bb`; override in `local.conf` with
+  `openssl passwd -6`). sshd accepts root logins; it no longer accepts empty
+  passwords, and nothing has one. `boat` still has passwordless sudo and
+  `docker` group membership, both root-equivalent.
+
+  This is a real credential where there used to be none, but the hash is
+  public and identical on every board built from this recipe, and a `boat`
+  shell is still a root shell without re-entering it. Provision an SSH key and
+  lock the passwords before this goes near an untrusted network — see
+  "Build-time user & SSH" above.
+
+  **One consequence to know about:** `wol/boat-sleep.sh` runs SSH with
+  `BatchMode=yes`, which cannot answer a password prompt. With empty passwords
+  it worked unattended; with a real one it needs an SSH key in place. The UDP
+  path (`wol/boat-sleep-udp.sh`, `clients/typescript`) is unaffected — it
+  never used SSH.
 
 Next: [`06-troubleshooting.md`](06-troubleshooting.md)

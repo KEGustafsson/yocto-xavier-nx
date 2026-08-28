@@ -167,16 +167,21 @@ and waking it again from your laptop.
   suspend when nothing can wake the board again, so a board whose PHY cannot
   do it fails safe rather than needing a visit; `boat-sleep --status` answers
   that question on the bench in a second.
-- **Credentials, stated plainly.** `boat-image` is a bench/development image:
-  root and the `boat` user both have an **empty password**, sshd is built with
-  `PermitRootLogin yes` and `PermitEmptyPasswords yes`, and `boat` has
-  passwordless `sudo` and is in the `docker` group (which is root-equivalent).
-  Anyone who can reach port 22 has root with no credential. This is a
-  deliberate choice, declared in `boat-image.bb` rather than inherited from
-  `debug-tweaks` by accident — reverse it before the boat goes anywhere near
-  an untrusted network. See the ⚠️ Credentials entry under docs/05 "What's
-  built vs deferred", and "Build-time user & SSH" for the key-provisioning
-  flow that would replace it.
+- **Credentials, stated plainly.** `boat-image` is a bench/development image.
+  Root and the `boat` user share the password **`Xavier`**, sshd is built with
+  `PermitRootLogin yes`, and `boat` has passwordless `sudo` and is in the
+  `docker` group (root-equivalent). Set `BOAT_PASSWORD_HASH` in `local.conf`
+  to change it — `openssl passwd -6 'your-password'`.
+
+  This is a real credential where the image previously had **none** (empty
+  passwords plus `PermitEmptyPasswords yes`), but it is not a secret: the hash
+  is in `boat-image.bb`, in a public repository, and is identical on every
+  board built from it. Read it as "keeps a passer-by out", not "keeps an
+  attacker out". Note too that a shell as `boat` is still a shell as root
+  without re-entering anything, via passwordless sudo and the docker group —
+  the password raises the floor, it does not partition the system. Before the
+  boat goes near an untrusted network, provision an SSH key and lock the
+  passwords: docs/05 "Build-time user & SSH".
 - Pin layer commits (`scripts/01-fetch-layers.sh` prints them) before treating
   a build as a product; `kirkstone` branches move.
 - Package names in `packagegroup-boat` target kirkstone; if one is missing on

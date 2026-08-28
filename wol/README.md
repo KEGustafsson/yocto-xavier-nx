@@ -148,6 +148,19 @@ reflashing guarantees) fails immediately instead of hanging on a prompt — set
 `BOAT_SSH_OPTS` to point at a separate `known_hosts` while a board is being
 reflashed.
 
+> **`boat-sleep.sh` needs an SSH key now.** The image used to ship empty
+> passwords, so `BatchMode=yes` could log in with no credential and this script
+> worked out of the box. Root and `boat` now have a real password (`Xavier` by
+> default), and BatchMode cannot answer a password prompt — so put a key on the
+> board first:
+>
+> ```bash
+> ssh-copy-id root@<boat>        # once, interactively, typing the password
+> ```
+>
+> `wol/boat-sleep-udp.sh` is unaffected: it never used SSH, and its own
+> credential is the shared key in `wol/boat-sleep.key`.
+
 ## Measured behaviour
 
 On a Jetson Xavier NX devkit, both directions confirmed on hardware:

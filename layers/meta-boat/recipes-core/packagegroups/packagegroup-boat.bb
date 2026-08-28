@@ -309,12 +309,10 @@ RDEPENDS:${PN}-reliability = "\
 
 # --- Field diagnostics / serviceability -------------------------------------
 # sudo: the route from the autologin session to root that survives tightening
-# the image. Today "boat" has an EMPTY password (useradd -p '' in
-# boat-image.bb) and root is reachable over SSH with no credential at all
-# (empty-root-password / allow-empty-password / allow-root-login, declared
-# explicitly in that recipe) - so `su` happens to work. Both of those are a
-# deliberate bench-image choice that a real deployment should reverse, and the
-# moment it is reversed `su` stops working and this is what is left.
+# the image. "boat" and root now share a real password (BOAT_PASSWORD_HASH in
+# boat-image.bb), so `su` works if you know it - but that is a bench-image
+# convenience, and the moment a deployment locks the passwords and moves to SSH
+# keys, `su` stops working and this is what is left.
 # boat-image.bb installs the matching /etc/sudoers.d/boat rule; sudo without
 # that rule would be equally useless.
 RDEPENDS:${PN}-security = "\
