@@ -57,6 +57,7 @@ IMAGE_INSTALL:append = " \
     boat-compose \
     boat-power \
     boat-sleep-listener \
+    boat-bluetooth \
     boat-grow-rootfs \
     boat-firefox \
     kernel-modules \

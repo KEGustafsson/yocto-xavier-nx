@@ -1015,6 +1015,140 @@ working RTC and the devkit has none — see [Time](#time-without-a-gps-or-rtc)),
 and **no scheduled sleep**. Both belong on a board that has an RTC fitted;
 until then the wake path is the network, and only the network.
 
+## Bluetooth: on by default, and still on after a wake
+
+The symptom was that Bluetooth was **off at every boot**, and off again after
+every wake from SC7 even when it had been on before the sleep — so the tray
+toggle in `blueman` had to be flipped by hand each time, at the helm.
+
+Neither half is a driver or firmware problem. **poky's `bluez5` recipe never
+installs `/etc/bluetooth/main.conf`**: upstream leaves `conf_DATA` empty in
+`Makefile.am` and ships `src/main.conf` as `EXTRA_DIST` only, and the recipe's
+`do_install:append` copies just `network.conf` and `input.conf` into that
+directory. With no `main.conf`, `bluetoothd`'s `load_config()` frees the
+keyfile and `btd_get_main_conf()` returns `NULL`; `plugins/policy.c`'s
+`policy_init()` then takes its `if (!conf) … goto done` early-out, leaving the
+file-scope `static bool auto_enable = false` untouched. `policy_adapter_probe()`
+therefore never calls `btd_adapter_restore_powered()`, and **every** controller
+`bluetoothd` probes is left unpowered — at boot, and again each time the
+devkit's RTL8822CE Bluetooth function re-enumerates on the USB bus coming out
+of SC7. (Line references are for bluez 5.65, the version this image builds:
+`plugins/policy.c:77`, `:834`, `:846-861`.)
+
+`boat-bluetooth` ships the missing file. Note the inversion that makes merely
+*shipping* it the fix: with the file present but `AutoEnable` absent, the
+`GKeyFile` lookup fails and `policy.c:894-899` clears the error and sets
+`auto_enable = true`. The file states the policy explicitly anyway:
+
+```ini
+[Policy]
+AutoEnable=true
+```
+
+### Carrying the state across a sleep
+
+`AutoEnable` answers "power up a controller when you find it". It cannot
+answer "put back whatever the operator actually had", which is the other half
+of the request — a radio switched off on purpose should stay off across a
+sleep, not come back on behind you. So `boat-bluetooth` also installs a
+systemd `system-sleep` hook, alongside `boat-power`'s:
+
+| | |
+|---|---|
+| `pre` | `boat-bt-power save` — record whether any adapter is powered, into `/run/boat-bluetooth.powered` (tmpfs: it survives the suspend, and deliberately not a reboot) |
+| `post` | `systemctl --no-block start boat-bluetooth-resume.service`, and return |
+
+The `post` half **delegates rather than doing the work**, for the same reason
+`boat-power`'s hook passes `BOAT_WOL_WAIT=0`: `systemd-sleep` runs these hooks
+synchronously and holds the sleep operation open until the last one returns,
+while restoring has to wait seconds for the USB Bluetooth function to
+re-enumerate and `bluetoothd` to probe the new index. Waiting in the hook
+would stall the tail of every resume.
+
+`boat-bluetooth-resume.service` runs `boat-bt-power restore`, which waits (up
+to `BOAT_BT_RESUME_WAIT`) for `bluetoothd` to publish an adapter, clears a soft
+`rfkill` block if the saved state was *on*, sets `Powered` accordingly, and
+reads it back — a `dbus-send` `Set` exits 0 on a property `bluetoothd` accepted
+and the controller then refused, so the write's exit status is not evidence.
+
+Waiting for the adapter on **D-Bus** rather than on `/sys/class/bluetooth/hci*`
+is what makes this race-free: an adapter appears in `GetManagedObjects` only
+once `policy_adapter_probe()` has run for it, so by the time `restore` can see
+it, `AutoEnable` has already had its say and the restore's write is the last
+one. That is what lets an "off" actually stick.
+
+Everything goes through `bluetoothd`'s own D-Bus interface — the same
+`org.bluez.Adapter1 Powered` property `blueman`'s tray toggle and
+`bluetoothctl power on` flip — and never through `hciconfig`'s raw ioctls or a
+second `mgmt` socket, which can leave `bluetoothd`'s idea of the adapter
+disagreeing with the hardware.
+
+### `boat-bt-power`
+
+```
+boat-bt-power status     # what every adapter is doing, plus the rfkill state
+boat-bt-power on|off     # power all adapters up/down
+boat-bt-power save       # remember the current state   (the pre hook)
+boat-bt-power restore    # put the remembered state back (the resume service)
+```
+
+### `/etc/default/boat-bluetooth`
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BOAT_BT_RESUME_RESTORE` | `1` | put the pre-suspend state back after a resume; `0` leaves the resume to `AutoEnable` alone |
+| `BOAT_BT_RESUME_WAIT` | `20` | seconds to wait after a resume for `bluetoothd` to publish an adapter — the wait ends when the adapter appears, not when the timer does |
+| `BOAT_BT_DEFAULT` | `on` | what a restore assumes when there is no recorded state (a resume whose `pre` hook never ran) |
+
+The boot-time default is deliberately *not* in this file: it is
+`AutoEnable` in `/etc/bluetooth/main.conf`. Set that to `false` for a board
+that should stay radio-silent until asked.
+
+### What has and has not been verified on hardware
+
+**Confirmed on a Xavier NX devkit.** The diagnosis first, because it is the
+part that would otherwise be guesswork: on a board running the image as
+built, `/etc/bluetooth/` contained `input.conf` and `network.conf` and
+nothing else, `rfkill list` showed `hci0` neither soft- nor hard-blocked,
+`bluetooth.service` was `active` — and `bluetoothctl show` said `Powered:
+no`. Nothing was blocking the radio; nobody had asked it to come up.
+
+Dropping `main.conf` in and restarting `bluetoothd` flipped it, with no
+reboot and no other change:
+
+```
+boat-bt: hci0: powered off      <- before
+systemctl restart bluetooth.service
+boat-bt: hci0: powered on       <- after
+```
+
+And then the same thing across a real boot, which is the case that actually
+matters: the board came up with `hci0: powered on` with nobody touching the
+tray toggle — the symptom this whole section exists for, gone.
+
+The save/restore half was then exercised through the real hook and unit, with
+the suspend itself stubbed out:
+
+| Case | Result |
+|---|---|
+| `save` with the radio on, force it off, `restore` | back **on** |
+| `save` with the radio off, force it on, `restore` | back **off** — the direction that makes a deliberate "off" stick |
+| `system-sleep/boat-bluetooth pre` → force off → `… post` | `boat-bluetooth-resume.service` ran from the hook and brought it back on |
+
+Still to confirm: **a real SC7 cycle**. Every test above ran with the
+controller present the whole time — the boot case never suspends, and the
+save/restore cases stubbed the suspend out — so the one thing not yet
+exercised is the USB re-enumeration on the way out of `deep`, which is
+exactly what `BOAT_BT_RESUME_WAIT` exists for. After a `boat-sleep` and wake,
+`journalctl -u boat-bluetooth-resume -b` says whether the adapter appeared in
+time; raise the wait if it did not.
+
+One unrelated line shows up in `journalctl -u bluetooth` either way and is
+**not** caused by this package — `bluetooth.service` ships
+`ConfigurationDirectory=bluetooth` with mode 555 while `/etc/bluetooth` is
+755, so systemd notes the mismatch and carries on. `bluetoothd` reads the
+file regardless, as the power-on above demonstrates.
+
 ## Updates (not implemented — future direction)
 
 Two tiers:

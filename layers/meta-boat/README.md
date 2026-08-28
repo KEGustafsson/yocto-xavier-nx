@@ -18,7 +18,7 @@ on the target. The full design is
 | NVIDIA container runtime | `nvidia-container-toolkit` (GPU/DLA/NVENC/NVDEC/ISP in containers) — **unproven on kirkstone, see Open risks below** |
 | CUDA / SDK | `cuda-toolkit`, `cudnn`, `tensorrt-*`, `python3-tensorrt`, `opencv` + `python3-opencv` (CUDA-accelerated), `libnvvpi2`, `tegra-mmapi-dev` — several GB; drop `-cuda` for a runtime-only host |
 | Jetson host bits | `tegra-argus-daemon` (CSI cameras), `tegra-nvpmodel`, `tegra-nvfancontrol`, `tegra-tools` (`jetson_clocks`/`tegrastats`), `python3-jetson-stats` |
-| Connectivity | `networkmanager`+`modemmanager`, `avahi`, `bluez5`, `hostapd`+`dnsmasq`, `wireguard-tools`, `chrony` |
+| Connectivity | `networkmanager`+`modemmanager`, `avahi`, `bluez5` (+ `boat-bluetooth`, which is what makes the radio come up powered), `hostapd`+`dnsmasq`, `wireguard-tools`, `chrony` |
 | HMI | `packagegroup-core-x11-xserver` (Xorg + NVIDIA's Tegra X driver), `packagegroup-xfce-base` (the XFCE desktop), `xinit`/`xauth`/`xrandr`/`xset`, `polkit` (what lets the desktop user reboot/shut down/suspend), `boat-hmi-autostart` (autologin + `startx` → `xfce4-session` on tty1) |
 | Reliability | `watchdog` |
 | Security | `openssh`, `nftables`, `sudo` (with a `NOPASSWD` rule for `boat`, installed by `boat-image.bb`) |
@@ -71,6 +71,12 @@ this project's kirkstone snapshot — `fail2ban`, `wavemon`, `bind-utils`,
   every suspend and by a NetworkManager dispatcher script (the one that
   actually holds), plus `boat-sleep` for remote SC7 suspend with a
   refuse-to-sleep-without-a-wake-path interlock.
+- `recipes-boat/bluetooth/` — `boat-bluetooth`: ships the
+  `/etc/bluetooth/main.conf` that poky's `bluez5` recipe leaves out, so
+  `bluetoothd`'s `AutoEnable` policy powers each controller up as it finds it
+  (Bluetooth was otherwise **off at every boot**), plus a `system-sleep` hook
+  and `boat-bluetooth-resume.service` that carry the pre-suspend power state
+  across a wake from SC7. `boat-bt-power status|on|off` is the hand tool.
 - `recipes-boat/storage/` — `boat-grow-rootfs`: reclaims the SSD space the
   fixed-size flash leaves behind. Read-only by default; `--grow` acts. Note it
   competes with a separate `/data` partition — see docs/05.

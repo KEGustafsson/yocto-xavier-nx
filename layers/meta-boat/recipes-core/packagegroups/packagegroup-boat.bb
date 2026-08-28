@@ -185,6 +185,12 @@ RDEPENDS:${PN}-jetson = "\
 # kernel's rtl8822ce+btrtl modules from `kernel-modules`, and poky's default
 # DISTRO_FEATURES already carries "wifi bluetooth", which is what switches on
 # networkmanager's wifi and bluez5 PACKAGECONFIGs.
+# What the BSP does NOT give you is a powered-up Bluetooth controller: poky's
+# bluez5 ships no /etc/bluetooth/main.conf, so bluetoothd's AutoEnable policy
+# stays off and every adapter is left unpowered at boot and after every
+# resume. boat-bluetooth (installed from boat-image, not from here, alongside
+# the other boat-* packages) is what fixes that - see docs/05 "Bluetooth: on
+# by default, and still on after a wake".
 RDEPENDS:${PN}-connectivity = "\
     networkmanager \
     networkmanager-nmtui \
