@@ -111,6 +111,11 @@ unreachable. There is a test for it.
 — **generated from `boat-sleepd.py`**, the implementation that actually ships.
 It is the authority; this package is what conforms.
 
+This package has also driven a real Xavier NX: `sleep()` suspended the board to
+SC7 and `wake()` brought it back. The vectors remain the thing that catches
+divergence *in CI*, where no boat is available — but the wire format itself is
+confirmed end to end against real hardware, not only against them.
+
 They exist because two implementations that only ever test themselves will each
 pass their own suite forever and still disagree on the wire — and that
 disagreement surfaces as a sleep command that silently does nothing, on a boat,

@@ -132,6 +132,9 @@ one, and `listen()` is a receiver you can embed — for a phone app, a boat-pane
 web UI, or a SignalK plugin. It ships ESM and CommonJS, since most SignalK
 plugins are CommonJS and those cannot `require()` an ESM-only package.
 
+Both it and `wol/boat-sleep-udp.sh` have driven a real Xavier NX through a full
+sleep-and-wake cycle.
+
 It is pure TypeScript, and the two implementations are kept in step by
 conformance vectors rather than by a live cross-process check: 19 packets and
 their expected verdicts, generated from `boat-sleepd.py` — the one that ships —

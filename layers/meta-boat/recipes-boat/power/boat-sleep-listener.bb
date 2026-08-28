@@ -6,6 +6,13 @@ over a timestamp and a nonce, and on a valid one runs boat-sleep. Gives the \
 same fire-and-forget shape as boat-wake without an SSH session or a host key \
 that changes on every reflash. See \
 docs/05-phase2-boat-computer-layer.md 'Power: Wake-on-LAN and remote SC7'."
+#
+# CONFIRMED ON HARDWARE: on a Xavier NX running this image, a signed packet on
+# UDP 9099 suspends the board to SC7, and a Wake-on-LAN magic packet brings it
+# back afterwards - the full remote power cycle, not each half in isolation.
+# Driven both by wol/boat-sleep-udp.sh and by clients/typescript, so the wire
+# format is confirmed against a real boat-sleepd rather than only against the
+# conformance vectors that stand in for it.
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 

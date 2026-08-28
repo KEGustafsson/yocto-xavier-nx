@@ -976,6 +976,13 @@ datagram, which on a port that anyone can send to is a spawn amplifier, and the
 `TriggerLimit` would then stop the socket outright — turning a flood into a
 lasting denial of the one command you need when the board is unreachable.
 
+**CONFIRMED ON HARDWARE.** On a Xavier NX running this image: a signed packet
+on UDP 9099 suspends the board to SC7, and a magic packet wakes it again
+afterwards — the whole cycle, not each half separately. Exercised both from
+`wol/boat-sleep-udp.sh` and from `clients/typescript`, so the wire format is
+confirmed against the real `boat-sleepd` and not only against the conformance
+vectors that stand in for it.
+
 It never suspends anything itself. It only ever execs `boat-sleep`, which
 still refuses to suspend a board that nothing can wake again. The most common
 "the packet did nothing" is that refusal, working correctly; the journal says
