@@ -1085,7 +1085,7 @@ disagreeing with the hardware.
 
 ### `boat-bt-power`
 
-```
+```bash
 boat-bt-power status     # what every adapter is doing, plus the rfkill state
 boat-bt-power on|off     # power all adapters up/down
 boat-bt-power save       # remember the current state   (the pre hook)
@@ -1116,7 +1116,7 @@ no`. Nothing was blocking the radio; nobody had asked it to come up.
 Dropping `main.conf` in and restarting `bluetoothd` flipped it, with no
 reboot and no other change:
 
-```
+```text
 boat-bt: hci0: powered off      <- before
 systemctl restart bluetooth.service
 boat-bt: hci0: powered on       <- after
