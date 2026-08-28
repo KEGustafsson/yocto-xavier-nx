@@ -1,5 +1,10 @@
-# Copy to wol/boat.conf and fill in for your boat. That copy is git-ignored:
-# it holds device-identifying addresses that should not be pushed.
+# Copy to wol/boat.conf and adjust for your boat. That copy is git-ignored, so
+# your edits survive a pull and never land in a commit by accident.
+#
+# The values below are examples - a MAC and a private-range IP, in the same
+# shape yours will be. Replace them with your own board's; none of them will
+# work as-is. The one value that IS a secret lives in wol/boat-sleep.key,
+# which is git-ignored and never has a committed example.
 #
 # Every value here can also be overridden per-invocation from the
 # environment, e.g.:  BOAT_HOST=192.168.0.99 wol/boat-wake.sh
@@ -12,7 +17,7 @@ BOAT_HOST=192.168.0.43
 # Wi-Fi is not armed by this image and the Xavier NX's wlan0 does not do it.
 # Read it off the board with:  cat /sys/class/net/eth0/address
 # `boat-sleep` also prints it every time it suspends.
-BOAT_MAC=48:b0:2d:11:22:33
+BOAT_MAC=48:b0:2d:15:e1:11
 
 # Where to send the packet. 255.255.255.255 works only from the same layer-2
 # segment and is never routed. Use the boat LAN's directed broadcast (e.g.

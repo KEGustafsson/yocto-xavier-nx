@@ -812,9 +812,9 @@ with `sudo` (or as root) to get a real answer; unprivileged it reports
 
 ```bash
 wol/boat-wake.sh                                  # send, then wait for it to answer
-./scripts/wake-boat.sh 48:b0:2d:11:22:33          # just send the packet
-BOAT_MAC=48:b0:2d:11:22:33 ./scripts/wake-boat.sh # or from the environment
-wakeonlan 48:b0:2d:11:22:33                       # any WoL tool does
+./scripts/wake-boat.sh 48:b0:2d:15:e1:11          # just send the packet
+BOAT_MAC=48:b0:2d:15:e1:11 ./scripts/wake-boat.sh # or from the environment
+wakeonlan 48:b0:2d:15:e1:11                       # any WoL tool does
 ```
 
 Prefer [`wol/boat-wake.sh`](../wol/boat-wake.sh). It sends the same packet —
@@ -832,7 +832,7 @@ answers it, so "it did nothing" and "it never arrived" look identical from
 the sender. Two things decide whether it arrives:
 
 - **Same layer-2 segment.** `255.255.255.255` is never routed. From another
-  subnet you need that subnet's directed broadcast (`192.168.1.255`) *and* a
+  subnet you need that subnet's directed broadcast (`192.168.0.255`) *and* a
   router willing to forward directed broadcasts — most aren't. From ashore,
   wake through a **VPN endpoint on the boat's LAN** (`wireguard-tools` is on
   the image for this) rather than by forwarding UDP 9 from the internet: a
@@ -921,9 +921,12 @@ and its wiring rather than of this layer:
   be a shallow idle loop instead — worth knowing *before* the boat is
   unattended.
 - **The hardware watchdog.** `watchdog` (in `-reliability`) feeds the Tegra
-  watchdog; whether that timer keeps counting across SC7 and resets the
-  board mid-sleep is untested. A board that reboots itself a minute into
-  every sleep is that symptom — set `BOAT_SLEEP_STOP_WATCHDOG=1`.
+  watchdog, and the question was whether that timer keeps counting across SC7
+  and resets the board mid-sleep. **Confirmed on hardware that it does not:**
+  the board held SC7 for long stretches and came back only when sent a magic
+  packet — with `BOAT_SLEEP_STOP_WATCHDOG=0`, the default, so the watchdog was
+  *not* parked. A board that reboots itself a minute into every sleep is the
+  symptom of the opposite result; the knob stays for BSPs that behave that way.
 - **Docker across suspend/resume.** Containers keep running through a
   suspend, but anything holding a network connection (an MQTT bridge, a
   registry pull) sees it drop and has to reconnect on resume.
@@ -1150,16 +1153,16 @@ listed here is what those boots did *not* settle:
    of those two it was; running the same `startx` line as root from tty1 is
    the quick way to confirm it's a privilege problem rather than a driver one.
 
-6. **The hardware watchdog across SC7.** Sleep and magic-packet wake both
-   work on this board (see
-   [Power](#power-wake-on-lan-and-remote-sc7-suspend)); what is still untested
-   is whether the Tegra watchdog keeps counting through SC7 and resets the
-   board mid-sleep. The symptom is a board that reboots itself a minute into
-   every sleep — set `BOAT_SLEEP_STOP_WATCHDOG=1` if you see it. On a
-   *different* board, re-check the first two as well: the interlock in
-   `boat-sleep` means an unsupported PHY refuses to sleep rather than
-   stranding the machine, but a remote-sleep workflow you can't use is still a
-   workflow you don't have.
+6. **The hardware watchdog across SC7.** Settled on this board: sleep,
+   magic-packet wake and the watchdog across a long SC7 all work (see
+   [Power](#power-wake-on-lan-and-remote-sc7-suspend)). The board held SC7 for
+   long stretches without resetting itself and woke only on command, with
+   `BOAT_SLEEP_STOP_WATCHDOG` at its `0` default — so the Tegra watchdog does
+   not count through SC7 here, and `BOAT_SLEEP_STOP_WATCHDOG=1` is a remedy
+   for BSPs where it does rather than something this image needs. On a
+   *different* board, re-check all three: the interlock in `boat-sleep` means
+   an unsupported PHY refuses to sleep rather than stranding the machine, but
+   a remote-sleep workflow you can't use is still a workflow you don't have.
 
 7. **`/data` is not provisioned by anything.** `daemon.json` points Docker's
    `data-root` at `/data/docker` and `boat-compose` reads `/data/compose`, but
@@ -1217,8 +1220,9 @@ UI" above.)
   suspend with a refuse-to-sleep-without-a-wake-path interlock;
   `wol/boat-sleep.sh` / `wol/boat-wake.sh` on the host, over
   `scripts/wake-boat.sh` as the sender). **Confirmed on hardware:** a full
-  sleep and magic-packet wake. ❓ Still open: whether the hardware watchdog
-  keeps counting across SC7, see "Power".
+  sleep and magic-packet wake, and a *long* SC7 — the board stayed asleep for
+  extended periods and woke only on command, which settles the hardware
+  watchdog question in the good direction. See "Power".
 - ✅ `bash` installed and set as the default login shell for both `root`
   and `boat` (`packagegroup-boat-tools` + `EXTRA_USERS_PARAMS` in
   `boat-image.bb`).

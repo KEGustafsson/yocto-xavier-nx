@@ -57,10 +57,10 @@ BOAT_HOST=192.168.0.43 BOAT_MAC=48:b0:2d:15:e1:11 BOAT_BROADCAST=192.168.0.255 n
 ```ts
 import { wake, sleep, waitForPort } from '@boat/power-client';
 
-await wake({ mac: '48:b0:2d:11:22:33', broadcast: '192.168.1.255' });
-await waitForPort('192.168.1.42', 22, 'open', 90_000);
+await wake({ mac: '48:b0:2d:15:e1:11', broadcast: '192.168.0.255' });
+await waitForPort('192.168.0.43', 22, 'open', 90_000);
 
-await sleep({ host: '192.168.1.42', key: readFileSync('sleep.key', 'utf8') });
+await sleep({ host: '192.168.0.43', key: readFileSync('sleep.key', 'utf8') });
 ```
 
 ### In a SignalK plugin

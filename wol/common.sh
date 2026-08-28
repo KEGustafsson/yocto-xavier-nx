@@ -76,7 +76,7 @@ require_conf() {
         err "not configured: ${missing[*]}"
         err "copy wol/boat.conf.example to wol/boat.conf and fill it in,"
         err "or pass them in the environment, e.g.:"
-        err "    BOAT_HOST=192.168.0.43 BOAT_MAC=48:b0:2d:11:22:33 $0"
+        err "    BOAT_HOST=192.168.0.43 BOAT_MAC=48:b0:2d:15:e1:11 $0"
         exit 1
     fi
 }

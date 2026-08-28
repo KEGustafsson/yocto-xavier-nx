@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Send a Wake-on-LAN magic packet to the boat computer, waking it from SC7.
 #
-#   ./scripts/wake-boat.sh 48:b0:2d:11:22:33
-#   BOAT_MAC=48:b0:2d:11:22:33 ./scripts/wake-boat.sh
-#   ./scripts/wake-boat.sh 48:b0:2d:11:22:33 192.168.1.255   # directed bcast
+#   ./scripts/wake-boat.sh 48:b0:2d:15:e1:11
+#   BOAT_MAC=48:b0:2d:15:e1:11 ./scripts/wake-boat.sh
+#   ./scripts/wake-boat.sh 48:b0:2d:15:e1:11 192.168.0.255   # directed bcast
 #
 # The target side is what makes this work at all - meta-boat's boat-power
 # recipe arms magic-packet wake at boot and around every suspend, and
@@ -29,7 +29,7 @@ load_boat_conf "${HERE}/../wol/boat.conf"
 MAC="${1:-${BOAT_MAC:-}}"
 # 255.255.255.255 reaches the board only from the SAME layer-2 segment: it is
 # never routed. From another subnet, pass that subnet's directed broadcast
-# address instead (e.g. 192.168.1.255) AND have the router forward directed
+# address instead (e.g. 192.168.0.255) AND have the router forward directed
 # broadcasts - most don't by default, which is the usual reason a magic
 # packet "does nothing". Over the internet, wake through a VPN endpoint on
 # the boat's LAN (wireguard-tools is on the image for exactly this) rather
@@ -64,7 +64,7 @@ mac, bcast = sys.argv[1], sys.argv[2]
 
 hexmac = re.sub(r"[:.\-]", "", mac).lower()
 if not re.fullmatch(r"[0-9a-f]{12}", hexmac):
-    sys.exit(f"'{mac}' is not a MAC address (expected 6 hex octets, e.g. 48:b0:2d:11:22:33)")
+    sys.exit(f"'{mac}' is not a MAC address (expected 6 hex octets, e.g. 48:b0:2d:15:e1:11)")
 
 # Validate before opening the socket: a count of 0 (or a negative one) would
 # make the send loop a no-op while the script still exited 0 and reported

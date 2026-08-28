@@ -2,7 +2,7 @@
  * Runnable example: wake the boat, wait for it, then put it back to sleep.
  *
  *   npm install && npm run build
- *   BOAT_HOST=192.168.1.42 BOAT_MAC=48:b0:2d:11:22:33 \
+ *   BOAT_HOST=192.168.0.43 BOAT_MAC=48:b0:2d:15:e1:11 \
  *     BOAT_SLEEP_KEY_FILE=~/.config/boat/sleep.key node dist/esm/example.js wake
  *
  * Subcommands: wake | sleep | packet

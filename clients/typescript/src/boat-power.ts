@@ -44,12 +44,12 @@ export const DEFAULT_SLEEP_PORT = 9099;
 export const DEFAULT_WOL_PORT = 9;
 
 export interface WakeOptions {
-  /** Target MAC, e.g. "48:b0:2d:11:22:33". Separators may be ':' or '-', or absent. */
+  /** Target MAC, e.g. "48:b0:2d:15:e1:11". Separators may be ':' or '-', or absent. */
   mac: string;
   /**
    * Where to send it. 255.255.255.255 reaches the board only from the SAME
    * layer-2 segment - it is never routed. From another subnet use that
-   * subnet's directed broadcast (e.g. "192.168.1.255") AND a router willing to
+   * subnet's directed broadcast (e.g. "192.168.0.255") AND a router willing to
    * forward directed broadcasts, which most are not by default. Over the
    * internet, wake through a VPN endpoint on the boat's LAN rather than by
    * port-forwarding UDP 9.
@@ -78,13 +78,13 @@ export interface SleepOptions {
   timestamp?: number;
 }
 
-/** Parse "48:b0:2d:11:22:33", "48-b0-...", or "48b02d112233" into 6 bytes. */
+/** Parse "48:b0:2d:15:e1:11", "48-b0-...", or "48b02d15e111" into 6 bytes. */
 export function parseMac(mac: string): Buffer {
   const hex = mac.replace(/[:-]/g, '');
   if (!/^[0-9a-fA-F]{12}$/.test(hex)) {
     throw new Error(
       `not a MAC address: ${JSON.stringify(mac)} (expected six hex octets, ` +
-        `e.g. 48:b0:2d:11:22:33)`,
+        `e.g. 48:b0:2d:15:e1:11)`,
     );
   }
   return Buffer.from(hex, 'hex');
