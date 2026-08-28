@@ -48,6 +48,12 @@ Hence HMAC-SHA256 over a timestamp and a nonce, keyed by the board's
 
 ## Using it
 
+Cmd-line example
+```
+BOAT_HOST=192.168.0.43 BOAT_SLEEP_KEY_FILE=~/.config/boat/sleep.key node dist/esm/example.js sleep
+BOAT_HOST=192.168.0.43 BOAT_MAC=48:b0:2d:15:e1:11 BOAT_BROADCAST=192.168.0.255 node dist/esm/example.js wake
+```
+
 ```ts
 import { wake, sleep, waitForPort } from '@boat/power-client';
 
