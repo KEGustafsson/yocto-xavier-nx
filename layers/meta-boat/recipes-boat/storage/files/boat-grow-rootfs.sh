@@ -570,9 +570,24 @@ fi
 # Called for both the partition and the file path.
 add_fstab_swap() {
     # $1 = the fstab first field (UUID=... or a path)
-    if [ -e /etc/fstab ] && grep -qs -- "$1" /etc/fstab; then
+    #
+    # Compare the FIRST FIELD for equality rather than grepping the file for
+    # the string. A substring match says "already there" for /swapfile when
+    # only /swapfile2 is listed, and for a UUID that is merely a prefix of
+    # another - and it treats its argument as a regex, so the dots and dashes
+    # in a path or a UUID are metacharacters that happen to match themselves.
+    if [ -e /etc/fstab ] \
+        && awk -v want="$1" '$1 == want { found = 1 } END { exit !found }' /etc/fstab
+    then
         say "/etc/fstab already refers to $1 - not adding it twice"
         return 0
+    fi
+    # An fstab whose last line has no terminating newline would otherwise get
+    # this entry glued onto the end of it, silently corrupting that mount and
+    # losing this one. $(...) strips trailing newlines, so a file that ends
+    # correctly yields an empty result here and nothing is added.
+    if [ -s /etc/fstab ] && [ -n "$(tail -c1 /etc/fstab)" ]; then
+        printf '\n' >> /etc/fstab
     fi
     printf '%s\tnone\tswap\tsw\t0\t0\n' "$1" >> /etc/fstab
     say "added $1 to /etc/fstab"
