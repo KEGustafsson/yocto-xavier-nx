@@ -93,10 +93,12 @@ SELF=boat-grow-rootfs
 MODE=status          # status | dryrun | grow
 ASSUME_YES=0
 
-# 8 GiB of swap on a 6.8 GiB-RAM Xavier NX: enough to absorb a container
-# build or a model load that would otherwise be OOM-killed, without giving
-# the box so much that it thrashes instead of failing. Override per-run with
-# --swap-size, or set it to 0 (or pass --no-swap) to skip swap entirely.
+# 8 GiB of swap on this Xavier NX: an 8 GB module, of which the kernel sees
+# 6.7 GiB (MemTotal 6997888 kB) once the Tegra carveouts are taken - so this
+# is roughly 1.2x RAM. Enough to absorb a container build or a model load
+# that would otherwise be OOM-killed, without giving the box so much that it
+# thrashes instead of failing. Override per-run with --swap-size, or set it
+# to 0 (or pass --no-swap) to skip swap entirely.
 SWAP_BYTES=$(( 8 * 1024 * 1024 * 1024 ))
 SWAPFILE=/swapfile
 SWAP_PART_LABEL=boat-swap

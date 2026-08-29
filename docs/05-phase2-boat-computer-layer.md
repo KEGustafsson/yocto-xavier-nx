@@ -1241,11 +1241,13 @@ that decides between them:
 
 ### Swap
 
-8 GiB by default, on a board with 6.8 GiB of RAM — enough to absorb a
-container build or a model load that would otherwise be OOM-killed, without
-handing the box so much that it thrashes instead of failing. `--swap-size 16G`
-changes it; `--no-swap` (or `--swap-size 0`) skips it and gives you exactly
-the old rootfs-only behaviour.
+8 GiB by default. The module is an 8 GB Xavier NX, but the kernel only sees
+6.7 GiB of it (`MemTotal` 6997888 kB) once the Tegra carveouts are taken, so
+this is roughly 1.2× RAM — enough to absorb a container build or a model load
+that would otherwise be OOM-killed, without handing the box so much that it
+thrashes instead of failing. `--swap-size 16G` changes it; `--no-swap` (or
+`--swap-size 0`) skips it and gives you exactly the old rootfs-only
+behaviour.
 
 `APP` is partition 1, but it is the **last** partition by position — every
 other entry sits below its start sector — so the tail of the disk is the only
