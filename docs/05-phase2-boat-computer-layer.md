@@ -1268,6 +1268,11 @@ grown. So:
 | First, on a freshly flashed board | An 8 GiB swap **partition** at the end of the disk, `mkswap`'d, added to `/etc/fstab` by `UUID=` — or by `LABEL=boat-swap` if `blkid` returns no UUID — and enabled; the rootfs then grows into everything in front of it. |
 | After the rootfs has already been grown | An 8 GiB **`/swapfile`**, added to `/etc/fstab` by path, and enabled. The script says which it chose and why. |
 
+Swap partitions come out *at least* the size asked for, never less: the start
+sector is rounded **down** to the table's 1 MiB alignment, so the rootfs
+absorbs the remainder rather than swap being short-changed. That is why a
+512 MiB request appears as `513.0 MiB` in the verification output below.
+
 The swapfile is refused unless `/` has more than the requested size **plus a
 1 GiB margin** free once the filesystem has been grown — filling the rootfs to
 provision swap would trade one outage for another. It stops with
