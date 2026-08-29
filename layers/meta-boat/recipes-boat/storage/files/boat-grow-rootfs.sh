@@ -343,25 +343,25 @@ ROOT_TARGET_SECTORS=$(( ROOT_TARGET_END - PART_START + 1 ))
 # the tail of a partition, and a 64 MiB cushion costs nothing at these sizes.
 SHRINK_MARGIN=$(( 64 * 1024 * 1024 / SECTOR ))
 
-SWAP_MODE=none       # none | partition | file
+SWAP_MODE="none"     # none | partition | file
 SWAP_WHY=""
 if [ "$SWAP_BYTES" -gt 0 ] && [ "$SWAP_EXISTS" -eq 0 ]; then
-    SWAP_MODE=partition
+    SWAP_MODE="partition"
     if [ -n "$NEXT_START" ]; then
-        SWAP_MODE=file
+        SWAP_MODE="file"
         SWAP_WHY="the tail of the disk is already taken by:${NEIGHBOURS}"
     elif [ "$ROOT_TARGET_SECTORS" -le 0 ]; then
-        SWAP_MODE=file
+        SWAP_MODE="file"
         SWAP_WHY="$(human "$SWAP_SECTORS") of swap would leave no room for the rootfs partition"
     elif [ "$PART_END" -gt "$ROOT_TARGET_END" ]; then
         # The rootfs partition currently reaches into where swap must go, so
         # this is the shrink case - only safe if the filesystem fits, and only
         # decidable at all if we know the filesystem's real size.
         if [ "$FS_EXACT" -eq 0 ]; then
-            SWAP_MODE=file
+            SWAP_MODE="file"
             SWAP_WHY="the rootfs partition must shrink to make room, and the exact filesystem size is unknown (dumpe2fs needs root)"
         elif [ $(( FS_SECTORS + SHRINK_MARGIN )) -gt "$ROOT_TARGET_SECTORS" ]; then
-            SWAP_MODE=file
+            SWAP_MODE="file"
             SWAP_WHY="the rootfs filesystem ($(human "$FS_SECTORS")) no longer fits in what would be left ($(human "$ROOT_TARGET_SECTORS")), and ext4 cannot shrink online"
         fi
     fi
