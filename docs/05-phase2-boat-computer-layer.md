@@ -123,7 +123,7 @@ project's actual fetched layers (kirkstone), not guessed:
 | `-reliability` | `watchdog` (not `watchdog-keepalive` too — upstream declares them mutually exclusive alternatives) |
 | `-security` | `openssh`, `nftables`, `sudo` |
 | `-nettools` | `iproute2`, `net-tools`, `iputils`, `bmon`, `tcpdump`, `mtr`, `traceroute`, `ethtool`, `iftop`, `curl`, `nmap`, `libqmi`/`libmbim` (cellular debug) |
-| `-tools` | `nvme-cli`, `parted`, `gptfdisk`, `e2fsprogs-resize2fs` (see [Reclaiming the rest of the SSD](#reclaiming-the-rest-of-the-ssd)), `i2c-tools`, `usbutils`, `pciutils`, `htop`, `tmux`, `rsync`, `nano`, `minicom`, `git` (for `/data/compose`, separate from the git inside any container), `iperf3`, `bash` |
+| `-tools` | `nvme-cli`, `parted`, `gptfdisk`, `e2fsprogs-resize2fs` (see [Reclaiming the rest of the SSD](#reclaiming-the-rest-of-the-ssd)), `i2c-tools`, `usbutils`, `pciutils`, `htop`, `tmux`, `rsync`, `nano`, `minicom`, `git` (for `/data/compose`, separate from the git inside any container), `iperf3`, `bash`, `ldd` (VS Code Remote-SSH reads the glibc version from it; see [`06-troubleshooting.md`](06-troubleshooting.md)) |
 
 Not available in this project's fetched kirkstone-era layers, and
 deliberately **omitted** rather than left as names that fail the build:
@@ -1175,17 +1175,22 @@ The image is flashed with a **fixed-size** root filesystem —
 default — because nothing at build time knows how big the boat's SSD is, and
 because `make-sdcard` writes that whole size over recovery-mode USB 2.0 with a
 plain non-sparse `dd`. Keeping it small is what makes flashing quick; this
-command is what makes the drive fully usable afterward. On a normal flash
-the partition already covers the whole SSD and only the filesystem inside it
-is short, so the job is a single online `resize2fs` — see below.
+command is what makes the drive fully usable afterward. The image also ships
+with **no swap of any kind** — no partition, no swapfile, no zram — so the
+same command provisions that.
 
-`boat-grow-rootfs` (from the `boat-grow-rootfs` recipe) reclaims it, run
+`boat-grow-rootfs` (from the `boat-grow-rootfs` recipe) does both, run
 once from a terminal on the desktop after the first boot:
 
 ```bash
 sudo boat-grow-rootfs            # report only — this is the default
-sudo boat-grow-rootfs --grow     # actually grow (asks to confirm)
+sudo boat-grow-rootfs --grow     # actually do it (asks to confirm)
 ```
+
+**Run it early.** Swap is carved as a real partition only while the rootfs
+filesystem is still at its flashed size; once the filesystem has been grown
+to fill the disk, ext4 cannot be shrunk online and swap falls back to a
+`/swapfile`. Both work — but only one of them survives a rootfs rebuild.
 
 **There are two different gaps, and normally only one of them applies.**
 `make-sdcard` creates the last partition with a "fill to end" flag, so after
@@ -1208,9 +1213,10 @@ meta-tegra flashes — `kernel`, `kernel-dtb`, the A/B chain reserves,
 `recovery`, `RECROOTFS`, `esp`/`esp_alt`, `UDA`, then `APP` (see
 `yocto/flash/external-flash.xml.in` after an unpack). Growing it therefore
 only ever claims space that is already free: nothing is moved and no file
-data is rewritten. The script verifies that itself rather than trusting the
-layout, and refuses if any partition is allocated past the rootfs — which is
-exactly what a hand-added `/data` partition would be. It also saves the
+data is rewritten. The script works that out itself rather than trusting the
+layout — it measures the free space up to **the next partition**, not to the
+end of the disk, so a hand-added `/data` (or the swap partition it made on an
+earlier run) bounds the grow instead of being overrun. It also saves the
 original partition table to `/var/lib/boat/gpt-backup-<disk>.bin` before
 touching anything.
 
@@ -1226,9 +1232,61 @@ that decides between them:
   for a bench or a boat you reflash rarely. A read-only root is then off the
   table.
 - **A separate `/data`**: create that partition *before* growing, then run
-  `boat-grow-rootfs` — it will refuse to extend the partition (correctly: a
-  partition is now allocated past the rootfs) and do the filesystem-only half
-  of the job, which is the half that matters after a normal flash anyway.
+  `boat-grow-rootfs` — it grows the rootfs only into the gap in front of
+  `/data` (usually none, so the filesystem-only half of the job, which is the
+  half that matters after a normal flash anyway). Note that a `/data` in the
+  tail also takes the space swap would have used, so swap becomes a
+  `/swapfile`; leave as much free space behind `/data` as you intend to give
+  swap (8 GiB unless you pass `--swap-size`) if you want both as partitions.
+
+### Swap
+
+8 GiB by default. The module is an 8 GB Xavier NX, but the kernel only sees
+6.7 GiB of it (`MemTotal` 6997888 kB) once the Tegra carveouts are taken, so
+this is roughly 1.2× RAM — enough to absorb a container build or a model load
+that would otherwise be OOM-killed, without handing the box so much that it
+thrashes instead of failing. `--swap-size 16G` changes it; `--no-swap` (or
+`--swap-size 0`) skips it and gives you exactly the old rootfs-only
+behaviour.
+
+`APP` is partition 1, but it is the **last** partition by position — every
+other entry sits below its start sector — so the tail of the disk is the only
+place a swap partition can go. That makes provisioning it a single operation
+rather than two: set `APP` to end exactly where swap begins, then create swap
+in what is left. That one step is a *grow* when the partition was short and a
+*shrink* when it already filled the disk, which is why there is no separate
+code path for the two.
+
+The shrink is what makes the ordering matter. It only moves the **partition
+boundary**, never the filesystem, and it is refused unless the ext4 inside
+demonstrably still fits — which is the post-flash state (a 16 GiB filesystem
+in a 231.8 GiB partition) and stops being true the moment the filesystem is
+grown. So:
+
+| When you run it | What you get |
+|---|---|
+| First, on a freshly flashed board | An 8 GiB swap **partition** at the end of the disk, `mkswap`'d, added to `/etc/fstab` by `UUID=` — or by `LABEL=boat-swap` if `blkid` returns no UUID — and enabled; the rootfs then grows into everything in front of it. |
+| After the rootfs has already been grown | An 8 GiB **`/swapfile`**, added to `/etc/fstab` by path, and enabled. The script says which it chose and why. |
+
+Swap partitions come out *at least* the size asked for, never less: the start
+sector is rounded **down** to the table's 1 MiB alignment, so the rootfs
+absorbs the remainder rather than swap being short-changed. That is why a
+512 MiB request appears as `513.0 MiB` in the verification output below.
+
+The swapfile is refused unless `/` has more than the requested size **plus a
+1 GiB margin** free once the filesystem has been grown — filling the rootfs to
+provision swap would trade one outage for another. It stops with
+`only N MiB free on / - not creating a M MiB swapfile` and changes nothing;
+the rootfs grow that ran first still stands.
+
+The swapfile is written with `dd`, not `fallocate`: a fallocated file on ext4
+is made of unwritten extents and `swapon` refuses those ("skipping — it
+appears to have holes"), because the swap path cannot allocate blocks at
+write time. It is slower and completely unambiguous. It is `chmod 0600`
+before `mkswap`, not after.
+
+Re-running is safe: an active swap area, a swap partition on the disk, or an
+existing `/swapfile` each count as "already provisioned" and are left alone.
 
 Deliberately **not** a first-boot systemd unit: rewriting a partition table
 is the one operation on this image that can lose the whole rootfs if the
@@ -1248,6 +1306,35 @@ done - / is now 217.1G
 ```
 
 Re-running afterwards correctly reports "nothing to do".
+
+The swap half is **verified on the same board against a loop device**, using
+its own `util-linux` / `gptfdisk` / `e2fsprogs`, rather than by reflashing a
+working boat: a GPT whose only partition fills the disk, holding a
+deliberately small ext4, mounted, with a canary file. `sfdisk` shrank the
+mounted partition's table entry and returned 0, `sgdisk` carved the tail,
+`partx -u` shrank the kernel's view and `partx -a` added the new partition,
+`mkswap`/`swapon` took, `resize2fs` grew the still-mounted ext4 into what was
+left, and the canary was intact:
+
+```text
+would create a 513.0 MiB swap partition at the end of /dev/loop1
+would SHRINK partition 1 to 3.5 GiB to make room (the filesystem, 512.0 MiB, stays where it is)
+...
+   1            2048         7337983   3.5 GiB     8300  APP
+   2         7337984         8388574   513.0 MiB   8200  boat-swap
+done - / is now 3.5G, swap 512Mi
+```
+
+A second run reported "nothing to do — the filesystem already fills the disk
+and swap is provisioned". The already-grown case fell through to the
+swapfile with the reason spelled out: *"the rootfs filesystem (4.0 GiB) no
+longer fits in what would be left (3.7 GiB), and ext4 cannot shrink online"*.
+
+The kernel permits the shrink because `BLKPG_RESIZE_PARTITION` only refuses a
+changed start sector or an overlap, neither of which this does — which is
+also why the fits-check is not optional: nothing in the kernel or in `sfdisk`
+will stop you shrinking a partition out from under a filesystem that no
+longer fits.
 
 ## Reliability
 
