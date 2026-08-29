@@ -353,6 +353,19 @@ RDEPENDS:${PN}-nettools = "\
 # only), so without it named somewhere the image has no way to resize an
 # ext4 at all. parted is the human-friendly front end; gptfdisk (sgdisk) is
 # what boat-grow-rootfs scripts against.
+#
+# ldd is its own package in OE-core's glibc (PACKAGES in glibc-package.inc
+# splits out ldd, ldconfig, nscd, ... separately from the glibc runtime), and
+# nothing in core-image-base pulls it in - so the image shipped /sbin/ldconfig
+# but no /usr/bin/ldd at all. CONFIRMED ON HARDWARE: that one absence is what
+# makes VS Code Remote-SSH refuse to connect with "The remote host does not
+# meet the prerequisites for running VS Code Server". Its prereq check reads
+# the glibc version from `ldd --version`; with ldd missing the version comes
+# back empty and the check fails closed, even though this image comfortably
+# clears both bars (glibc 2.35 vs the 2.28 required, GLIBCXX_3.4.29 vs
+# 3.4.25). The libstdc++ half of the same check uses `ldconfig -p` plus
+# `strings`, both of which were already present, which is why the failure
+# pointed at libstdc++ as well without either library actually being at fault.
 RDEPENDS:${PN}-tools = "\
     nvme-cli \
     parted \
@@ -369,6 +382,7 @@ RDEPENDS:${PN}-tools = "\
     git \
     iperf3 \
     bash \
+    ldd \
 "
 
 # NOTE: package names above were cross-checked against the actual recipes in

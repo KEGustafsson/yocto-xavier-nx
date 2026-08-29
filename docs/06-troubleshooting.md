@@ -93,6 +93,14 @@ these docs mentioned them: they are gone deliberately, not missing by
 accident. Troubleshoot the external interface on its own terms, and reach it
 over the network like any other data source.
 
+## Remote development (VS Code Remote-SSH)
+
+| Symptom | Fix |
+|---------|-----|
+| `[LinuxPrereqs]: The remote host may not meet VS Code Server's prerequisites for glibc and libstdc++`, and the connection ends in `getPlatformForHost was canceled` / `Connecting was canceled` | The libraries are fine; the *detection* isn't. Remote-SSH reads the glibc version from `ldd --version`, and `ldd` is a separate package in OE-core's glibc that nothing in `core-image-base` pulls in — so images built before this was fixed have `/sbin/ldconfig` but no `/usr/bin/ldd`, the version parses as empty, and the check fails closed. It is named in `packagegroup-boat-tools` now, so a rebuilt image has it. To confirm before rebuilding, `ldconfig -p \| grep libstdc++` and the glibc banner from `/lib/libc.so.6` still answer the same question: this image ships glibc 2.35 and `GLIBCXX_3.4.29`, against the 2.28 / 3.4.25 the server actually requires. |
+| Connecting still fails on an image already in the field | Nothing on the board can install a package (no `opkg`/`rpm`/`dnf` — `package-management` is not in `IMAGE_FEATURES`), so either reflash with a current image or drop in glibc's own `ldd` shell script by hand at `/usr/bin/ldd`, mode `0755`, with `RTLDLIST=/lib/ld-linux-aarch64.so.1`. It is a shell script, not a binary — it just runs the loader with `LD_TRACE_LOADED_OBJECTS=1`. Verify with `ldd --version` (expect `2.35`) and `ldd /bin/bash`. |
+| VS Code asks for the root password several times per connect, and giving up on one prompt shows as `Connecting was canceled` | Expected with password auth — Remote-SSH opens more than one channel. Put a key in `/home/root/.ssh/authorized_keys` (or `/home/boat/.ssh/`) and point the host entry at it; `PermitRootLogin yes` is already set by the image's `allow-root-login` feature. Note the shipped password is a public build-time default (see `boat-image.bb`), so a key is the better credential regardless. |
+
 ## Where to get help
 
 - meta-tegra docs: <https://oe4t.github.io/> (pick the `kirkstone` book)
