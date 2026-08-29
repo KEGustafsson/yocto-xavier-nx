@@ -93,6 +93,24 @@ these docs mentioned them: they are gone deliberately, not missing by
 accident. Troubleshoot the external interface on its own terms, and reach it
 over the network like any other data source.
 
+## Swap and the SSD grow (Phase 2)
+
+`boat-grow-rootfs` with no arguments reports and changes nothing — start
+there. See
+[`05-phase2-boat-computer-layer.md`](05-phase2-boat-computer-layer.md)
+"Reclaiming the rest of the SSD".
+
+| Symptom | Fix |
+|---------|-----|
+| `free` shows `Swap: 0B` on a board that has been running a while | The image ships no swap at all, by design — it is provisioned by `sudo boat-grow-rootfs --grow`, which nothing runs for you. |
+| Wanted a swap **partition**, got a `/swapfile` | You grew the rootfs first. The script says so: *"the rootfs filesystem (N) no longer fits in what would be left (M), and ext4 cannot shrink online"*. ext4 has no online shrink, so on that disk the partition is no longer reachable without an offline resize from rescue or a reflash. The swapfile is fully functional; the difference is that it lives inside the rootfs and does not survive rebuilding it. |
+| `swapon: /swapfile: skipping - it appears to have holes` | Something created the file with `fallocate`. On ext4 that leaves unwritten extents and the swap path cannot allocate blocks at write time. `swapoff /swapfile; rm -f /swapfile` and let `boat-grow-rootfs` recreate it — it uses `dd`. |
+| `boat-grow-rootfs` says *"swap will be a file ... the tail of the disk is already taken by: <partition>"* | Something (usually a hand-made `/data`) occupies the end of the disk, which is the only place a swap partition can go — `APP` is partition 1 but the last one by position. Leave 8 GiB free behind `/data` if you want both as partitions. |
+| `partx could not update the kernel's view` / `partx could not add partition N` | The table on disk **is** written; only the running kernel has not picked it up. Reboot and re-run `boat-grow-rootfs --grow` — it resumes from wherever it stopped. |
+| Want to undo a partition-table change | The original table is saved before the first edit: `sgdisk --load-backup=/var/lib/boat/gpt-backup-<disk>.bin <disk>` from a rescue boot. Note it is kept from the *first* run, so it is the as-flashed table, not the previous one. |
+| `sfdisk` prints `Re-reading the partition table failed.: Device or resource busy` | Expected, not an error. The kernel cannot re-read the table of a disk with a mounted partition; `partx` is what actually updates its view, and the script checks that separately. |
+| Swap is not back after a reboot | Check the `/etc/fstab` line the script added (`UUID=...` for a partition, `/swapfile` for a file) and `systemctl status swap.target`. With systemd, fstab swap entries become `.swap` units via `systemd-fstab-generator`, so a typo shows up as a failed unit rather than a mount error. |
+
 ## Remote development (VS Code Remote-SSH)
 
 | Symptom | Fix |
