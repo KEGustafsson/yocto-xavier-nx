@@ -1236,8 +1236,8 @@ that decides between them:
   `/data` (usually none, so the filesystem-only half of the job, which is the
   half that matters after a normal flash anyway). Note that a `/data` in the
   tail also takes the space swap would have used, so swap becomes a
-  `/swapfile`; leave 8 GiB free behind `/data` if you want both as
-  partitions.
+  `/swapfile`; leave as much free space behind `/data` as you intend to give
+  swap (8 GiB unless you pass `--swap-size`) if you want both as partitions.
 
 ### Swap
 
@@ -1263,8 +1263,14 @@ grown. So:
 
 | When you run it | What you get |
 |---|---|
-| First, on a freshly flashed board | An 8 GiB swap **partition** at the end of the disk, `mkswap`'d, added to `/etc/fstab` by `UUID=`, and enabled; the rootfs then grows into everything in front of it. |
+| First, on a freshly flashed board | An 8 GiB swap **partition** at the end of the disk, `mkswap`'d, added to `/etc/fstab` by `UUID=` — or by `LABEL=boat-swap` if `blkid` returns no UUID — and enabled; the rootfs then grows into everything in front of it. |
 | After the rootfs has already been grown | An 8 GiB **`/swapfile`**, added to `/etc/fstab` by path, and enabled. The script says which it chose and why. |
+
+The swapfile is refused unless `/` has more than the requested size **plus a
+1 GiB margin** free once the filesystem has been grown — filling the rootfs to
+provision swap would trade one outage for another. It stops with
+`only N MiB free on / - not creating a M MiB swapfile` and changes nothing;
+the rootfs grow that ran first still stands.
 
 The swapfile is written with `dd`, not `fallocate`: a fallocated file on ext4
 is made of unwritten extents and `swapon` refuses those ("skipping — it
@@ -1303,7 +1309,7 @@ mounted partition's table entry and returned 0, `sgdisk` carved the tail,
 `mkswap`/`swapon` took, `resize2fs` grew the still-mounted ext4 into what was
 left, and the canary was intact:
 
-```
+```text
 would create a 513.0 MiB swap partition at the end of /dev/loop1
 would SHRINK partition 1 to 3.5 GiB to make room (the filesystem, 512.0 MiB, stays where it is)
 ...

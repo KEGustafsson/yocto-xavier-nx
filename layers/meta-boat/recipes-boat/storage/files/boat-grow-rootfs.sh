@@ -146,12 +146,17 @@ parse_size() {
                 mult["G"]=1073741824; mult["T"]=1099511627776 }
         {
             s = toupper($0)
-            if (s ~ /^[0-9]+$/)             { printf "%d", s; exit }
-            if (s ~ /^[0-9]+[KMGT]I?B?$/) {
-                u = substr(s, length(s))
-                if (u == "B") { sub(/I?B$/, "", s); u = substr(s, length(s)) }
-                n = substr(s, 1, length(s) - 1) + 0
-                sub(/I$/, "", s)
+            if (!match(s, /^[0-9]+/)) { print "BAD"; exit }
+            n = substr(s, 1, RLENGTH) + 0
+            rest = substr(s, RLENGTH + 1)
+            if (rest == "") { printf "%d", n; exit }   # a plain byte count
+            u = substr(rest, 1, 1)
+            # Accept G, GB, GiB and GI - and nothing else. Matching the unit
+            # letter alone is not enough: an earlier version keyed the
+            # multiplier off the LAST character, so "8Gi" looked up mult["I"],
+            # got the empty string, and quietly returned 0 - which reads as
+            # --no-swap rather than as the typo it is.
+            if ((u in mult) && (rest == u || rest == u "B" || rest == u "I" || rest == u "IB")) {
                 printf "%d", n * mult[u]
                 exit
             }
@@ -223,11 +228,17 @@ DISK_KNAME="$(lsblk -no PKNAME "$ROOT_SRC" 2>/dev/null | head -n1)"
 DISK="/dev/${DISK_KNAME}"
 [ -b "$DISK" ] || die "$DISK is not a block device"
 
-# lsblk first: it answers from udev and so works unprivileged, which keeps
-# --status usable without sudo. blkid -p probes the device itself and needs
-# root, so it is only the fallback.
+# lsblk first: it answers from udev, so it can work unprivileged. blkid -p
+# probes the device itself and needs root, so it is only the fallback -
+# meaning that on a system where udev has not recorded PTTYPE (CONFIRMED ON
+# HARDWARE: this image is one), a non-root run gets nothing from either.
+# Distinguish that from a genuinely non-GPT disk: reporting "has an 'unknown'
+# partition table" blames the disk for what is really a missing sudo.
 PT_TYPE="$(lsblk -dno PTTYPE "$DISK" 2>/dev/null | head -n1 || true)"
 [ -n "$PT_TYPE" ] || PT_TYPE="$(blkid -p -o value -s PTTYPE "$DISK" 2>/dev/null || true)"
+if [ -z "$PT_TYPE" ] && [ "$(id -u)" -ne 0 ]; then
+    die "cannot read the partition table on ${DISK} without root - try: sudo ${SELF}"
+fi
 [ "$PT_TYPE" = "gpt" ] \
     || die "$DISK has a '${PT_TYPE:-unknown}' partition table, not GPT - not handled"
 
@@ -333,6 +344,10 @@ SWAP_EXISTS=0
 # requested size and keeps the rootfs a whisker smaller, which is the right
 # way round: the rootfs is the thing that can absorb it.
 SWAP_SECTORS=$(( SWAP_BYTES / SECTOR ))
+# Rounded UP: dd counts whole MiB, so truncating turns --swap-size 512K into
+# count=0 and an empty file that mkswap then refuses. Any positive request
+# should yield at least 1 MiB.
+SWAP_MB=$(( (SWAP_BYTES + 1048576 - 1) / 1048576 ))
 SWAP_START=$(( (LAST_USABLE - SWAP_SECTORS + 1) / 2048 * 2048 ))
 SWAP_END="$LAST_USABLE"
 ROOT_TARGET_END=$(( SWAP_START - 1 ))
@@ -496,7 +511,14 @@ next_part_num() {
 }
 
 if [ "$MODE" = "dryrun" ]; then
-    NEW_NUM="$(next_part_num)"
+    # sgdisk cannot read the table without root, and next_part_num would then
+    # report 1 - a real partition number, and the wrong one. --dry-run is
+    # meant to be usable unprivileged, so say what is unknown instead.
+    if [ "$SWAP_MODE" = "partition" ] && [ "$(id -u)" -eq 0 ]; then
+        NEW_NUM="$(next_part_num)"
+    else
+        NEW_NUM="<next free>"
+    fi
     say "would run:"
     if [ "$NEED_PART" -eq 1 ] || [ "$SWAP_MODE" = "partition" ]; then
         printf '    %s\n' "sgdisk --move-second-header ${DISK}"
@@ -521,7 +543,7 @@ if [ "$MODE" = "dryrun" ]; then
     printf '    %s\n' "resize2fs ${ROOT_SRC}"
     if [ "$SWAP_MODE" = "file" ]; then
         printf '    %s\n' \
-            "dd if=/dev/zero of=${SWAPFILE} bs=1M count=$(( SWAP_BYTES / 1048576 ))" \
+            "dd if=/dev/zero of=${SWAPFILE} bs=1M count=${SWAP_MB}" \
             "chmod 0600 ${SWAPFILE}" \
             "mkswap ${SWAPFILE}" \
             "swapon ${SWAPFILE}   (+ a line in /etc/fstab)"
@@ -651,7 +673,8 @@ if [ "$SWAP_MODE" = "partition" ]; then
         # bare /dev/nvme0n1p16 would not.
         add_fstab_swap "LABEL=${SWAP_PART_LABEL}"
     fi
-    swapon "$NEW_PART" && say "swap is on: $(human "$(( SWAP_END - SWAP_START + 1 ))") at ${NEW_PART}"
+    swapon "$NEW_PART" || die "could not enable swap on ${NEW_PART}"
+    say "swap is on: $(human "$(( SWAP_END - SWAP_START + 1 ))") at ${NEW_PART}"
 fi
 
 # Always after any partition change, and on its own the whole job after a
@@ -663,7 +686,6 @@ resize2fs "$ROOT_SRC"
 if [ "$SWAP_MODE" = "file" ]; then
     # After resize2fs, so the space this needs is space the filesystem
     # actually has.
-    SWAP_MB=$(( SWAP_BYTES / 1048576 ))
     AVAIL_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
     [ "$AVAIL_MB" -gt $(( SWAP_MB + 1024 )) ] \
         || die "only ${AVAIL_MB} MiB free on / - not creating a ${SWAP_MB} MiB swapfile"
@@ -680,7 +702,8 @@ if [ "$SWAP_MODE" = "file" ]; then
     chmod 0600 "$SWAPFILE"
     mkswap "$SWAPFILE" >/dev/null
     add_fstab_swap "$SWAPFILE"
-    swapon "$SWAPFILE" && say "swap is on: ${SWAP_MB} MiB at ${SWAPFILE}"
+    swapon "$SWAPFILE" || die "could not enable swap on ${SWAPFILE}"
+    say "swap is on: ${SWAP_MB} MiB at ${SWAPFILE}"
 fi
 
 say "done - / is now $(df -Ph / | awk 'NR==2 {print $2}'), swap $(free -h 2>/dev/null | awk '/^Swap:/ {print $2}' || echo '?')"
