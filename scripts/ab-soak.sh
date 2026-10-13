@@ -34,11 +34,14 @@
 #      was refused before anything was written.
 #
 # Power cuts: with BOAT_SOAK_POWER_CUT_CMD set (e.g. a USB relay on the
-# barrel jack: "relay off; sleep 3; relay on"), every Nth cycle
-# (--power-cut-every N) runs it at a random moment after the install
-# starts. Such a cycle waits for the cut to have happened, then only has
-# to end with the board up and committed on either slot - exactly what a
-# power cut may legitimately do. A cut command that fails fails the cycle.
+# barrel jack: "relay off; sleep 3; relay on" - it must return once power
+# is back), every Nth cycle (--power-cut-every N) runs it at a random
+# moment after the install starts (over the air: after the download).
+# Such a cycle waits for the cut to have happened, then only has to end
+# with the board up and committed on either slot - exactly what a power
+# cut may legitimately do - having booted after the cut (its uptime is
+# shorter than the time since). A cut command that fails, or an update the
+# board refused before the cut, fails the cycle.
 #
 # Results go to a CSV (default ab-soak-<time>.csv), with how each bundle
 # was delivered (ssh, ota or ota-stream) so the two soaks are recorded
@@ -112,15 +115,16 @@ ssh_b() {
     -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "${TARGET}" "$@"
 }
 
-# What the board runs to fetch and install a published bundle. A check or
-# download can meet the board's own timer holding the lock, so each gets a
-# few tries.
-ota_install_cmd() {
+# What the board runs to fetch a published bundle - before the install,
+# so a power cut always lands in the install, never in the download. A
+# check or download can meet the board's own timer holding the lock, so
+# each gets a few tries.
+ota_fetch_cmd() {
   local retry='try() { n=0; while ! "$@"; do n=$((n + 1)); [ "$n" -ge 6 ] && return 1; sleep 20; done; }'
   if [[ "${STREAM}" == yes ]]; then
-    echo "${retry}; try boat-update check && boat-update install --stream --reboot"
+    echo "${retry}; try boat-update check"
   else
-    echo "${retry}; try boat-update check && try boat-update download && boat-update install --reboot"
+    echo "${retry}; try boat-update check && try boat-update download"
   fi
 }
 
@@ -186,10 +190,15 @@ for (( c = 1; c <= CYCLES; c++ )); do
     log "cycle ${c}/${CYCLES}: $(basename "${bundle}") on slot ${before} (expect: ${expect}${note})"
     install_cmd=""
     if [[ -n "${OTA_DIR}" ]]; then
-      if "${HERE}/publish-update.sh" bench "${bundle}" >/dev/null; then
-        install_cmd="$(ota_install_cmd)"
-      else
+      if ! "${HERE}/publish-update.sh" bench "${bundle}" >/dev/null; then
         err "  could not publish the bundle to the bench channel"
+      elif ! out="$(ssh_b "$(ota_fetch_cmd)" 2>&1)"; then
+        err "  the board did not fetch the bundle:"
+        tail -n 5 <<< "${out}" | sed 's/^/    /' >&2
+      elif [[ "${STREAM}" == yes ]]; then
+        install_cmd="boat-update install --stream --reboot"
+      else
+        install_cmd="boat-update install --reboot"
       fi
     else
       remote="/data/boat-update/incoming/$(basename "${bundle}")"
@@ -204,18 +213,28 @@ for (( c = 1; c <= CYCLES; c++ )); do
     if [[ -n "${install_cmd}" ]]; then
       if [[ "${cut}" == yes ]]; then
         delay=$(( RANDOM % 240 + 5 ))
+        cut_at=$(( SECONDS + delay ))
         ( sleep "${delay}"; log "  power cut after ${delay}s"; sh -c "${BOAT_SOAK_POWER_CUT_CMD}" ) &
         cutter=$!
       fi
-      out="$(ssh_b "${install_cmd}" 2>&1)" || true
+      # boat-update exits 1 when it refuses or fails; a session the board
+      # dropped (a reboot, a cut) ends in 255, or 128+ for a signal.
+      out="$(ssh_b "${install_cmd}" 2>&1)" && rc=0 || rc=$?
       # A cut can come after the board has already rebooted by itself, so
       # wait for it first: what is checked below is the board after the cut.
       if [[ "${cut}" == yes ]] && ! wait "${cutter}"; then
         cut=failed
         err "  the power-cut command failed (BOAT_SOAK_POWER_CUT_CMD)"
       fi
-      wait_for_state down 600 >/dev/null || true
-      if ! wait_for_state up 2400 >/dev/null || ! settle 2400; then
+      if (( rc > 0 && rc < 128 )); then
+        err "  the board refused or failed the update (exit ${rc}):"
+        tail -n 5 <<< "${out}" | sed 's/^/    /' >&2
+      elif {
+        # After a cut the board may already be back up, so a cut cycle does
+        # not wait to see it go down: its uptime proves it booted after the cut.
+        [[ "${cut}" != no ]] || wait_for_state down 600 >/dev/null || true
+        ! wait_for_state up 2400 >/dev/null || ! settle 2400
+      }; then
         after="$(slot_now || true)"
         err "  the board did not come back to a committed slot"
       else
@@ -228,7 +247,12 @@ for (( c = 1; c <= CYCLES; c++ )); do
         elif [[ "${cut}" == failed ]]; then
           :
         elif [[ "${cut}" == yes ]]; then
-          result=PASS
+          uptime="$(ssh_b 'cut -d. -f1 /proc/uptime' 2>/dev/null || true)"
+          if [[ "${uptime}" =~ ^[0-9]+$ ]] && (( uptime <= SECONDS - cut_at )); then
+            result=PASS
+          else
+            err "  the board did not boot after the power cut (up ${uptime:-?}s, cut $(( SECONDS - cut_at ))s ago)"
+          fi
         elif [[ "${expect}" == switch && -n "${after}" && "${after}" != "${before}" ]]; then
           result=PASS
         elif [[ "${expect}" == stay && "${after}" == "${before}" ]] && other_bad; then

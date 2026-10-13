@@ -1617,6 +1617,8 @@ Claims the review checked and confirmed:
 | `ab-soak.sh` only installed over SSH, so the Phase 7 target - 50 cycles delivered over the air - had no runnable procedure (CodeRabbit) | `ab-soak.sh --ota DIR [--stream]` publishes each cycle's bundle to `bench` and has the board check, download (or stream) and install it; the runbook builds the versioned bundles it needs; the CSV records the delivery, and each soak is its own result |
 | a power cut mid-copy or mid-install left `ab-soak.sh` waiting on a dead SSH session for TCP's timeout (CodeRabbit) | SSH sessions send keepalives and end a minute after the board stops answering |
 | a power-cut cycle could pass on the board's state from before a late cut, and a cut command that failed still passed (CodeRabbit) | the cycle waits for the cut first and judges the board after it; a failed cut command fails the cycle |
+| a power-cut cycle passed when the update failed before the cut - the cut alone rebooted the board onto a committed slot; over the air, most cuts landed in the download (CodeRabbit) | `boat-update`'s own failure (exit 1-127) fails the cycle, unlike a session the board dropped (255, or a signal); over the air the check and download run first, and the cut is timed from the install |
+| after a cut the board could already be back up, so the wait to see it go down ran its full ten minutes (CodeRabbit) | a cut cycle does not wait for the board to go down; its uptime must be shorter than the time since the cut, which proves it booted after it |
 
 ### Your review
 

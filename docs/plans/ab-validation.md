@@ -78,7 +78,8 @@ itself only behave like the real thing on the real thing.
    `BOAT_UPDATE_CHANNEL=bench` in the board's
    `/data/boat-update/channel.conf`.
 5. **Optional: a USB relay on the barrel jack** for the power-cut rows and
-   the soak. Its on/off command goes in `BOAT_SOAK_POWER_CUT_CMD`.
+   the soak. Its off-then-on command goes in `BOAT_SOAK_POWER_CUT_CMD`; it
+   must return once power is back on.
 
 ## The soak
 
@@ -89,7 +90,9 @@ the other slot and commit; each faulty one must come back on the slot it
 started from, with the other slot marked bad - so a bundle that was
 refused before anything was written fails the cycle. A power-cut cycle
 waits for the cut to have happened, then only has to end committed on
-either slot; a cut command that fails fails the cycle. The results go to a
+either slot, having booted after the cut (its uptime is shorter than the
+time since the cut). A cut command that fails fails the cycle, and so does
+an update the board refused or failed before the cut. The results go to a
 CSV with a `delivery` column, and the exit status is the number of failed
 cycles. It runs two ways; record each run as its own result.
 
@@ -131,10 +134,11 @@ BOAT_PUBLISH_DEST=<the bench channel root> \
 ```
 
 Cycle N publishes the Nth bundle to `bench` with `publish-update.sh`; the
-board then runs `boat-update check`, `download` and `install --reboot`
-(with `--stream`: `check` and `install --stream --reboot`). A name with
-`-faulty` in it is a faulty bundle. A run with `--stream` is a third
-result of its own.
+board then runs `boat-update check` and `download`, and then `install
+--reboot` (with `--stream`: `check`, then `install --stream --reboot`). A
+power cut is timed from the install, so it never lands in the download. A
+name with `-faulty` in it is a faulty bundle. A run with `--stream` is a
+third result of its own.
 
 ## The matrix, row by row
 
