@@ -92,6 +92,10 @@ FILES:${PN} = "\
 #                    from busybox)
 # util-linux-fsck, dosfstools - systemd-fsck's fsck and fsck.vfat, for the
 #                    ESP check before it is mounted
+# setup-nv-boot-control-service - boot-efi.mount, the unit the ESP drop-in
+#                    above amends. Otherwise only tegra-redundant-boot
+#                    (MACHINE_EXTRA_RDEPENDS) brings it, which an image
+#                    without packagegroup-base never gets.
 RDEPENDS:${PN} = "\
     grub-editenv \
     efivar \
@@ -100,4 +104,5 @@ RDEPENDS:${PN} = "\
     util-linux-fsck \
     dosfstools \
     coreutils \
+    setup-nv-boot-control-service \
 "

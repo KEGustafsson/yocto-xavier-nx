@@ -50,6 +50,20 @@ FLASHED = dict(ORDER="A B", A_OK="1", A_TRY="0", A_COMMITTED="1",
 ESP_PART = 12
 ESP_DIR = "/EFI/BOOT"
 
+# grub-emu has every module linked in; the board's grubaa64.efi has only
+# GRUB_BUILDIN and their dependencies, and GRUB merely prints an error for a
+# command it cannot find - the script carries on. So check separately that
+# every command grub.cfg runs comes from a module the board's GRUB has.
+# OE-core kirkstone's default (grub-efi_2.06.bb), which the bbappend extends:
+OE_GRUB_BUILDIN = ("boot linux ext2 fat serial part_msdos part_gpt normal "
+                   "efi_gop iso9660 configfile search loadenv test").split()
+GRUB_BBAPPEND = os.path.join(HERE, "..", "layers", "meta-boat", "recipes-bsp",
+                             "grub", "grub-efi_%.bbappend")
+# Registered by GRUB's kernel itself (grub-core/kern/corecmd.c), so in no
+# module and not in command.lst.
+CORE_COMMANDS = {"set", "unset", "insmod", "ls"}
+SCRIPT_WORDS = {"if", "then", "elif", "else", "while", "until", "do", "!", "{"}
+
 STUBS = r"""
 # --- test stubs (scripts/test-grub-ab.py) ---
 function stub_linux {
@@ -369,6 +383,58 @@ def fmt_env(env):
     return " ".join("%s=%s" % kv for kv in sorted(env.items()))
 
 
+def cfg_commands(text):
+    """The commands a GRUB script runs: the first word of every statement,
+    less keywords, assignments and the script's own functions."""
+    funcs = set(re.findall(r"^\s*function\s+(\w+)", text, re.M))
+    cmds = set()
+    for line in text.splitlines():
+        line = re.sub(r"\"[^\"]*\"|'[^']*'", '""', line)
+        line = re.sub(r"(^|\s)#.*$", "", line)
+        for stmt in line.split(";"):
+            words = stmt.split()
+            while words and words[0] in SCRIPT_WORDS:
+                words.pop(0)
+            if not words or words[0] in ("fi", "done", "}", "function", "for") \
+                    or "=" in words[0] or words[0] in funcs:
+                continue
+            cmds.add(words[0])
+    return cmds
+
+
+def check_modules():
+    """Errors for grub.cfg commands the board's GRUB build would not have."""
+    libdirs = [d for d in ("/usr/lib/grub/x86_64-emu", "/usr/lib/grub/i386-emu")
+               if os.path.exists(os.path.join(d, "command.lst"))]
+    if not libdirs:
+        return ["grub-emu's command.lst/moddep.lst not found"]
+
+    def table(name):
+        with open(os.path.join(libdirs[0], name), encoding="utf-8") as f:
+            return {k.lstrip("*"): v.split() for k, v in
+                    (line.rstrip("\n").split(":", 1) for line in f if ":" in line)}
+    cmd_mod = {k: v[0] for k, v in table("command.lst").items() if v}
+    deps = table("moddep.lst")
+    with open(GRUB_BBAPPEND, encoding="utf-8") as f:
+        m = re.search(r'^GRUB_BUILDIN:append\s*=\s*"([^"]*)"', f.read(), re.M)
+    have, todo = set(), OE_GRUB_BUILDIN + (m.group(1).split() if m else [])
+    while todo:
+        mod = todo.pop()
+        if mod not in have:
+            have.add(mod)
+            todo.extend(deps.get(mod, []))
+    with open(CFG_IN, encoding="utf-8") as f:
+        cmds = cfg_commands(f.read())
+    errors = []
+    for cmd in sorted(cmds - CORE_COMMANDS):
+        if cmd not in cmd_mod:
+            errors.append("grub.cfg runs '%s', which no GRUB module provides" % cmd)
+        elif cmd_mod[cmd] not in have:
+            errors.append("grub.cfg runs '%s' from module '%s', which is not in "
+                          "GRUB_BUILDIN or its dependencies" % (cmd, cmd_mod[cmd]))
+    return errors
+
+
 def main():
     for tool in ("grub-emu", "grub-editenv", "sgdisk", "mkfs.vfat", "mcopy",
                  "script"):
@@ -377,6 +443,13 @@ def main():
                   "dosfstools mtools)" % tool)
             return 77
     failed = 0
+    errors = check_modules()
+    for e in errors:
+        print("FAIL: " + e)
+    if errors:
+        failed += 1
+    else:
+        print("ok:   every command grub.cfg runs is in the board's GRUB build")
     with tempfile.TemporaryDirectory(prefix="grub-ab-") as workdir:
         # Readable by the unprivileged user the read-only scenarios run as.
         os.chmod(workdir, 0o755)
@@ -393,7 +466,7 @@ def main():
                     print(out)
             else:
                 print("ok:   %s" % sc["name"])
-    print("%d of %d scenarios passed" % (len(SCENARIOS) - failed, len(SCENARIOS)))
+    print("%d of %d checks passed" % (len(SCENARIOS) + 1 - failed, len(SCENARIOS) + 1))
     return 1 if failed else 0
 
 

@@ -1435,6 +1435,9 @@ Claims the review checked and confirmed:
 | replacing meta-tegra's `L4TConfiguration` overlay means carrying NVIDIA's other defaults too | `fdtput` rewrites only `L4TDefaultBootMode` in the built `.dtbo` (5.1) |
 | `save_env` refuses GRUB's host filesystem in `grub-emu`, so a test against a plain directory proves nothing about the counting | the harness boots from a GPT image with a FAT ESP (7) |
 | POSIX `sh` has no local variables: a `lib.sh` helper's `env` overwrote the guard's own, so a torn `grubenv` was "rebuilt" into a stray file and the good `grubenv.bak` overwritten (found by `test-ab-scripts.py` on its first run) | every helper variable carries an `_ab_` prefix; the harness covers the torn-`grubenv` paths |
+| on vfat, a rename frees the replaced file's clusters at once but writes the moved file's directory entry only at writeback, so for ~30 s `grubenv` points at freed clusters: a power cut then undoes a commit, and `fsck` truncates both copies | the write fsyncs the renamed file itself before the directory |
+| `boot-efi.mount`, which the ESP drop-in amends, only reaches an image through `tegra-redundant-boot` in `MACHINE_EXTRA_RDEPENDS` | `boat-ab-boot` depends on `setup-nv-boot-control-service` itself |
+| `grub-emu` has every module; the board's GRUB has only `GRUB_BUILDIN`, and a missing command only prints an error, so the harness could not see one (`true` was missing) | `test-grub-ab.py` checks every `grub.cfg` command against `GRUB_BUILDIN` and its dependencies; `true` added |
 
 ### Your review
 

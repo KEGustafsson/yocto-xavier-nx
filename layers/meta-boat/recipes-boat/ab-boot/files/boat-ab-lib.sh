@@ -111,10 +111,14 @@ booted_on_trial() {
 
 # Replace file $2 with file $1 so that a power cut leaves either the old or
 # the new contents, never a mix: flush, rename, flush. (grub-editenv itself
-# truncates and rewrites in place.)
+# truncates and rewrites in place.) On the ESP's vfat a rename frees the old
+# file's clusters at once but only marks the moved file's directory entry
+# dirty, so until writeback that entry still points at the freed clusters:
+# fsync the renamed file itself, which writes the entry, then the directory.
 replace_file() {
     sync "$1"
     mv "$1" "$2"
+    sync "$2"
     sync "$(dirname "$2")"
 }
 

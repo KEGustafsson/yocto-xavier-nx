@@ -15,4 +15,7 @@ SRC_URI += "file://0001-efi-re-arm-the-UEFI-watchdog-instead-of-disabling-it.pat
 #   echo    - say on the console which slot it chose and why
 #   sleep   - a moment for that message before a reset
 #   reboot  - every failure path ends in a reset, never a prompt
-GRUB_BUILDIN:append = " regexp echo sleep reboot"
+#   true    - the no-op branch after a successful save_env
+# scripts/test-grub-ab.py checks that every command grub.cfg runs is in this
+# set or its dependencies: GRUB only prints an error for a missing one.
+GRUB_BUILDIN:append = " regexp echo sleep reboot true"
