@@ -919,8 +919,14 @@ boat before Phase 7 passes. OTA is part of the main line:
 - **Stage 2** (streaming plus adaptive updates) follows in Phase 6.
 - **Phase 3 already builds bundles that are ready for both stages.**
 
-**Phase 0: hardware spike (bench board, USB recovery at hand, no repo changes).**
-A "no" on any of these re-opens section 4.
+**Phase 0: hardware spike (bench board, USB recovery at hand, no image changes).**
+A "no" on any of these re-opens section 4. The tooling is
+`scripts/ab-phase0-capture.sh`, which runs the read-only probe
+(`scripts/ab-phase0-probe.sh`) on the board over SSH. It answers item 1,
+and the parts of item 6 one snapshot can: NBD, the channel host's Range
+support (`--channel-url`), and what NetworkManager reports as metered on
+the links that are up. [The Phase 0 runbook](ab-phase0-runbook.md) covers
+the steps that change state (items 2-5), each with how to undo it.
 
 1. **Capture the current state:**
    - `/proc/cmdline`, `ls /boot`, `cat /proc/mtd`;
