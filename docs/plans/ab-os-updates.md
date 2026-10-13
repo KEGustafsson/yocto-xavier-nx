@@ -1,6 +1,6 @@
 # Plan: A/B OS updates with automatic fallback
 
-**Status: DRAFT v3 for review. Nothing here is implemented yet.** This is the
+**Status: DRAFT v4 for review. Nothing here is implemented yet.** This is the
 plan to review *before* any code is written. Section 10 lists the decisions
 that need an answer first. Section 11 records what each review pass found and
 how the plan answers it.
@@ -560,17 +560,24 @@ The order matches RAUC 1.13's `install.c`:
     channel is visible. It cannot be prevented without an online
     time-stamped authority; accepted.
   - **waste bandwidth or offer an old bundle.** This is blocked *before*
-    downloading: the channel index is signed (5.10), carries the bundle's
-    size, SHA-256 and version, and is checked against `min-bundle-version`
-    first.
+    downloading. The index is signed by its own key (5.10), and the board
+    checks its `channel`, a monotonic `serial` (no replay), the version
+    against both slots and the failed list, `size` and SHA-256. Downloads
+    are size-capped, redirect-free and limited in re-fetches.
   - **learn the board's version** from its requests. TLS keeps this from
-    passive observers. Optional channel credentials (HTTP Basic, a bearer
-    header, or a TLS client cert, all of which curl and RAUC's `[streaming]`
-    section support) keep it from the public.
-- **Channel credentials** live in `/etc/boat-update/channel.conf`
-  (root-only, mode 600, carried over, 5.8). The device's credential grants
-  **read** access to the channel only. Publishing uses a separate
-  credential that stays on the build host.
+    passive observers; a client certificate (D15) keeps it from the public.
+- **Index verification is pinned to our CA only.** OpenSSL's default store
+  (`/etc/ssl/certs`) is explicitly excluded, so a public certificate can
+  never sign an index (5.10).
+- **Credentials:**
+  - The only supported credential is a **TLS client certificate**, in
+    `/data/boat-update/` (mode 640, group of the RAUC streaming sandbox
+    user). It grants **read** access to the channel only. Publishing uses a
+    separate credential that stays on the build host.
+  - **Basic auth and bearer headers are not used:** they would follow
+    redirects to other hosts (and to `http`) and be written to the journal
+    by RAUC's streaming helper.
+  - Nothing credential-bearing is ever put on a command line.
 - **Honest limits:**
   - This authenticates *updates*. Root on the running board can still write
     anything to disk, and the bench image's shared password (README
@@ -597,9 +604,11 @@ The order matches RAUC 1.13's `install.c`:
   - the operator-edited `CONFFILES` (`/etc/default/boat-power`,
     `/etc/default/boat-bluetooth`, `/etc/docker/daemon.json`);
   - the password hash fields of `root` and `boat`, merged (**D5**);
-  - `/etc/nv_boot_control.conf`;
-  - `/etc/boat-update/channel.conf` (channel URL, channel name, policy
-    knobs, optional read credential).
+  - `/etc/nv_boot_control.conf`.
+  - Not on this list: the OTA channel configuration. Its defaults ship in
+    the image (`/etc/boat-update/channel.conf`), and the operator's
+    overrides and client certificate live on `/data` (5.10), so both slots
+    always see the current values.
 - **Lives on `/data`:**
   - Docker and compose (already there);
   - RAUC's `data-directory` (`/data/rauc`, with `RequiresMountsFor=/data`
@@ -645,117 +654,238 @@ The channel is static files on **any HTTPS host that supports HTTP Range
 requests**: nginx, Caddy, or S3/R2/B2-style object storage. Range support is
 what makes both resumable downloads and streaming work. GitHub Releases is a
 poor fit, because bundles carrying CUDA are likely to exceed its per-file
-size limit (check it, D13).
+size limit (D13).
 
 ```text
 https://<host>/boat-xavier-nx/<channel>/
-    index.json            current release for this channel
-    index.json.sig        detached CMS signature (DER), RAUC signing key
-    boat-bundle-<version>.raucb
+    index.p7                                  signed index (one file; see below)
+    boat-bundle-<version>-<sha256[:12]>.raucb bundle, content-addressed name
 ```
 
-- **`index.json`** carries `compatible`, `version`, `l4t`, `bundle`
-  (relative URL), `size`, `sha256`, `published` (UTC), `notes`, and
-  `requires_reflash`. That last one flags a BSP bump, which cannot ship as a
-  bundle (5.9). The board reports "come to the dock with a laptop" instead
-  of downloading.
-- **Two channels:** `testing` (bench boards) and `stable` (the boat). To
-  promote a release, re-publish the same bundle file to `stable` after it
-  has passed on the bench.
-- **`scripts/publish-update.sh <channel> <bundle>`** runs on the build host:
-  1. reads version and compatible with `rauc info` (from the build's native
-     tools);
-  2. computes `size` and `sha256`, and writes `index.json`;
-  3. signs it with
-     `openssl cms -sign -binary -outform DER -signer <signing cert> -inkey <key>`,
-     using the same codeSigning certificate as the bundles;
-  4. uploads to `BOAT_UPDATE_PUBLISH_TARGET` (rsync/scp/rclone), **bundle
-     first and index last**, so the index never points at a file that isn't
-     there yet.
+**The index is one attached-signature CMS file.** The JSON inside is
+readable only after verification. One file means a publish can never
+expose a new index next to an old signature. Fields:
+
+| field | purpose |
+|---|---|
+| `channel` | must equal the channel the board follows, so a `testing` index served at the `stable` URL is rejected |
+| `serial` | increases with every publish. The board stores the highest serial it has accepted (on `/data`) and rejects lower ones, which stops a replayed or pulled old index. |
+| `compatible`, `version`, `l4t` | checked before any download (below) |
+| `bundle` | a bare file name: no `/`, no `..`, no scheme |
+| `size`, `sha256` | transport integrity of the download |
+| `published` | UTC. Shown in `status`, so a frozen channel is visible. |
+| `requires_reflash` | this release is a BSP bump, which cannot ship as a bundle (5.9). Only evaluated for a *newer* version. |
+| `notes` | display only. Size-capped, control characters stripped. |
+
+**Signing uses its own key** (review M1 on v3). An *index-signing* leaf
+certificate sits under the same CA as the bundle signer:
+
+- Its EKU is **emailProtection only**. RAUC rejects it for bundles
+  (RAUC's own `codesign-rauc` purpose), and the bundle key never has to sit
+  on the publish host, so it can stay offline or on PKCS#11.
+- The CA certificate carries **no EKU**.
+- Publish (`scripts/publish-update.sh <channel> <bundle>`, on the build
+  host):
+
+  ```text
+  openssl cms -sign -nodetach -binary -outform DER \
+      -signer index-signing.cert.pem -inkey index-signing.key.pem \
+      -in index.json -out index.p7
+  ```
+
+  It uploads the **bundle first and `index.p7` last**, so the index never
+  points at a file that isn't there yet. `serial` comes from a counter kept
+  next to the keys.
+- **Verify on the board.** Every flag below is load-bearing:
+
+  ```text
+  openssl cms -verify -inform DER -binary -in index.p7 -out index.json \
+      -CAfile /etc/rauc/ca.cert.pem -no-CApath -no-CAstore \
+      -purpose smimesign -no_check_time
+  ```
+
+  - `-no-CApath -no-CAstore`: without them OpenSSL also trusts
+    `/etc/ssl/certs`, so any public certificate could sign an index.
+  - `-binary`: matches how the index was signed (no CRLF canonicalisation).
+  - `-purpose smimesign`: OpenSSL 3.0 has no codesign purpose, and this
+    matches the emailProtection EKU.
+  - `-no_check_time`: the board's clock may be wrong, and RAUC likewise
+    ignores certificate time (5.7).
+
+  Only the `-out` file is ever parsed. The `openssl` CLI is already on the
+  image: `ca-certificates` pulls in `openssl-bin`.
+- **Considered instead:** `rauc info --output-format=json <bundle URL>`
+  streams only the CMS from the bundle's tail and uses RAUC's own trust
+  rules. It needs NBD and root, and it does not check `compatible` itself.
+  Kept as a Phase 6 extra check, not the stage-1 gate.
+
+**Channels:** `testing` (bench) and `stable` (the boat). To promote a
+release, re-publish the same bundle file with a new `stable` index. Bundles
+are never renamed, because names are content-addressed.
+
+**Access:** the default is a **public** channel. Bundles carry nothing
+secret: the image's password hash is already public (README
+"Credentials"). If you want access control, use a **TLS client
+certificate** (D15). Basic auth and bearer headers leak in this setup,
+because curl and RAUC forward them across redirects and RAUC logs request
+headers (review M3).
 
 #### On the board: check, download, ready (stage 1)
 
 `boat-update` gains three verbs, and `status` reports all of their state.
+**`check`, `download` and `install` share one `flock`.**
 
-- **`check`** fetches `index.json` and its `.sig` (a few hundred bytes):
-  1. **Clock first.** The check only runs once the clock is plausible:
-     chrony has synced, or the clock is at least the image build date.
-     Before NTP the clock reads 1970 and TLS would fail anyway.
-  2. **Verify the signature** against `/etc/rauc/ca.cert.pem` with
-     `openssl cms -verify`.
-  3. **Then check, in order:** `compatible`, `l4t` against the running
-     `/etc/nv_tegra_release`, and the version (newer than the booted slot
-     and ≥ `min-bundle-version`). This rejects anything not worth
-     downloading **before** any bandwidth is spent.
-  4. **Record** the result and the channel's `published` date. `status`
-     shows the age of both, which is how a frozen channel shows up (5.7).
-- **`download`** writes to `/data/boat-update/downloads/<file>.part` with
-  resumable `curl --fail -C -`:
-  - It runs in bounded windows (`--max-time` of about 10 minutes, with
-    stall detection via `--speed-limit`/`--speed-time`). Between windows it
-    re-checks the metered state and the policy, so moving from shore Wi-Fi
-    to cellular pauses the download instead of draining the data plan.
-  - Before starting it checks free space on `/data` (bundle size + 1 GiB).
-  - At the end it verifies `size` and `sha256`, renames the file, and runs
-    `rauc info` on it for the full local signature/compatible check. Only
-    then is the state **"ready"**.
-  - There is only ever one pending bundle. A newer index supersedes it and
-    deletes the old partial file.
-  - A dropped link, an SC7 sleep or a reboot just means resuming on the next
-    run. Downloads **never hold a sleep inhibitor**: a background download
-    must not keep the boat awake.
-- **`install`** with no argument installs the ready bundle (5.6). After the
-  update commits, the downloaded file is deleted; the old slot is the
-  rollback, not the file.
+- **`check`:**
+  1. **Gates.** It runs only when:
+     - chrony reports a synchronised clock (TLS fails at 1970 anyway);
+     - the booted slot is committed (no OTA during a trial);
+     - `/data` is mounted.
+  2. **Fetch `index.p7`** with no redirects (`--max-redirs 0`), `https`
+     only, `Cache-Control: no-cache`, and a 64 KiB size cap.
+  3. **Verify it** (above).
+  4. **Accept the index only if all of these hold:**
+     - `channel` matches;
+     - `serial` is above the stored maximum;
+     - `compatible` matches;
+     - `version` is newer than the booted slot (RAUC's relaxed-semver
+       comparison, `reference.rst` "min-bundle-version");
+     - `version` is not already in the other slot (`rauc status --output-format=json`;
+       slot A as flashed reports `/etc/boat-release`, the same
+       `BOAT_RELEASE` string the bundle carries);
+     - `version` is not on the board's list of versions that **failed a
+       trial here**.
+  5. **Then the L4T check.** `l4t` must match the running
+     `/etc/nv_tegra_release`. If it doesn't and `requires_reflash` is set,
+     report "BSP bump: reflash at the dock".
+  6. **Record** the accepted `serial`, plus the result and the channel's
+     `published` date, for `status`.
+- **`download`** writes to
+  `/data/boat-update/downloads/<bundle>.part`:
+  - **Resume:**
+    - It resumes with `curl -C -`. Content-addressed names mean the bytes
+      behind a name never change. A `.part` left from an older index is
+      deleted.
+    - Each run is a bounded window: `--max-time` of about 10 minutes, no
+      `--retry` (a retry would reconnect over whatever link is now
+      primary), and exit 28 treated as a normal end of window.
+    - Between windows it re-checks the gates, the metered state and the
+      policy.
+  - **Size bounds:**
+    - It requires a `Content-Length`, and passes `--max-filesize` = the
+      index's `size`.
+    - It treats a `.part` larger than `size`, or a resume answered with
+      416, as corrupt and deletes it.
+    - It keeps a `/data` free-space floor (bundle size + 2 GiB, because
+      Docker shares `/data`) and re-checks it every window.
+    - A version is **re-fetched from scratch at most 3 times**, then marked
+      failed.
+  - **Redirects:** none (`--max-redirs 0`). If the host redirects, the URL
+    in `channel.conf` must name the final location.
+  - **Finish:**
+    - At `size` it verifies `sha256`, renames the file, and runs `rauc info`
+      on it (a local signature check), plus the `compatible` comparison,
+      which `rauc info` does not do itself.
+    - Only then is the state **"ready"**.
+    - There is only ever one pending bundle.
+  - **No sleep inhibitor.** A dropped link, an SC7 sleep or a reboot
+    just means the next window resumes, and a background download must
+    not keep the boat awake.
+- **`install`** with no argument installs the ready bundle (5.6) as a
+  transient systemd unit (`systemd-run`), so a dropped SSH session cannot
+  kill the wrapper while RAUC carries on without its inhibitor.
+  - After the update commits, the file is deleted; the old slot is the
+    rollback, not the file.
+  - If the trial fails, the version goes on the failed list and the file
+    is deleted, never offered again as "ready".
 
-`boat-update-check.timer` drives it: `OnBootSec=10min`,
-`OnUnitActiveSec=6h`, `RandomizedDelaySec=30min`, `Persistent=true`. Policy
-lives in `/etc/boat-update/channel.conf`:
+**Scheduling** (review M5: monotonic timers pause during suspend, and
+`Persistent=` only works with `OnCalendar=`):
+
+- `boat-update-check.timer`: `OnCalendar=*-*-* 00/6:00`,
+  `Persistent=true`, `RandomizedDelaySec=30min`.
+- Also triggered from the system-sleep `post` hook and from a
+  NetworkManager dispatcher script on `up`/`connectivity-change`.
+- The service rate-limits itself with a stamp file on `/data`, so the extra
+  triggers cost nothing.
+
+**Configuration** (review M6) has two layers, and neither is carried over:
+
+- `/etc/boat-update/channel.conf`, shipped by the image: defaults such as
+  the channel URL. An update can change these.
+- `/data/boat-update/channel.conf`, the operator's overrides and the
+  optional client certificate/key. It is shared by both slots, so a
+  credential rotated after an update is still right after a rollback. OTA
+  needs `/data` anyway.
 
 | knob | default | meaning |
 |---|---|---|
+| `BOAT_UPDATE_URL` | image default | channel base URL (final location; no redirects) |
 | `BOAT_UPDATE_CHANNEL` | `stable` | which channel to follow |
 | `BOAT_UPDATE_AUTO` | `download` | `off` / `check` (notify only) / `download` (also fetch in background). **Never installs or reboots** (D12). |
 | `BOAT_UPDATE_METERED` | `no` | download over a metered link? (D14) |
-| `BOAT_UPDATE_RATE_LIMIT` | empty | passed to curl `--limit-rate` |
-| channel credential | none | Basic auth, a bearer header, or a TLS client cert/key (5.7) |
+| `BOAT_UPDATE_RATE_LIMIT` | empty | curl `--limit-rate`; the stall threshold (`--speed-limit`) is kept below it |
+| client cert/key | none | TLS client authentication (D15) |
 
-- **Metered state** comes from NetworkManager's global `Metered` property.
-  NM guesses `yes` for ModemManager (cellular) connections, and a phone
-  hotspot can be marked with `nmcli connection modify <c> connection.metered yes`.
-  When metered and not allowed, `check` still runs (it is tiny), and
+**Metered detection** (review m1):
+
+- The board takes the default-route device's own NetworkManager `Metered`
+  property and binds curl to that device (`--interface`), so the bytes go
+  where the decision was made.
+- `yes`, `guess-yes` and `unknown` count as metered. `guess-no` counts as
+  unmetered.
+- NetworkManager guesses `yes` for ModemManager (cellular) links. **A 4G
+  router reached over Ethernet or Wi-Fi reads `guess-no`**, so docs/07
+  tells you to mark that connection with
+  `nmcli connection modify <c> connection.metered yes`.
+- A VPN (WireGuard) default route hides the underlying link. With one
+  active, the board takes the conservative answer: metered if **any**
+  active device is metered.
+- While metered and not allowed, `check` still runs (it is tiny), and
   `status` says "update X available, waiting for an unmetered link".
-- **No `/data`, no OTA.** Downloads never go to the rootfs. `status` says why
-  OTA is idle.
+
+**No `/data`, no OTA.** Downloads never go to the rootfs.
 
 #### Streaming with adaptive updates (stage 2)
 
-- **Bundles carry an adaptive index from the start.** From Phase 3 the
-  rootfs image is built with `adaptive=block-hash-index`. The index adds
-  about 0.8% to the bundle and is harmless for stage 1.
-- **`boat-update install --stream`** runs `rauc install <bundle URL>`,
-  passing the channel credential with RAUC's own `--http-header` or
-  `--tls-cert`/`--tls-key` options (never `--tls-no-verify`).
+- **Bundles are adaptive from the start.** From Phase 3, the bundle recipe
+  sets `RAUC_SLOT_rootfs[adaptive] = "block-hash-index"`, a manifest flag.
+  The index adds about 0.8% of the *uncompressed* image and is harmless
+  for stage 1.
+- **`boat-update install --stream`** calls RAUC's D-Bus `InstallBundle`
+  directly, not the CLI, so nothing sensitive shows in `ps`.
+  - The client certificate goes in the `tls-cert`/`tls-key` arguments.
+  - `tls-no-verify` is never set.
+  - The bundle URL is the final, redirect-free one taken from the verified
+    index.
   - RAUC reads only the blocks it cannot find locally in either slot.
-  - RAUC's documentation reports **about 10% of the bundle** crossing the
+    RAUC's documentation reports **about 10% of the bundle** crossing the
     link for a small ext4 change.
-  - It stores per-slot hash indices in `/data/rauc` and builds them on the
-    first run, which takes extra time once.
-- **Needs** `CONFIG_BLK_DEV_NBD` (in `boat-rauc.cfg`; Phase 0 checks it),
-  RAUC's `streaming` PACKAGECONFIG (meta-rauc's default), and the Range
-  support the channel already requires.
-- **Trade-off:** the link must stay up for the whole install (minutes). A
-  drop aborts safely (5.6), but the install must be re-run. How much of a
-  retry is re-downloaded is measured in Phase 6.
+  - Per-slot hash indices live in `/data/rauc`, built on the first run.
+  - Data from an interrupted attempt is reused, so a retry costs less.
+- **Needs** (review M2):
+  - **NBD available without a manual `modprobe`.** OE4T's kernel builds
+    it as a module, and RAUC finds it through a generic-netlink lookup
+    that does not autoload modules. `boat-rauc.cfg` sets
+    `CONFIG_BLK_DEV_NBD=y`; the fallback is `KERNEL_MODULE_AUTOLOAD += "nbd"`.
+  - RAUC's `streaming` PACKAGECONFIG (meta-rauc's default).
+  - The channel's Range support.
+  - **A dedicated `[streaming] sandbox-user`** that can read the client
+    key, through a group the key file belongs to. The sandbox drops root
+    before curl opens the key, so a root-only key would fail.
+- **Limits on this BSP:**
+  - kirkstone's libcurl has no HTTP/2, which RAUC recommends for
+    high-latency links;
+  - each request gets only 5 quick retries;
+  - so a drop aborts the install safely (5.6) and it must be re-run.
 - **When to use which:** download-then-install on shore Wi-Fi or any flaky
-  link; streaming at anchor on a decent cellular link. `boat-update status`
-  shows the expected download for both when the channel's bundle is
-  adaptive-capable.
+  link; streaming at anchor on a decent link. `status` shows the expected
+  transfer for both.
 - **Rejected: background streaming into the inactive slot.** RAUC's
-  `activate-installed=false` would allow it, but RAUC marks the target
-  `OK=0` while writing. The boat would lose its fallback slot for as long as
-  the activation waits for the operator. A downloaded file costs disk, not
-  safety, so the background step stays a download.
+  `activate-installed=false` would allow it, but RAUC leaves the target
+  non-bootable until activation (`install.c`: "Leaving target slot
+  non-bootable as requested by activate_installed == false"). The boat
+  would have no fallback slot for as long as the activation waits for the
+  operator. A downloaded file costs disk, not safety.
 
 ---
 
@@ -805,11 +935,13 @@ A "no" on any of these re-opens section 4.
 5. *(Optional, bench only.)* Confirm section 3 by switching to firmware
    chain B and watching it fail and revert.
 6. **OTA prerequisites:**
-   - the kernel has NBD (step 1);
-   - the host you intend to use for the channel answers a Range request
-     (`curl -sI -r 0-99 <url>` returns `206`);
+   - The kernel has NBD (step 1). Whether it is a module or built in
+     decides `boat-rauc.cfg`.
+   - The host you intend to use for the channel answers the way RAUC
+     probes it: a GET with `Range: bytes=0-3` returns `206` and a
+     `Content-Range` with a numeric total, not `*`.
    - NetworkManager reports `Metered` correctly for the boat's cellular
-     modem and for its Wi-Fi.
+     modem, for its Wi-Fi, and for any 4G router reached over Ethernet.
 
 **Phase 1: layout, GRUB, slot-aware boot.** Effort: M.
 
@@ -888,15 +1020,20 @@ A "no" on any of these re-opens section 4.
   - `scripts/gen-update-keys.sh`;
   - `boat-bundle.bb`, with:
     - `inherit bundle` and `RAUC_BUNDLE_FORMAT = "verity"`;
-    - the rootfs image built with `adaptive=block-hash-index`, so every
-      bundle from now on is stream-ready for Phase 6;
+    - `RAUC_SLOT_rootfs[adaptive] = "block-hash-index"` (a manifest
+      flag), so every bundle from now on is stream-ready for Phase 6;
+    - `RAUC_BUNDLE_VERSION` taken from the same `BOAT_RELEASE` string the
+      image writes to `/etc/boat-release`, so a flashed slot and a
+      bundle-installed slot report versions the same way;
     - a `[meta.boat]` section with `l4t` and `docker`;
     - a check that `/boot/Image` and `/boot/initrd` exist.
   - Record each bundle's size. These are the real numbers behind the OTA
     bandwidth estimates (D14).
-  - RAUC built with its default `network` + `streaming` PACKAGECONFIG, and
-    `CONFIG_BLK_DEV_NBD` in `boat-rauc.cfg`, so Phase 6 needs no image
-    rebuild just to enable streaming.
+  - RAUC built with its default `network` + `streaming` PACKAGECONFIG.
+  - `CONFIG_BLK_DEV_NBD=y` in `boat-rauc.cfg`. Nothing autoloads the module
+    RAUC looks for, so this is the fallback-free choice. With it, Phase 6
+    needs no image rebuild just to enable streaming.
+  - A `[streaming] sandbox-user` (`rauc-stream`) in `system.conf`.
 - **Handlers:**
   - system `pre-install` (BSP/Docker checks, `COMMITTED=0` for the target);
   - slot `post-install` (carry-over);
@@ -930,16 +1067,28 @@ A "no" on any of these re-opens section 4.
     and "BSP bump: reflash needed".
 
   Verbs:
-  - `check`, `download` and `install [--reboot]` (5.10, 5.6);
+  - `check`, `download` and `install [--reboot]` (5.10, 5.6), sharing one
+    `flock`;
   - `rollback`, `history`, and `debug-hold` (sets `BOAT_STAY`).
-- **`boat-update-check.timer`** and its service, plus the policy knobs in
-  `/etc/boat-update/channel.conf` (5.10).
-- **The `openssl` CLI on the image** for verifying the index (check the
-  exact package name with `oe-pkgdata-util`; `curl` is already in
-  `packagegroup-boat-nettools`).
+- **Scheduling:** `boat-update-check.timer` (`OnCalendar`,
+  `Persistent=true`) and its service. It is also triggered from the
+  system-sleep `post` hook and a NetworkManager dispatcher script, and
+  rate-limited by a stamp file on `/data`.
+- **Configuration:** the policy knobs in `/etc/boat-update/channel.conf`
+  (image defaults) and `/data/boat-update/channel.conf` (operator
+  overrides) (5.10).
+- **Board-side state on `/data`:** the highest accepted index `serial`; the
+  versions that failed a trial here; the per-version re-fetch counter.
+- **Tools** (`openssl` and `curl`) are already on the image: `openssl-bin`
+  comes in via `ca-certificates`, and `curl` is in
+  `packagegroup-boat-nettools`.
+- **Keys:** `scripts/gen-update-keys.sh` also creates the index-signing
+  leaf (emailProtection EKU only), and keeps the `serial` counter next to
+  the keys.
 - **Host scripts:**
-  - **`scripts/publish-update.sh <channel> <bundle>`**: write and sign the
-    index, upload bundle first and index last (5.10).
+  - **`scripts/publish-update.sh <channel> <bundle>`**: content-addressed
+    bundle name; write `index.json`; sign it into one attached `index.p7`;
+    upload the bundle first and the index last (5.10).
   - **`scripts/push-update.sh <host> [bundle]`**, the no-internet fallback:
     copy to `/data`, install, reboot, then *wait and report which slot came
     back*, in the style of `wol/boat-wake.sh`.
@@ -950,7 +1099,9 @@ A "no" on any of these re-opens section 4.
     survives a pulled Ethernet cable, an SC7 sleep and a reboot
     mid-download, and becomes "ready";
   - `boat-update install --reboot` takes it through trial to commit;
-  - with the connection marked metered, it waits instead of downloading.
+  - with the connection marked metered, it waits instead of downloading;
+  - an index signed by a public CA certificate, a replayed older index,
+    and a `testing` index served at `stable` are all rejected.
 - **`docs/07-updates.md`**: day-to-day OTA, channel setup and publishing,
   fallbacks, rollback, recovery. Plus fixes to:
   - docs/01 (boot flow) and docs/04 (layout, flash; the first A/B flash
@@ -963,9 +1114,13 @@ A "no" on any of these re-opens section 4.
 
 **Phase 6: OTA stage 2 (streaming + adaptive installs).** Effort: S–M.
 
-- **`boat-update install --stream`**: `rauc install <channel bundle URL>`,
-  passing the channel credential via `--http-header` or
-  `--tls-cert`/`--tls-key` (5.10).
+- **`boat-update install --stream`:** RAUC's D-Bus `InstallBundle` with the
+  final, redirect-free bundle URL from the verified index. The client
+  certificate, if any, goes in `tls-cert`/`tls-key`; never `tls-no-verify`,
+  and never a header credential (5.10).
+- **The `rauc-stream` sandbox user** and group-readable client key.
+- **Optional:** `rauc info <URL>` as a second, RAUC-native authenticity
+  check before a streamed install.
 - **Measure on the bench** the bytes transferred for:
   - a one-package change;
   - a kernel bump;
@@ -976,7 +1131,10 @@ A "no" on any of these re-opens section 4.
   on data rather than on RAUC's ~10% rule of thumb.
 - **`status`** shows the estimated transfer for each path.
 - **Exit:**
-  - a streamed, adaptive install commits;
+  - from a cold boot with no manual `modprobe`, `rauc info https://…` and a
+    streamed, adaptive install both work, with and without a client
+    certificate;
+  - the client certificate never appears in the journal or in `ps`;
   - a link drop mid-stream leaves the board on its current slot with the
     target `OK=0`, and a retry succeeds;
   - a server without Range support fails cleanly, with a message pointing
@@ -1049,15 +1207,25 @@ Both run from `lint.sh`, so they cover every PR.
 | 31 | OTA: channel offers a newer bundle, unmetered link | background download; `status` shows "ready"; no install or reboot happens by itself |
 | 32 | OTA: link dropped, SC7 sleep, and reboot, each mid-download | resumes from where it stopped; final SHA-256 matches; never a second full download |
 | 33 | OTA: truncated or corrupted download | SHA-256/`rauc info` mismatch → discarded and re-fetched; never offered for install |
-| 34 | OTA: index with a bad signature, or signed by the bench CA on a boat image | ignored before any download; alert in `status` |
-| 35 | OTA: index offers an older version, the same version, another `compatible`, or another L4T | nothing downloaded; L4T case reports "reflash needed" |
+| 34 | OTA: index with a bad signature, signed by the bench CA on a boat image, or signed by a public CA certificate | ignored before any download; alert in `status` |
+| 35 | OTA: index offers an older version, the same version, the version already in the other slot, a version that failed its trial here, another `compatible`, or another L4T | nothing downloaded; the L4T case reports "reflash needed" only for a newer version |
 | 36 | OTA: cellular (metered) link, default policy | check only; download waits for an unmetered link; moving to cellular mid-download pauses at the next window |
 | 37 | OTA: clock at 1970 before NTP | check deferred, no TLS-error spam; runs after sync |
 | 38 | OTA: `/data` too full, or not mounted | download refused with the reason in `status`; rootfs never used |
-| 39 | OTA: channel credential, and carry-over | authenticated channel works; credential survives an update and a rollback |
+| 39 | OTA: client-certificate channel | works for check, download and stream; the certificate is never in the journal or `ps`; still works after an update and after a rollback (it lives on `/data`) |
 | 40 | OTA stream: adaptive install of a one-package change | commits; transferred bytes recorded (Phase 6) |
 | 41 | OTA stream: link drop mid-install | install aborts; current slot unaffected, target `OK=0`; retry succeeds |
 | 42 | OTA stream: server without Range support | clean failure pointing to the download path |
+| 43 | OTA: replayed older index (lower `serial`), and a `testing` index served at the `stable` URL | rejected |
+| 44 | OTA: a publish caught halfway (bundle uploaded, index not yet) | the board keeps the previous index; no false "bad signature" alarm |
+| 45 | OTA: the index-signing certificate past its expiry date | still accepted (`-no_check_time`, as RAUC does for bundles); revocation is by removing the CA |
+| 46 | OTA: the server streams an endless body, or more than `size` | aborted at `size`; the `/data` free-space floor is never crossed |
+| 47 | OTA: a redirect to another host or to `http` | refused; no credential leaves the board |
+| 48 | OTA: two downloads started at once (timer + manual) | the second waits on the lock |
+| 49 | OTA: checks across SC7 sleeps and after a link comes up | a check runs on resume and on link-up; at most one per rate-limit window |
+| 50 | OTA: check and download during a trial boot | neither runs until the slot is committed |
+| 51 | OTA: a 4G router on Ethernet marked metered in NetworkManager | treated as metered |
+| 52 | OTA stream after a cold boot, with no manual `modprobe` | works (NBD built in) |
 
 The fault bundles for 12–19 come from a `boat-image-faulty` variant
 (`BOAT_FAULT=<kind>`), signed by the bench CA (5.7).
@@ -1080,7 +1248,8 @@ safe in-place conversion, and the plan does not attempt one.
    runtime regardless.)
 3. First boot: `boat-storage` provisions `/data`, swap and the rootfs size.
    Restore the backup.
-4. Put the channel credential in `/etc/boat-update/channel.conf`. Then, **over
+4. Put any channel overrides (and the client certificate, if you use one) in
+   `/data/boat-update/`. Then, **over
    the air**, install a bundle once (A→B) and once more (B→A) to prove the
    round trip before the boat leaves the dock. After this, the only reasons
    to bring a laptop to the boat are a BSP bump or a dead board.
@@ -1102,6 +1271,8 @@ safe in-place conversion, and the plan does not attempt one.
 | bundle size over cellular (several GB with CUDA) | H / M | metered policy (no background downloads on cellular by default); adaptive streaming (Phase 6); real sizes measured in Phases 3 and 6 |
 | a streamed install fails repeatedly on a weak link | M / L | safe by construction (5.6); `status` steers to download-then-install |
 | update channel down, or frozen by an attacker | L / M | the board simply stays on what it runs; channel age shown in `status` (5.7); SSH/USB fallbacks |
+| index verification subtly wrong (OpenSSL purpose, trust store, binary mode) | M / H | exact flags pinned in 5.10, including `-no-CApath -no-CAstore`; tests 34, 43–45; host-side tests run the same `openssl` commands |
+| channel credential leaks (redirects, logs, `ps`) | M / M | client certificate only, no redirects, D-Bus instead of the CLI; tests 39, 47 |
 | channel host lacks Range support, or per-file size limits (e.g. GitHub Releases) | M / M | Phase 0 step 6 checks the host; D13 |
 | background downloads fill `/data` | L / M | free-space check, one pending bundle, deleted after commit |
 | meta-rauc vs this repo's host workarounds (Python 3.14, gcc-12) | M / L | build `rauc-native` first in Phase 3 |
@@ -1127,6 +1298,7 @@ safe in-place conversion, and the plan does not attempt one.
 | D12 | How automatic is OTA? Check + download in the background, with install and reboot always started by you? | **yes** (`BOAT_UPDATE_AUTO=download`) |
 | D13 | Where to host the channel: your own HTTPS server or object storage (needs Range requests and per-file sizes of several GB) | **your own host or object storage**, not GitHub Releases |
 | D14 | Background downloads over metered (cellular) links | **no** by default; streaming at anchor when you choose to |
+| D15 | Channel access: public, or a TLS client certificate? (Basic auth and bearer headers are ruled out, 5.10) | **public** to start; a client certificate if the host must stay private |
 
 ---
 
@@ -1181,14 +1353,32 @@ Claims the review checked and confirmed:
 | OTA is now a goal, and installs stay operator-started (D12) | 1 |
 | New section on the update channel: signed index; check → resumable download → ready; metered policy; streaming + adaptive; background streaming rejected because it would drop the fallback slot (verified: RAUC leaves the target non-bootable when `activate-installed=false`) | 5.10 |
 | The pull-only OTA threat model: freeze, bandwidth, privacy, credentials | 5.7 |
-| The channel config is carried over | 5.8 |
+| Channel config split between image defaults and `/data` overrides, superseded in review pass 3 | 5.8, 5.10 |
 | Phase 3 builds adaptive, stream-ready bundles; Phase 5 = OTA stage 1; Phase 6 = OTA stage 2; validation moves to Phase 7, later work to Phase 8; Phase 0 gains the OTA prerequisites | 6 |
 | Tests 31–42 | 7 |
 | Over-the-air round trip in migration | 8 |
 | OTA risks | 9 |
 | D7 rewritten; D12–D14 added | 10 |
 
-The v3 additions have not yet had an independent adversarial pass like v1.
+### Review pass 2 (CodeRabbit, on v3)
+
+| finding | resolution |
+|---|---|
+| A GRUB hang is covered only if the Tegra WDT runs that early, so "every failure ends in a reset" was not established | `grub-efi` patch re-arms the UEFI watchdog (300 s) instead of cancelling it; Phase 1 exit test; the claim narrows if the firmware ignores it (5.1, 5.5, 9) |
+
+### Review pass 3 (independent adversarial review of the v3 OTA additions)
+
+| id | severity | finding | resolution |
+|---|---|---|---|
+| B1 | blocker | `openssl cms -verify` with the codeSigning certificate never passes (default purpose `smime_sign`, no codesign purpose in OpenSSL 3.0). The obvious `-purpose any` also trusts `/etc/ssl/certs`, so any public certificate could sign an index. `-binary` mismatch, time checks and non-atomic `.sig` too. | separate index-signing leaf (emailProtection EKU), one attached `index.p7`, verify flags pinned (`-no-CApath -no-CAstore -purpose smimesign -binary -no_check_time`) (5.10) |
+| M1 | major | replay and version holes: no `channel` or `serial`; re-offers the version in the other slot or one that just failed; reflash evaluated for old versions | signed `channel` + monotonic `serial`; compare against both slots and the failed list; reflash only for newer versions; `/etc/boat-release` = `BOAT_RELEASE` (5.10, Phase 3) |
+| M2 | major | NBD is a module nothing loads; the streaming sandbox can't read a root-only TLS key | `CONFIG_BLK_DEV_NBD=y`; `rauc-stream` sandbox user with a group-readable key; cold-boot exit test (5.10, Phases 3/6) |
+| M3 | major | credentials leak via redirects (also to `http`), RAUC's header logging and `ps` | client certificate only; no redirects; D-Bus `InstallBundle` (5.7, 5.10, D15) |
+| M4 | major | resume splices a republished same-name file; 416 exits 0; unbounded body; endless re-fetch; no lock | content-addressed names; size and free-space bounds every window; 3 re-fetches max; `flock` (5.10) |
+| M5 | major | monotonic timers pause in suspend; `Persistent=` needs `OnCalendar=` | `OnCalendar` + `Persistent`; triggers from sleep `post` and NM dispatcher; stamp-file rate limit (5.10) |
+| M6 | major | a carried-over `channel.conf` goes stale after a credential change and blocks image defaults | image defaults in `/etc`, operator overrides on `/data`; dropped from carry-over (5.8, 5.10) |
+| — | minor | metered detection (per-device, `--interface`, 4G router over Ethernet, VPN); no OTA during a trial; `rauc info` checks only the signature; streaming limits (no HTTP/2); index field validation; inhibitor tied to the SSH session | all in 5.10 and the tests |
+| — | nit | Range probe must be a GET with `Content-Range` total; adaptive is a manifest flag; clock gate on chrony sync only; `openssl` already on the image | fixed |
 
 ### Your review
 
