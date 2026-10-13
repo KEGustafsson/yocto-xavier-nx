@@ -88,6 +88,11 @@ PARTITION_LAYOUT_TEMPLATE_DEFAULT = "flash_l4t_t194_qspi_p3668.xml"
 # UBOOT_EXTLINUX = "1"
 # IMAGE_ROOTFS_SIZE = "1048576"
 # IMAGE_ROOTFS_MAXSIZE = "${@int(d.getVar('ROOTFSPART_SIZE')) // 1024}"
+# DISTRO_FEATURES:append = " rauc"
+# BOAT_KEYS_DIR = "/home/<you>/.local/share/boat-update-keys"
+# BOAT_RELEASE = "1.0.0"
+# ...and meta-rauc in bblayers.conf (see config/bblayers.conf.sample). Make
+# the keys once with scripts/gen-update-keys.sh.
 
 # ---- Optional but recommended ----
 # Keep downloads and shared state outside the build dir.

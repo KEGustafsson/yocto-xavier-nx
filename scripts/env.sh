@@ -56,6 +56,16 @@
 # layout: the first flash after switching it on (or off) is a full
 # 05-flash-nvme.sh, and it ERASES the SSD. Needs BOOTDEV on NVMe.
 : "${AB_LAYOUT:=0}"
+# The release string an A/B image writes to /etc/boat-release and its update
+# bundle carries; RAUC and the OTA check compare these as (relaxed) semantic
+# versions, so a later release must compare higher - e.g. 1.4.0, 2026.10.1.
+# Empty = "0.0.0-dev", fine for bench work but never offered over the air
+# (every dev build has that same version). Set it for anything you ship.
+: "${BOAT_RELEASE:=}"
+# Where the update signing keys live (scripts/gen-update-keys.sh). Outside
+# the repository AND outside WORKROOT on purpose: yocto/ gets deleted, and
+# losing the CA means reflashing every board over USB.
+: "${BOAT_KEYS_DIR:=${HOME}/.local/share/boat-update-keys}"
 
 # --- Image to build -------------------------------------------------------
 # Phase 1 (first bootable): core-image-base
@@ -70,5 +80,5 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${BUILD_DIR:=${WORKROOT}/build}"
 : "${FLASH_DIR:=${WORKROOT}/flash}"     # unpacked tegraflash tarball
 
-export YOCTO_BRANCH MACHINE BOOTDEV ROOTFS_SIZE_BYTES AB_LAYOUT IMAGE
+export YOCTO_BRANCH MACHINE BOOTDEV ROOTFS_SIZE_BYTES AB_LAYOUT BOAT_RELEASE BOAT_KEYS_DIR IMAGE
 export REPO_ROOT WORKROOT LAYERS_DIR BUILD_DIR FLASH_DIR

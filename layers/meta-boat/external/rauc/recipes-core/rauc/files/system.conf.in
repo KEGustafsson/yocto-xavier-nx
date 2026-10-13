@@ -1,0 +1,43 @@
+# RAUC system configuration for the boat computer's A/B layout. Generated at
+# build time by meta-boat (external/rauc/recipes-core/rauc); see
+# docs/plans/ab-os-updates.md sections 5.6 and 5.7.
+
+[system]
+compatible=@COMPATIBLE@
+bootloader=grub
+grubenv=/boot/efi/EFI/BOOT/grubenv
+# On the shared DATA partition; rauc.service waits for /data.
+data-directory=/data/rauc
+# Only verity bundles: dm-verity protects the payload after the signature
+# check, so nothing can change between check and use.
+bundle-formats=-plain
+@MIN_BUNDLE_VERSION@
+
+[keyring]
+path=/etc/rauc/ca.cert.pem
+# The board has no RTC and may read 1970: check certificates at the time
+# the bundle was signed (plan 5.7 lists what that trades away).
+use-bundle-signing-time=true
+check-purpose=codesign
+
+[handlers]
+pre-install=/usr/lib/boat-rauc/pre-install
+post-install=/usr/lib/boat-rauc/post-install
+
+[streaming]
+# Streaming (plan Phase 6) runs its HTTP side as this unprivileged user.
+sandbox-user=rauc-stream
+
+# The slots, by NVMe partition number; the pre-install handler checks each
+# one's GPT name before anything is written.
+[slot.rootfs.0]
+device=@DISK@p@PARTNUM_A@
+type=ext4
+bootname=A
+resize=true
+
+[slot.rootfs.1]
+device=@DISK@p@PARTNUM_B@
+type=ext4
+bootname=B
+resize=true

@@ -3,8 +3,9 @@
 
     scripts/test-ab-scripts.py        # needs grub-editenv (grub-common)
 
-boat-grubenv-guard and boat-ab-commit decide, on a board nobody is
-watching, which slot stays bootable and what GRUB will try next. shellcheck only proves they parse. This runs each one,
+boat-grubenv-guard, boat-ab-commit and RAUC's pre/post-install handlers
+decide, on a board nobody is watching, which slot stays bootable and what
+GRUB will try next. shellcheck only proves they parse. This runs each one,
 as shipped, against a scratch directory standing in for the board - its
 /proc/cmdline, /proc/mounts, the ESP with a real grubenv written by the real
 grub-editenv, the GPT names blkid reports - and checks what it writes back
@@ -27,6 +28,8 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAYER = os.path.join(HERE, "..", "layers", "meta-boat")
 AB_FILES = os.path.join(LAYER, "recipes-boat", "ab-boot", "files")
+RAUC_FILES = os.path.join(LAYER, "external", "rauc", "recipes-boat",
+                          "boat-rauc", "files")
 
 DISK = "/dev/nvme0n1"
 PARTS = {"1": "APP", "2": "APP_b", "12": "esp", "17": "SWAP", "18": "DATA"}
@@ -119,7 +122,9 @@ grep -qx "$last" %s/mountpoints
         assert "@" not in lib.replace("$@", ""), "lib.sh has an unfilled placeholder"
         self.write("lib.sh", lib)
         for src_dir, name in ((AB_FILES, "boat-grubenv-guard.sh"),
-                              (AB_FILES, "boat-ab-commit.sh")):
+                              (AB_FILES, "boat-ab-commit.sh"),
+                              (RAUC_FILES, "boat-rauc-pre-install.sh"),
+                              (RAUC_FILES, "boat-rauc-post-install.sh")):
             text = slurp(os.path.join(src_dir, name))
             for old, new in (("/usr/lib/boat-ab/lib.sh", r + "/lib.sh"),
                              ("/proc/mounts", r + "/proc/mounts"),
@@ -150,11 +155,19 @@ grep -qx "$last" %s/mountpoints
             return f.read()
 
 
+RAUC_TARGET_B = {"RAUC_TARGET_SLOTS": "2", "RAUC_SLOT_BOOTNAME_2": "B",
+                 "RAUC_SLOT_DEVICE_2": DISK + "p2",
+                 "RAUC_SLOT_BOOTNAME_1": "A", "RAUC_SLOT_DEVICE_1": DISK + "p1",
+                 "RAUC_META_BOAT_L4T": "35.6.4",
+                 "RAUC_META_BOAT_DOCKER": "24.0.5", "RAUC_META_BOAT_RELEASE": "1.1.0"}
+
+
 def case(name, script, board, expect_rc, want_env=None, want_bak_equal=None,
-         says=(), unchanged=False, extra_env=None):
+         says=(), unchanged=False, extra_env=None, files=None):
+    """files: {path relative to the board: a regex its contents must match}."""
     return dict(name=name, script=script, board=board, expect_rc=expect_rc,
                 want_env=want_env, want_bak_equal=want_bak_equal, says=says,
-                unchanged=unchanged, extra_env=extra_env)
+                unchanged=unchanged, extra_env=extra_env, files=files or {})
 
 
 CASES = [
@@ -204,6 +217,70 @@ CASES = [
          "boat-ab-commit.sh",
          dict(cmdline="root=/dev/nvme0n1p1", env=env_with()),
          0, unchanged=True, says=["outside GRUB"]),
+    # --- RAUC pre-install handler -----------------------------------------
+    # RAUC can still refuse the bundle after this handler, so it may only
+    # mark the target not committed - never unusable.
+    case("pre-install: marks the target not committed - and only that - in both copies",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with()),
+         0, want_env=env_with(B_COMMITTED=0),
+         want_bak_equal=True, says=["installing 1.1.0 into slot\\(s\\) B"],
+         extra_env=RAUC_TARGET_B),
+    case("pre-install: refuses during a trial",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A boat.trial=1", env=env_with(A_COMMITTED=0)),
+         1, unchanged=True, says=["on trial"], extra_env=RAUC_TARGET_B),
+    case("pre-install: refuses outside GRUB",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="root=/dev/nvme0n1p1", env=env_with()),
+         1, unchanged=True, says=["did not come through GRUB"],
+         extra_env=RAUC_TARGET_B),
+    case("pre-install: refuses without /data on DATA",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(),
+              mounts=["%sp12 /boot/efi vfat rw 0 0" % DISK]),
+         1, unchanged=True, says=["/data is not mounted"],
+         extra_env=RAUC_TARGET_B),
+    case("pre-install: refuses another L4T release",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with()),
+         1, unchanged=True, says=["USB reflash"],
+         extra_env=dict(RAUC_TARGET_B, RAUC_META_BOAT_L4T="36.4.0")),
+    case("pre-install: refuses a bundle without [meta.boat]",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with()),
+         1, unchanged=True, says=["no \\[meta.boat\\]"],
+         extra_env=dict(RAUC_TARGET_B, RAUC_META_BOAT_L4T="")),
+    case("pre-install: refuses to write the running slot",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(ORDER="B A")),
+         1, unchanged=True, says=["the one running"], extra_env=RAUC_TARGET_B),
+    case("pre-install: refuses a disk that does not match the layout",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(),
+              parts=dict(PARTS, **{"2": "APP_b_old"})),
+         1, unchanged=True, says=["does not match"], extra_env=RAUC_TARGET_B),
+    case("pre-install: refuses a target slot RAUC would write elsewhere",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with()),
+         1, unchanged=True, says=["configured as %sp3" % DISK],
+         extra_env=dict(RAUC_TARGET_B, RAUC_SLOT_DEVICE_2=DISK + "p3")),
+    case("pre-install: warns, but goes on, for a new Docker major version",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with()),
+         0, want_env=env_with(B_COMMITTED=0),
+         says=["Docker 24 -> 25"],
+         extra_env=dict(RAUC_TARGET_B, RAUC_META_BOAT_DOCKER="25.0.1")),
+    # --- RAUC post-install handler ----------------------------------------
+    case("post-install: grubenv.bak follows RAUC's activation; history written",
+         "boat-rauc-post-install.sh",
+         dict(cmdline="rauc.slot=A",
+              env=env_with(ORDER="B A", B_OK=1, B_TRY=0, B_COMMITTED=0),
+              bak=env_with(B_OK=0, B_COMMITTED=0)),
+         0, want_env=env_with(ORDER="B A", B_OK=1, B_TRY=0, B_COMMITTED=0),
+         want_bak_equal=True, says=["installed 1.1.0 into slot\\(s\\) B - it boots as a trial"],
+         extra_env=RAUC_TARGET_B,
+         files={"data/boat-update/history": r"^\S+ installed 1\.1\.0 into slot\(s\) B, from slot A$"}),
 ]
 
 
@@ -237,6 +314,11 @@ def check(c, root):
             errors.append("grubenv is no longer a 1 KiB block")
     if c["want_bak_equal"] and board.raw(bak_path) != board.raw():
         errors.append("grubenv.bak is not a copy of grubenv")
+    for rel, pattern in c["files"].items():
+        path = os.path.join(root, rel)
+        text = slurp(path) if os.path.exists(path) else None
+        if text is None or not re.search(pattern, text, re.M):
+            errors.append("%s does not match %r: %r" % (rel, pattern, text))
     leftovers = [f for f in os.listdir(os.path.dirname(board.grubenv))
                  if f not in ("grubenv", "grubenv.bak")]
     if leftovers:
