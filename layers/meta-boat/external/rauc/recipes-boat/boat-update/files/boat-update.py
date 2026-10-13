@@ -1053,6 +1053,7 @@ class BoundHTTPS(http.client.HTTPSConnection):
 
 
 RANGE_RE = re.compile(r"bytes=(\d+)-(\d+)$")
+CONTENT_RANGE_RE = re.compile(r"bytes\s+(\d+)-(\d+)/(?:\d+|\*)", re.IGNORECASE)
 RELAY_MAX = 64 << 20      # far above any one request RAUC's streaming client makes
 
 
@@ -1063,8 +1064,12 @@ def start_relay(conf, url, dev):
     no redirect followed (RAUC's own client would follow one, to http too),
     over the link that was checked as not metered and nothing else, with
     the client certificate - which RAUC never sees, so the key stays
-    root-only. Anything but a 206 of the size asked for is a 502 to RAUC,
-    which then fails the install. Returns (server, the URL to hand RAUC)."""
+    root-only. Anything but a 206 of exactly the range asked for (its
+    Content-Range naming the same offsets, its body that long) is a 502 to
+    RAUC, which then fails the install: RAUC checks Content-Range only on
+    its first request, so bytes from elsewhere in the bundle would be
+    written at the offset it asked for. Returns (server, the URL to hand
+    RAUC)."""
     u = urllib.parse.urlsplit(url)
     ctx = ssl.create_default_context()
     if conf["BOAT_UPDATE_CLIENT_CERT"]:
@@ -1101,11 +1106,16 @@ def start_relay(conf, url, dev):
                     local.conn = None
                     if attempt == 2:
                         return self.refuse(502, "the channel did not answer: %s" % e)
-            if resp.status != 206 or len(body) > want:
+            got = CONTENT_RANGE_RE.fullmatch(resp.getheader("Content-Range", "").strip())
+            if resp.status != 206 or len(body) != want or not got \
+                    or tuple(map(int, got.group(1, 2))) != tuple(map(int, m.group(1, 2))):
                 conn.close()
                 local.conn = None
-                return self.refuse(502, "the channel answered HTTP %d%s - not passed on to RAUC"
-                                   % (resp.status, " (a redirect)" if 300 <= resp.status < 400 else ""))
+                if resp.status != 206:
+                    why = "HTTP %d%s" % (resp.status, " (a redirect)" if 300 <= resp.status < 400 else "")
+                else:
+                    why = "%d bytes as %r for %s" % (len(body), resp.getheader("Content-Range"), m.group(0))
+                return self.refuse(502, "the channel answered %s - not passed on to RAUC" % why)
             self.send_response_only(206)
             for name in ("Content-Range", "Date", "Last-Modified"):
                 if resp.getheader(name):

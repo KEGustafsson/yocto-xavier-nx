@@ -923,9 +923,10 @@ headers (review M3).
     relay fetches each of RAUC's Range requests from the verified URL the
     way `boat-update`'s downloads do: `https` only, no redirect followed,
     with the client certificate, and bound (`SO_BINDTODEVICE`) to the link
-    that was checked as not metered. Anything but a 206 of the size asked
-    for is a 502 to RAUC, which fails the install; a link that goes away
-    fails it too. RAUC gets no TLS options, so the key stays root-only and
+    that was checked as not metered. Anything but a 206 of exactly the
+    range asked for (same `Content-Range` offsets, that many bytes) is a
+    502 to RAUC, which fails the install; RAUC checks `Content-Range` only
+    on its first request. A link that goes away fails it too. RAUC gets no TLS options, so the key stays root-only and
     nothing credential-bearing is on any command line.
   - The bundle URL is the one from the verified index, on the channel the
     offer was checked on. A preflight request for the first byte refuses a
@@ -1593,8 +1594,9 @@ Claims the review checked and confirmed:
 | a stream skipped the download path's checks: a failed release, or one no newer than the running slot (overwriting the rollback), was streamed; a streamed release's offer outlived its commit | a stream takes only an offer that is newer and not failed; housekeeping drops an offer that is neither |
 | an install that failed left the previous install's record in place, so the slot it had marked bad was recorded as that release failing a trial | each install forgets the previous record before RAUC writes the slot |
 | a stream fetched the offer's bundle by name from whatever channel was configured by then, though it was checked on another (CodeRabbit) | the offer records its channel and URL; a stream refuses an offer checked elsewhere |
-| RAUC's streaming client follows redirects, to `http` too, so a channel could send the board's requests elsewhere - its client certificate to another host, or GETs into the boat's own network (CodeRabbit) | RAUC streams from `boat-update`'s relay on `127.0.0.1`, which follows no redirect and passes on nothing but a 206 of the size asked for; a preflight also refuses a redirecting or Range-less channel before RAUC marks the slot unbootable |
+| RAUC's streaming client follows redirects, to `http` too, so a channel could send the board's requests elsewhere - its client certificate to another host, or GETs into the boat's own network (CodeRabbit) | RAUC streams from `boat-update`'s relay on `127.0.0.1`, which follows no redirect and passes on nothing but a 206 of exactly the range asked for; a preflight also refuses a redirecting or Range-less channel before RAUC marks the slot unbootable |
 | the metered-link check was made once, when a stream starts, and RAUC's client cannot be bound to a link: a route that moved to cellular mid-stream would be used (CodeRabbit) | the relay's connections are bound to the checked link (`SO_BINDTODEVICE`); if it goes away, the stream fails and the board stays on its slot |
+| the relay passed on any 206 no longer than the range asked for, and RAUC checks `Content-Range` only on its first request: bytes from elsewhere in the bundle would be written at the offset RAUC asked for (CodeRabbit) | the relay passes on only a 206 whose `Content-Range` names the offsets asked for and whose body is exactly that long; anything else is a 502 |
 
 ### Your review
 

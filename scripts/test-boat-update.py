@@ -94,8 +94,10 @@ class Channel(http.server.SimpleHTTPRequestHandler):
     bundle stop after that many bytes, like a link that drops. mode makes it
     misbehave: "chunked-endless" (the index) and "chunked-oversize" (a
     bundle) send a chunked body far past the file - no Content-Length for
-    curl to check - "ignore-range" answers a Range request with 200, and
-    "redirect" sends a bundle request somewhere else."""
+    curl to check - "ignore-range" answers a Range request with 200,
+    "redirect" sends a bundle request somewhere else, and "shifted-range"
+    and "short-range" answer a bundle's Range request with a 206 for other
+    offsets or fewer bytes."""
     cut_after = None
     root = None
     mode = None
@@ -148,6 +150,10 @@ class Channel(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Range", "bytes */%d" % size)
                 self.end_headers()
                 return
+            if fpath.endswith(".raucb") and Channel.mode == "shifted-range":
+                start, end = start + 1, min(end + 1, size - 1)
+            elif fpath.endswith(".raucb") and Channel.mode == "short-range":
+                end -= 1
             self.send_response(206)
             self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
         else:
@@ -628,7 +634,9 @@ esac
                 relay.server_close()
         check("the relay answers a Range request from the channel", through_relay() == "206")
         for mode, what in (("redirect", "a redirect the channel sends later"),
-                           ("ignore-range", "a full body instead of the range")):
+                           ("ignore-range", "a full body instead of the range"),
+                           ("shifted-range", "a range other than the one asked for"),
+                           ("short-range", "a range shorter than the one asked for")):
             Channel.mode = mode
             got = through_relay()
             Channel.mode = None

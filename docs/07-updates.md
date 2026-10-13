@@ -262,8 +262,9 @@ RAUC never talks to the channel itself: it streams from a relay inside
 URL the way `boat-update`'s own downloads do - `https` only, no redirect
 ever followed, with the client certificate (which RAUC never sees, so the
 key stays root-only), and only over the link that was checked as not
-metered. If that link goes away mid-stream, the stream fails and the board
-stays on its slot; it never moves to another route. On top of that:
+metered. It passes on only an answer for exactly the range RAUC asked for.
+If that link goes away mid-stream, the stream fails and the board stays on
+its slot; it never moves to another route. On top of that:
 
 - before RAUC starts, `boat-update` asks for the bundle's first byte and
   refuses to stream from a channel that redirects it or ignores Range
