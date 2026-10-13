@@ -225,11 +225,20 @@ if [ "$BOAT_SLEEP_DELAY" -gt 0 ]; then
     sleep "$BOAT_SLEEP_DELAY"
 fi
 
+# An A/B update on trial must not sleep until it is committed, --force or
+# not: its attempt is already counted, and a battery that dies overnight
+# would cost the update (docs/plans/ab-os-updates.md 5.4).
+if systemctl is-active --quiet boat-trial-inhibit.service 2>/dev/null; then
+    die "an A/B update is on trial and not committed yet - refusing to sleep until it is (see 'boat-update status'; it takes a minute or two)"
+fi
+
 # An inhibitor lock - the XFCE power manager holding one on the helm
 # display, say - makes logind refuse, and `systemctl suspend` says so and
 # exits non-zero, which is what the SSH caller sees. `systemd-inhibit
 # --list` names the holder. --force takes the request past them.
+# systemctl skips block inhibitors for root unless told to check them, and
+# this always runs as root - hence --check-inhibitors=yes.
 if [ "$FORCE" = "1" ]; then
     exec systemctl suspend -i
 fi
-exec systemctl suspend
+exec systemctl suspend --check-inhibitors=yes

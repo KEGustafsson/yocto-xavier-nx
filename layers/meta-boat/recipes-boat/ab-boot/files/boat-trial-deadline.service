@@ -1,0 +1,8 @@
+[Unit]
+Description=Fail an A/B trial that has not committed in time
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
+ConditionKernelCommandLine=boat.trial=1
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/boat-commit --deadline

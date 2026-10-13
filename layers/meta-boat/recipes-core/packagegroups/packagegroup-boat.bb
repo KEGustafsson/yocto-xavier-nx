@@ -303,14 +303,14 @@ RDEPENDS:${PN}-hmi = "\
 # alternatives (RCONFLICTS in watchdog_5.16.bb), not complementary - pick
 # one. `watchdog` is the right choice here: it can run custom health checks,
 # not just keep the hardware watchdog fed.
-# RAUC (A/B updates) needs the meta-rauc layer, not yet fetched by this
-# project - see docs/05 "Updates (not implemented - future direction)"; add it
-# as a deliberate follow-up.
+# An A/B build (BOAT_AB_LAYOUT, docs/plans/ab-os-updates.md D8) leaves it out:
+# there systemd's RuntimeWatchdogSec is the one /dev/watchdog opener (boat-ab-
+# boot), and two openers of one device cannot both work.
 # fake-hwclock is likewise not packaged in these kirkstone-era layers; fit a
 # hardware RTC (docs/05) or backport the recipe if the clock-at-boot gap
 # (1970 until the first NTP sync) matters before that lands.
 RDEPENDS:${PN}-reliability = "\
-    watchdog \
+    ${@'' if d.getVar('BOAT_AB_LAYOUT') == '1' else 'watchdog'} \
 "
 
 # --- Field diagnostics / serviceability -------------------------------------
