@@ -48,6 +48,15 @@
 # do_image_ext4 rather than producing something that won't boot.
 : "${ROOTFS_SIZE_BYTES:=17179869184}"
 
+# --- A/B OS updates (EXPERIMENTAL) -----------------------------------------
+# 1 = two rootfs slots (APP + APP_b, each ROOTFS_SIZE_BYTES), GRUB on the ESP
+# picking the slot with automatic fallback, and SWAP + DATA partitions -
+# docs/plans/ab-os-updates.md. Off by default until the plan's Phase 7
+# validation has passed on hardware. Changing it changes the partition
+# layout: the first flash after switching it on (or off) is a full
+# 05-flash-nvme.sh, and it ERASES the SSD. Needs BOOTDEV on NVMe.
+: "${AB_LAYOUT:=0}"
+
 # --- Image to build -------------------------------------------------------
 # Phase 1 (first bootable): core-image-base
 # Phase 2 (boat computer):  boat-image   (provided by meta-boat)
@@ -61,5 +70,5 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${BUILD_DIR:=${WORKROOT}/build}"
 : "${FLASH_DIR:=${WORKROOT}/flash}"     # unpacked tegraflash tarball
 
-export YOCTO_BRANCH MACHINE BOOTDEV ROOTFS_SIZE_BYTES IMAGE
+export YOCTO_BRANCH MACHINE BOOTDEV ROOTFS_SIZE_BYTES AB_LAYOUT IMAGE
 export REPO_ROOT WORKROOT LAYERS_DIR BUILD_DIR FLASH_DIR

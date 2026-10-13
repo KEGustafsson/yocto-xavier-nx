@@ -244,6 +244,28 @@ fi
 [ "$PT_TYPE" = "gpt" ] \
     || die "$DISK has a '${PT_TYPE:-unknown}' partition table, not GPT - not handled"
 
+# Never on an A/B disk (docs/plans/ab-os-updates.md 5.2). There APP is not the
+# last partition and must stay exactly as large as APP_b: every update writes
+# a slot-sized image into whichever one is inactive. This script's swap step
+# would shrink APP to carve swap from its tail, and its grow step assumes APP
+# owns the end of the disk. On that layout swap and /data are partitions of
+# their own, provisioned by boat-storage. Checked in every mode, report
+# included, because a report that promises a grow is wrong there too.
+# lsblk answers from udev (works unprivileged); blkid -p is the root-only
+# fallback, as for PTTYPE above.
+AB_DISK=0
+if lsblk -nro PARTLABEL "$DISK" 2>/dev/null | grep -qx 'APP_b'; then
+    AB_DISK=1
+else
+    for p in $(lsblk -nro NAME "$DISK" 2>/dev/null); do
+        if [ "$(blkid -p -o value -s PART_ENTRY_NAME "/dev/$p" 2>/dev/null || true)" = "APP_b" ]; then
+            AB_DISK=1
+        fi
+    done
+fi
+[ "$AB_DISK" = 0 ] \
+    || die "$DISK has an APP_b partition: this is an A/B layout, where the rootfs slots have a fixed size and swap and /data are already partitions - nothing here applies"
+
 DISK_SECTORS="$(cat "/sys/class/block/${DISK_KNAME}/size")"
 PART_START="$(cat "/sys/class/block/${PART_KNAME}/start")"
 PART_SECTORS="$(cat "/sys/class/block/${PART_KNAME}/size")"

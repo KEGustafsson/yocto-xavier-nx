@@ -1,9 +1,10 @@
 # Plan: A/B OS updates with automatic fallback
 
-**Status: DRAFT v4 for review. Nothing here is implemented yet.** This is the
-plan to review *before* any code is written. Section 10 lists the decisions
-that need an answer first. Section 11 records what each review pass found and
-how the plan answers it.
+**Status: v4, being implemented phase by phase (section 6).** Every
+decision in section 10 was taken at its recommendation. Phases 0 and 1 are
+in the repository, behind `AB_LAYOUT` (off by default); their exit tests
+need the bench board. Section 11 records what each review pass found and how
+the plan answers it.
 
 Scope: signed, power-fail-safe OS updates for the boat computer (Xavier NX
 devkit, SD-slot module P3668-0000, rootfs on NVMe, no SD card), delivered
@@ -211,8 +212,10 @@ boot this kernel correctly.
 
 **Getting GRUB into the path** (review finding B1):
 
-- Install an `L4TConfiguration` overlay with `L4TDefaultBootMode = 0` in
-  place of meta-tegra's (`TEGRA_BOOTCONTROL_OVERLAYS`).
+- Set `L4TDefaultBootMode = 0` in the `L4TConfiguration` overlay that
+  `edk2-firmware-tegra` builds: an `fdtput` on the built `.dtbo`, checked
+  with `fdtget`. This is one property, so it is rewritten in place rather
+  than replacing meta-tegra's overlay (`TEGRA_BOOTCONTROL_OVERLAYS`).
 - Add `boat-bootmode-guard`, which runs every boot and rewrites the
   variable with efivarfs if it is not 0. The DT only seeds an absent
   variable, so existing boards and "reset to defaults" in the UEFI menu
@@ -969,7 +972,8 @@ the steps that change state (items 2-5), each with how to undo it.
    - NetworkManager reports `Metered` correctly for the boat's cellular
      modem, for its Wi-Fi, and for any 4G router reached over Ethernet.
 
-**Phase 1: layout, GRUB, slot-aware boot.** Effort: M.
+**Phase 1: layout, GRUB, slot-aware boot.** Effort: M. *Implemented; the
+exit criteria wait for the bench board.*
 
 - **Toggle.** `AB_LAYOUT` in `env.sh` (default **off** until Phase 7). For
   kas, a separate overlay `kas/ab-updates.yml` (static YAML can't read
@@ -1192,11 +1196,20 @@ the steps that change state (items 2-5), each with how to undo it.
 All tests run on hardware, because QEMU cannot emulate Tegra UEFI. Two
 pieces also run off-target:
 
-- **GRUB state machine:** host tests under `qemu-system-aarch64` + AAVMF
-  (generic UEFI). They boot a dummy kernel and assert the `grubenv`
-  transitions for every row of 5.3's table.
-- **Shell logic:** `boat-update`, the handlers and `boat-storage` get
-  host-side tests with `rauc`, `grub-editenv`, `blkid` and `nmcli` mocked.
+- **GRUB state machine:** `scripts/test-grub-ab.py` runs the shipped
+  `grub.cfg` in `grub-emu`, GRUB's own user-space build, from a GPT disk
+  image with a FAT ESP, so `load_env` and `save_env` work on a real
+  `grubenv`. It asserts the slot picked, the kernel command line and the
+  `grubenv` written back for every row of 5.3's table, plus a torn or
+  missing `grubenv`, an ESP that refuses writes and a kernel that fails to
+  load. (`qemu-system-aarch64` + AAVMF was the first idea; `grub-emu` runs
+  the same script without a firmware image, and fits in CI.)
+- **Shell logic:** `boat-update`, the handlers, `boat-storage` and the
+  boot-state scripts get host-side tests with `rauc`, `grub-editenv`,
+  `blkid` and `nmcli` mocked. `scripts/test-ab-scripts.py` runs
+  `boat-grubenv-guard` and the commit step as shipped, against a scratch
+  directory standing in for the board (`/proc`, an ESP with a real
+  `grubenv`, the GPT names).
   The OTA `check`/`download` logic also runs against a local Range-capable
   HTTP server, with cut-offs injected mid-transfer and a tampered index.
 
@@ -1418,10 +1431,18 @@ Claims the review checked and confirmed:
 | an entry appended after `APP_b` without an explicit id is numbered "previous id + 1" by `nvflashxmlparse`, colliding with the kernel partition | `SWAP`/`DATA` get explicit ids; the build verifies every pinned number (5.2) |
 | `boat-grow-rootfs` on an A/B board would wreck `APP_b` | dropped from the A/B image and guarded in Phase 1, not Phase 2 |
 | `loadenv`/`test` are already in OE-core's `GRUB_BUILDIN`; `halt` is never used | `GRUB_BUILDIN` += `regexp echo sleep reboot` |
+| `tegra-bootfiles` has no unpack step, so a layout script listed in `SRC_URI` never reaches `WORKDIR` and the layout task never ran | the task runs the script from the layer, with a file checksum, after `do_configure` |
+| replacing meta-tegra's `L4TConfiguration` overlay means carrying NVIDIA's other defaults too | `fdtput` rewrites only `L4TDefaultBootMode` in the built `.dtbo` (5.1) |
+| `save_env` refuses GRUB's host filesystem in `grub-emu`, so a test against a plain directory proves nothing about the counting | the harness boots from a GPT image with a FAT ESP (7) |
+| POSIX `sh` has no local variables: a `lib.sh` helper's `env` overwrote the guard's own, so a torn `grubenv` was "rebuilt" into a stray file and the good `grubenv.bak` overwritten (found by `test-ab-scripts.py` on its first run) | every helper variable carries an `_ab_` prefix; the harness covers the torn-`grubenv` paths |
+| on vfat, a rename frees the replaced file's clusters at once but writes the moved file's directory entry only at writeback, so for ~30 s `grubenv` points at freed clusters: a power cut then undoes a commit, and `fsck` truncates both copies | the write fsyncs the renamed file itself before the directory |
+| `boot-efi.mount`, which the ESP drop-in amends, only reaches an image through `tegra-redundant-boot` in `MACHINE_EXTRA_RDEPENDS` | `boat-ab-boot` depends on `setup-nv-boot-control-service` itself |
+| `grub-emu` has every module; the board's GRUB has only `GRUB_BUILDIN`, and a missing command only prints an error, so the harness could not see one (`true` was missing) | `test-grub-ab.py` checks every `grub.cfg` command against `GRUB_BUILDIN` and its dependencies; `true` added |
 
 ### Your review
 
-*(Answers to section 10, and anything else, go here before Phase 0 starts.)*
+Every decision in section 10 was taken at its recommendation (D1-D15) when
+the plan was merged, and implementation started with Phase 0.
 
 ---
 

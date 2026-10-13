@@ -1,0 +1,13 @@
+[Unit]
+Description=Keep L4TLauncher handing off to GRUB (A/B slot selection)
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
+ConditionPathIsDirectory=/sys/firmware/efi/efivars
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/boat-bootmode-guard
+
+[Install]
+WantedBy=multi-user.target

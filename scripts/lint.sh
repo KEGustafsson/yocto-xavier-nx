@@ -291,6 +291,50 @@ else
     fail_check "recipe references a file:// that doesn't exist"
 fi
 
+# --- 5. The A/B GRUB state machine, run in GRUB ----------------------------
+# grub.cfg.in decides, with nobody at the console, which OS the boat boots
+# and when it gives up on a new one. grub-script-check (run at build time)
+# only proves it parses; scripts/test-grub-ab.py runs it in grub-emu - GRUB's
+# own script engine and load_env/save_env - against a table of grubenv
+# states and checks the slot, the kernel command line and what it writes
+# back. About 20 seconds, almost all of it grub-emu starting up.
+log "A/B GRUB state machine ..."
+if [[ "${HAVE_PYTHON}" == "0" ]]; then
+    skip_check "python3 not installed - GRUB state machine not run"
+else
+    grub_rc=0
+    python3 scripts/test-grub-ab.py || grub_rc=$?
+    if [[ "${grub_rc}" -eq 0 ]]; then
+        log "  GRUB state machine: clean"
+    elif [[ "${grub_rc}" -eq 77 ]]; then
+        skip_check "grub-emu or a disk-image tool is missing (apt-get install grub-emu gdisk dosfstools mtools)"
+    else
+        fail_check "the A/B GRUB state machine failed a scenario"
+    fi
+fi
+
+# --- 5b. The A/B on-board scripts, run against a fake board -----------------
+# The grubenv guard and the commit step decide, unattended, which slot stays
+# bootable. scripts/test-ab-scripts.py runs them as shipped against a scratch
+# directory standing in for the board (/proc, the ESP with a real grubenv,
+# the GPT names) and checks what they write and what they refuse. This is
+# the check that caught POSIX sh's missing local variables clobbering the
+# guard's own state.
+log "A/B on-board scripts ..."
+if [[ "${HAVE_PYTHON}" == "0" ]]; then
+    skip_check "python3 not installed - A/B on-board scripts not run"
+else
+    ab_rc=0
+    python3 scripts/test-ab-scripts.py || ab_rc=$?
+    if [[ "${ab_rc}" -eq 0 ]]; then
+        log "  A/B on-board scripts: clean"
+    elif [[ "${ab_rc}" -eq 77 ]]; then
+        skip_check "grub-editenv is missing (apt-get install grub-common)"
+    else
+        fail_check "an A/B on-board script failed a case"
+    fi
+fi
+
 # --- Result ----------------------------------------------------------------
 echo
 [[ "${SKIPPED}" -gt 0 ]] && warn "${SKIPPED} check(s) skipped - install the tools above, or set LINT_STRICT=1 to treat this as failure"

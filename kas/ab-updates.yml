@@ -1,0 +1,39 @@
+# Optional kas fragment: A/B OS updates (EXPERIMENTAL).
+#
+#   AB_LAYOUT=1 scripts/build-kas.sh            # the wrapper adds this file
+#   kas build kas/xavier-nx-nvme.yml:kas/ab-updates.yml
+#
+# Two rootfs slots (APP + APP_b) with GRUB on the ESP picking one and falling
+# back automatically, plus SWAP and DATA partitions - the kas equivalent of
+# AB_LAYOUT=1 for scripts/02-configure-build.sh, which writes the same lines.
+# docs/plans/ab-os-updates.md is the design; read it first.
+#
+# Switching this on (or off) changes the partition layout: the first flash
+# afterwards is a full scripts/05-flash-nvme.sh, and it ERASES the SSD.
+header:
+  version: 14
+
+local_conf_header:
+  # kas writes these entries sorted by key, and this one has to come AFTER
+  # the main config's "nvme-boot": TEGRA_EXTERNAL_DEVICE_SECTORS below
+  # replaces the single-slot value set there.
+  nvme-boot-ab: |
+    # The switch every meta-boat A/B change is gated on (conf/layer.conf).
+    BOAT_AB_LAYOUT = "1"
+    # The NVMe layout meta-boat GENERATES from NVIDIA's
+    # flash_l4t_nvme_rootfs_ab.xml - see
+    # recipes-bsp/tegra-binaries/tegra-bootfiles_%.bbappend. Deliberately NOT
+    # USE_REDUNDANT_FLASH_LAYOUT, which would tie the rootfs slot to the
+    # firmware boot chain (plan section 3).
+    PARTITION_LAYOUT_EXTERNAL = "boat-nvme-ab.xml"
+    # Two rootfs slots, SWAP, DATA at its minimum (it fills the rest of the
+    # real SSD at flash time), and 2 GiB for the fixed partitions.
+    TEGRA_EXTERNAL_DEVICE_SECTORS = "${@(2 * int(d.getVar('ROOTFSPART_SIZE')) + int(d.getVar('BOAT_AB_SWAP_SIZE')) + int(d.getVar('BOAT_AB_DATA_MIN_SIZE')) + 2147483648) // 512}"
+    # Puts /boot/Image and /boot/initrd into the rootfs, so every slot
+    # carries its own kernel; GRUB loads them from the slot it picks.
+    UBOOT_EXTLINUX = "1"
+    # The ext4 image at its content size rather than the whole partition:
+    # only the image's bytes cross the flasher's USB link and an update's
+    # network link. The maximum fails a build that would not fit a slot.
+    IMAGE_ROOTFS_SIZE = "1048576"
+    IMAGE_ROOTFS_MAXSIZE = "${@int(d.getVar('ROOTFSPART_SIZE')) // 1024}"
