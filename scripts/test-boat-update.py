@@ -93,7 +93,8 @@ class Channel(http.server.SimpleHTTPRequestHandler):
     bundle stop after that many bytes, like a link that drops. mode makes it
     misbehave: "chunked-endless" (the index) and "chunked-oversize" (a
     bundle) send a chunked body far past the file - no Content-Length for
-    curl to check - and "ignore-range" answers a Range request with 200."""
+    curl to check - "ignore-range" answers a Range request with 200, and
+    "redirect" sends a bundle request somewhere else."""
     cut_after = None
     root = None
     mode = None
@@ -122,6 +123,12 @@ class Channel(http.server.SimpleHTTPRequestHandler):
         fpath = self.translate_path(self.path)
         if not os.path.isfile(fpath):
             self.send_error(404)
+            return
+        if Channel.mode == "redirect" and fpath.endswith(".raucb"):
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:9/elsewhere.raucb")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
         if (Channel.mode == "chunked-endless" and fpath.endswith("index.p7")) or \
                 (Channel.mode == "chunked-oversize" and fpath.endswith(".raucb")):
@@ -513,8 +520,12 @@ esac
         with open(board + "/data/boat-update/failed-versions", "w"):
             pass
         offer, err = run_check()
-        write(board + "/data/boat-update/client.key", "not a real key\n", 0o600)
-        write(board + "/data/boat-update/client.crt", "not a real cert\n", 0o600)
+        # A real client certificate: the preflight's curl loads it.
+        make_leaf(keys, "tlsca", "client", "clientAuth", cn="boat")
+        key_pem = open(keys + "/client.key").read()
+        write(board + "/data/boat-update/client.key", key_pem, 0o600)
+        write(board + "/data/boat-update/client.crt", open(keys + "/client.pem").read(), 0o600)
+        key_line = key_pem.splitlines()[1]
         write(binp + "/chgrp", "#!/bin/sh\necho \"chgrp $*\" >> %s/chgrp.log\n" % board, 0o755)
         write(board + "/rauc-serves", "1.2.0")
         conf = bu.load_conf()
@@ -537,7 +548,7 @@ esac
         check("a streamed install hands RAUC the verified URL and only file names",
               err is None and "rauc install --tls-cert=%s/data/boat-update/client.crt --tls-key=%s"
               "/data/boat-update/client.key %s" % (board, board, want_url) in log
-              and "not a real" not in log, "%s\n%s" % (err, log))
+              and key_line not in log, "%s\n%s" % (err, log))
         chg = open(board + "/chgrp.log").read()
         check("the client certificate and key are both handed to RAUC's streaming sandbox group",
               all("chgrp rauc-stream %s/data/boat-update/client.%s" % (board, f) in chg
@@ -579,6 +590,21 @@ esac
               err is not None and "nothing newer" in err and not open(board + "/rauc.log").read()
               and "offer" not in bu.load_state(), str(err))
         write(board + "/etc/boat-release", "1.0.0\n")
+        offer, err = run_check()
+        for mode, what, why in (("redirect", "redirects the bundle", "redirects"),
+                                ("ignore-range", "ignores Range requests", "Range")):
+            Channel.mode = mode
+            err = stream()
+            Channel.mode = None
+            check("a channel that %s is refused before RAUC starts" % what,
+                  err is not None and why in err and not open(board + "/rauc.log").read(), str(err))
+        write(board + "/data/boat-update/channel.conf", "BOAT_UPDATE_CHANNEL=testing\n")
+        conf = bu.load_conf()
+        err = stream()
+        os.unlink(board + "/data/boat-update/channel.conf")
+        conf = bu.load_conf()
+        check("an offer checked on another channel is not streamed from this one",
+              err is not None and "channel has changed" in err and not open(board + "/rauc.log").read(), str(err))
         del os.environ["BOAT_UPDATE_INNER"]
         check("rauc install options are built without the key itself",
               bu.stream_options({"BOAT_UPDATE_CLIENT_CERT": "", "BOAT_UPDATE_CLIENT_KEY": ""}) == [])

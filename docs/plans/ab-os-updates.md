@@ -920,9 +920,16 @@ headers (review M3).
   `rauc install` waits for RAUC's `Completed` signal and fails if the
   service goes away mid-install.
   - `--tls-no-verify` and `-H` header credentials are never used.
-  - The bundle URL is the one from the verified index. RAUC's streaming
-    client follows redirects (`nbd.c`), so the installed release is
-    checked against the index afterwards (5.7).
+  - The bundle URL is the one from the verified index, on the channel the
+    offer was checked on. RAUC's streaming client follows redirects
+    (`nbd.c`), so a preflight request for the first byte - no redirects,
+    the checked link - refuses a redirecting or Range-less channel before
+    RAUC starts, and the installed release is checked against the index
+    afterwards (5.7).
+  - The metered-link check is made once, at the start: RAUC's client
+    cannot be bound to a link, and RAUC 1.13 cannot cancel a running
+    install. Where the route can fail over to cellular by itself,
+    download-then-install is the choice.
   - RAUC reads only the blocks it cannot find locally in either slot.
     RAUC's documentation reports **about 10% of the bundle** crossing the
     link for a small ext4 change.
@@ -1583,6 +1590,9 @@ Claims the review checked and confirmed:
 | a stream installed whatever signed bundle the channel served: RAUC checks the signature, not that it is the release the index offered, and its streaming client follows redirects - an older, vulnerable release could be installed | after the stream, the slot must hold the index's release (RAUC's slot status), or it is marked bad (`ORDER` back, `OK=0`) before any reboot |
 | a stream skipped the download path's checks: a failed release, or one no newer than the running slot (overwriting the rollback), was streamed; a streamed release's offer outlived its commit | a stream takes only an offer that is newer and not failed; housekeeping drops an offer that is neither |
 | an install that failed left the previous install's record in place, so the slot it had marked bad was recorded as that release failing a trial | each install forgets the previous record before RAUC writes the slot |
+| a stream fetched the offer's bundle by name from whatever channel was configured by then, though it was checked on another (CodeRabbit) | the offer records its channel and URL; a stream refuses an offer checked elsewhere |
+| RAUC's streaming client follows redirects, to `http` too, so a channel could send the board's requests elsewhere - and a server without Range support was found only after RAUC had marked the slot unbootable (CodeRabbit) | a preflight request for the first byte, the way downloads make theirs (no redirects, `https` only, the checked link), refuses both before RAUC starts; later requests are covered by the release check after the stream |
+| the metered-link check is made once, when a stream starts; RAUC's client cannot be bound to that link (CodeRabbit) | documented: RAUC 1.13 cannot cancel a running install, so a route that moves to a metered link mid-stream is used; download-then-install, bound to its link, is the choice for automatic cellular failover |
 
 ### Your review
 

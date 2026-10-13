@@ -260,11 +260,26 @@ fraction of the bundle; RAUC's own documentation suggests about a tenth.
 It starts from the same verified URL from the index and uses the same
 client certificate (RAUC is handed file names only, never key material).
 Unlike `boat-update`'s own downloads, RAUC's streaming client follows
-redirects, and it checks only the bundle's signature. So after the stream,
-the other slot must hold exactly the release the index offered; otherwise
-it is marked bad before anything boots it, and the install fails. A stream
-is offered only what a download would be: newer than the running release,
-and not a release that failed a trial here.
+redirects (to `http` too), and it checks only the bundle's signature. So:
+
+- before RAUC starts, `boat-update` asks for the bundle's first byte the
+  way a download does - no redirects, the same client certificate, over the
+  link it checked - and refuses to stream from a channel that redirects it
+  or ignores Range requests;
+- after the stream, the other slot must hold exactly the release the index
+  offered; otherwise it is marked bad before anything boots it, and the
+  install fails.
+
+A stream is offered only what a download would be: newer than the running
+release, not a release that failed a trial here, and checked on the channel
+that is configured now (after changing channels, `check` again).
+
+One limit: the metered-link check happens when the stream starts. RAUC's
+streaming client cannot be tied to that link, and RAUC 1.13 cannot cancel an
+install once it has started - so if the default route moves to a metered
+link mid-stream, the stream carries on over it. On a boat whose router fails
+over to cellular by itself, download-then-install (bound to the link it
+checked, and resumable) is the safe choice.
 
 | | download, then install | `install --stream` |
 |---|---|---|
@@ -288,8 +303,8 @@ To measure: note the default-route interface's RX bytes
 
 Streaming needs the channel's Range support (the same check as above) and
 kernel NBD support, which the A/B image builds in. A server without Range
-support makes the install fail with a message saying so; download-then-
-install is the fallback.
+support is refused before RAUC starts, with a message saying so; download-
+then-install is the fallback.
 
 ## Storage on the A/B layout
 

@@ -646,6 +646,7 @@ def do_check(conf, state, quiet=False):
     state["last_check"] = int(time.time())
     state["published"] = idx["published"]
     state["channel"] = conf["BOAT_UPDATE_CHANNEL"]
+    state["channel_url"] = conf["BOAT_UPDATE_URL"]
     state["message"] = message
     state["notes"] = idx["notes"]
     if offer:
@@ -653,7 +654,7 @@ def do_check(conf, state, quiet=False):
         if prev.get("bundle") != offer["bundle"]:
             # Content-addressed names: a different name is a different file.
             discard_downloads(keep=None)
-        state["offer"] = {k: offer[k] for k in ("version", "bundle", "size", "sha256", "l4t")}
+        state["offer"] = {k: offer[k] for k in ("version", "bundle", "size", "sha256", "l4t", "channel")}
     else:
         state.pop("offer", None)
     save_state(state)
@@ -908,14 +909,18 @@ def ready_to_install(state):
     return bundle
 
 
-def offer_to_stream(state):
+def offer_to_stream(state, conf):
     """The current offer, if it is still worth installing - the checks
-    ready_to_install makes for a downloaded bundle."""
+    ready_to_install makes for a downloaded bundle - and still from the
+    channel it was checked on: the bundle is fetched by name from the
+    channel configured now."""
     housekeeping(state)
     offer = state.get("offer")
     if not offer:
         raise UpdateError("the channel offers nothing newer to stream (or it failed a trial here) - "
                           "'boat-update check' first")
+    if offer.get("channel") != conf["BOAT_UPDATE_CHANNEL"] or state.get("channel_url") != conf["BOAT_UPDATE_URL"]:
+        raise UpdateError("the channel has changed since this offer was checked - 'boat-update check' first")
     return offer
 
 
@@ -955,7 +960,7 @@ def do_install(conf, state, bundle=None, reboot=False, stream=False, allow_meter
         # inhibitor around 'rauc install' itself.
         with locked():
             if stream:
-                offer_to_stream(load_state())
+                offer_to_stream(load_state(), conf)
             else:
                 bundle = resolve_bundle(load_state(), bundle)
         unit = "boat-update-install"
@@ -987,7 +992,7 @@ def do_install(conf, state, bundle=None, reboot=False, stream=False, allow_meter
             raise UpdateError("the install failed (%s) - see above; the board stays on this slot" % result)
         return
     if stream:
-        version = stream_install(conf, state, slot)
+        version = stream_install(conf, state, slot, dev)
         # Remembered so a trial that never reaches boat-commit is still recorded.
         state["installed"] = {"version": version, "slot": other(slot)}
         save_state(state)
@@ -1037,13 +1042,34 @@ def sandbox_can_read(conf):
         os.chmod(f, 0o640)
 
 
-def stream_install(conf, state, slot):
+def stream_preflight(conf, url, dev):
+    """Ask for the bundle's first byte the way a download does - https
+    only, no redirects, the same client certificate, over the link that was
+    checked. RAUC's streaming client follows redirects, to http too, and
+    finds a missing Range support only after it has marked the slot
+    unbootable; both are refused here, before RAUC starts."""
+    r = run(curl_base(conf, dev) + ["--range", "0-0", "--max-filesize", "65536", "--max-time", "60",
+                                    "--output", "/dev/null", "--write-out", "%{http_code}", url])
+    code = r.stdout.strip()
+    if code == "206":
+        return
+    if code.startswith("3"):
+        raise UpdateError("the channel redirects the bundle (HTTP %s) - not streamed, since RAUC would "
+                          "follow it; 'boat-update download' and then 'install' never follow one" % code)
+    if code == "200":
+        raise UpdateError("the channel ignores Range requests, which streaming needs - "
+                          "'boat-update download' and then 'install' works without them")
+    raise UpdateError("the channel did not serve the bundle (HTTP %s): %s" % (code or "-", r.stderr.strip()))
+
+
+def stream_install(conf, state, slot, dev):
     """The inner half of 'install --stream': RAUC streams the offered bundle
     into the other slot, which must then hold the release the index named.
     Returns that release."""
-    offer = offer_to_stream(state)
+    offer = offer_to_stream(state, conf)
     url = channel_url(conf, offer["bundle"])
     sandbox_can_read(conf)
+    stream_preflight(conf, url, dev)
     forget_installed(state)
     say("streaming %s into the other slot (only the blocks it does not already have)" % offer["version"])
     # 'rauc install', not a bare D-Bus call: it waits for RAUC's Completed
