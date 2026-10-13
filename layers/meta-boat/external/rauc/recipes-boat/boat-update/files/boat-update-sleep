@@ -1,0 +1,7 @@
+#!/bin/sh
+# systemd-sleep hook: after a resume, look for an update (and resume a
+# download that the sleep interrupted).
+case "$1" in
+    post) systemctl start --no-block boat-update-check.service ;;
+esac
+exit 0

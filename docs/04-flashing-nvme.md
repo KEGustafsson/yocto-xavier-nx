@@ -47,6 +47,11 @@ run - don't disconnect or power-cycle mid-write.
 
 Useful for provisioning many drives, or when the in-board NVMe write is flaky.
 
+> **Not for an A/B build (`AB_LAYOUT=1`).** meta-tegra's kirkstone branch does
+> not ship `doexternal.sh`, and the A/B layout's DATA partition gets its first
+> filesystem from the `initrd-flash` path. Use Path A; see
+> [`07-updates.md`](07-updates.md) "Flash".
+
 ```bash
 # 1. Flash firmware to the module at least once (Path A, --qspi-only is fine).
 # 2. Attach the target SSD to the HOST (USB-NVMe enclosure or M.2 slot).

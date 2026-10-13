@@ -61,6 +61,9 @@ if command -v shellcheck >/dev/null 2>&1; then
         printf '%s\n' scripts/*.sh wol/*.sh
         find layers -name '*.sh' -print
         printf '%s\n' layers/meta-boat/recipes-boat/hmi-autostart/files/boat-xfce-session
+        # boat-update's NetworkManager dispatcher and system-sleep hooks
+        printf '%s\n' layers/meta-boat/external/rauc/recipes-boat/boat-update/files/90-boat-update \
+            layers/meta-boat/external/rauc/recipes-boat/boat-update/files/boat-update-sleep
     )
     # -P: `# shellcheck source=lib.sh` directives are resolved relative to a
     # source path, not to the file holding them, so both directories that hold
@@ -346,6 +349,27 @@ else
         skip_check "grub-editenv is missing (apt-get install grub-common)"
     else
         fail_check "an A/B on-board script failed a case"
+    fi
+fi
+
+# --- 5c. boat-update against a real HTTPS channel ----------------------------
+# boat-update decides, from files on a web server, what is written into the
+# boat's other slot. scripts/test-boat-update.py runs it against a local
+# HTTPS channel with throwaway keys: an index signed by another CA, by the
+# bundle key, replayed or for another channel must be refused; a good one
+# accepted, its bundle downloaded across a dropped connection and verified.
+log "boat-update ..."
+if [[ "${HAVE_PYTHON}" == "0" ]]; then
+    skip_check "python3 not installed - boat-update not exercised"
+else
+    bu_rc=0
+    python3 scripts/test-boat-update.py || bu_rc=$?
+    if [[ "${bu_rc}" -eq 0 ]]; then
+        log "  boat-update: clean"
+    elif [[ "${bu_rc}" -eq 77 ]]; then
+        skip_check "openssl, curl or grub-editenv is missing - boat-update not exercised"
+    else
+        fail_check "boat-update failed a check"
     fi
 fi
 

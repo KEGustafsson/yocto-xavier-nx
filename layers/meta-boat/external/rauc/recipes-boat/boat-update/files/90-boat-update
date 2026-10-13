@@ -1,0 +1,9 @@
+#!/bin/sh
+# NetworkManager dispatcher: a link came up, or connectivity changed - a
+# good moment to look for an update (and to resume a download). boat-update
+# rate-limits itself, so this can fire as often as it likes.
+case "$2" in
+    up|connectivity-change)
+        systemctl start --no-block boat-update-check.service ;;
+esac
+exit 0

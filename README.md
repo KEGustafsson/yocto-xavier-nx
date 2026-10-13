@@ -130,6 +130,7 @@ before you trust a change.
 4. [Flashing to NVMe in detail](docs/04-flashing-nvme.md)
 5. [Phase 2 — the boat computer layer](docs/05-phase2-boat-computer-layer.md)
 6. [Troubleshooting](docs/06-troubleshooting.md)
+7. [OS updates: A/B slots, over the air](docs/07-updates.md) (experimental, `AB_LAYOUT=1`)
 
 Plus [`wol/README.md`](wol/README.md) for putting the boat computer to sleep
 and waking it again from your laptop.
