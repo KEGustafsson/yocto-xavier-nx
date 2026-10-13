@@ -3,8 +3,9 @@ DESCRIPTION = "RAUC's system pre-install handler refuses an install unless \
 the board came up through GRUB from a committed slot, /data is mounted, \
 the target partitions are the ones the layout puts at those numbers, and \
 the bundle is for the running L4T release; it then marks the target slot \
-unusable and not committed until RAUC activates it. The post-install \
-handler keeps grubenv.bak in step and records the install. See \
+not committed, so it boots as a trial once RAUC activates it (RAUC itself \
+marks the slot unusable while it writes it). The post-install handler \
+keeps grubenv.bak in step and records the install. See \
 docs/plans/ab-os-updates.md section 5.6."
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
