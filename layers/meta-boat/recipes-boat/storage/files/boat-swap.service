@@ -1,0 +1,19 @@
+# A/B layout: mkswap the SWAP partition if it needs it, then enable it.
+# Failing here only means running without swap - nothing waits for it.
+# systemd's gpt-auto-generator would enable SWAP by itself, by its partition
+# type, without the checks boat-storage makes; boat-storage.bb masks the
+# unit it generates (dev-<disk>p<N>.swap).
+[Unit]
+Description=Enable the A/B layout's SWAP partition
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
+DefaultDependencies=no
+Before=swap.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/boat-storage swap
+
+[Install]
+WantedBy=swap.target

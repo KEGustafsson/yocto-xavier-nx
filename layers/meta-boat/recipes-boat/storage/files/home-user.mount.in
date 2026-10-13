@@ -1,0 +1,21 @@
+# A/B layout: /home/@USER@ lives on DATA, so it is the same home in both
+# slots and survives every update. If DATA is missing or broken this mount
+# fails and the image's own /home/@USER@ is used instead: logins still work.
+# Ordered before user sessions so nobody logs into the wrong copy.
+[Unit]
+Description=/home/@USER@ on the shared data partition
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
+Requires=boat-data-prepare.service
+After=boat-data-prepare.service
+Before=systemd-user-sessions.service
+# An image without this user has nothing to seed the home from.
+ConditionPathIsDirectory=/data/home/@USER@
+
+[Mount]
+What=/data/home/@USER@
+Where=/home/@USER@
+Type=none
+Options=bind,nofail
+
+[Install]
+WantedBy=local-fs.target

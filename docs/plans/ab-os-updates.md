@@ -1,7 +1,7 @@
 # Plan: A/B OS updates with automatic fallback
 
 **Status: v4, being implemented phase by phase (section 6).** Every
-decision in section 10 was taken at its recommendation. Phases 0 and 1 are
+decision in section 10 was taken at its recommendation. Phases 0 to 2 are
 in the repository, behind `AB_LAYOUT` (off by default); their exit tests
 need the bench board. Section 11 records what each review pass found and how
 the plan answers it.
@@ -635,9 +635,13 @@ The order matches RAUC 1.13's `install.c`:
   - `boat-update` history;
   - a size-capped persistent journal (`/data/log/journal`), so
     `journalctl -b -1` after a fallback shows why the trial failed;
-  - **`/home`** (D11, recommended). This keeps `~boat/.ssh`, the XFCE
-    settings and anything users keep in their home across updates. It is
-    seeded from the image's skeleton on first boot.
+  - **the login users' homes** (D11): `/home/boat`, bind-mounted from
+    `/data/home/boat` (`BOAT_AB_HOME_USERS`). This keeps `~boat/.ssh`, the
+    XFCE settings and anything users keep in their home across updates. It
+    is seeded from the image's copy on first boot. `root`'s home is
+    `/home/root` on this distro and stays in the slot, so key-only SSH as
+    `root` still works when `DATA` is what broke; its `.ssh` is carried
+    over instead (above).
 - Documented consequence: local edits to any other `/etc` file do not
   survive an update. Put them in `meta-boat` or on `/data`.
 - `/data` is shared, so a newer Docker could migrate `/data/docker` in a way
@@ -656,6 +660,13 @@ The order matches RAUC 1.13's `install.c`:
 A BSP bump (new L4T) is therefore always a **full USB reflash**. The
 `pre-install` handler rejects a bundle whose `[meta.boat] l4t=` differs from
 the running `/etc/nv_tegra_release`.
+
+**Every USB flash also rewrites `DATA`.** The flash writes the empty
+`boat-data` seed into it (5.2), so `/data` - Docker, the homes kept there,
+the saved journal, RAUC's and `boat-update`'s state - starts empty again,
+as it does on the very first flash. Copy off what you need first. A flash
+that leaves `DATA` alone (an empty `DATAFILE`, so `initrd-flash` drops that
+line and writes nothing there) is later work (Phase 8).
 
 ### 5.10 Over-the-air delivery
 
@@ -1013,7 +1024,8 @@ exit criteria wait for the bench board.*
   - a test `grub.cfg` that only sleeps is reset by the UEFI watchdog within
     about 5 minutes.
 
-**Phase 2: storage and state.** Effort: S–M.
+**Phase 2: storage and state.** Effort: S–M. *Implemented; the exit
+criteria wait for the bench board.*
 
 - **`boat-storage`** (first boot, idempotent):
   - grows `DATA` and the flashed `APP` ext4 online;
@@ -1023,7 +1035,9 @@ exit criteria wait for the bench board.*
 - **Mount units**, `nofail`:
   - `DATA` → `/data`;
   - `SWAP`;
-  - the bind mounts `/home` and `/var/log/journal`.
+  - the bind mounts `/home/boat` (5.8) and the journal directory
+    (`/var/log/journal`, or `/var/volatile/log/journal` with
+    `VOLATILE_LOG_DIR`, since a mount unit must name the real path).
 - **The `DATA` seed image** (`IMAGE_TEGRAFLASH_DATA`/`DATAFILE`), moved
   here from Phase 1 with the rest of `DATA`.
 - **The ESP mount drop-in** (partition number, from Phase 1): verify its
@@ -1187,7 +1201,8 @@ exit criteria wait for the bench board.*
 - Secure Boot, dm-verity and a read-only rootfs;
 - credential lockdown;
 - option B on an eMMC module;
-- rauc-hawkbit-updater, if this ever grows to more than one boat.
+- rauc-hawkbit-updater, if this ever grows to more than one boat;
+- a USB flash that leaves `DATA` as it is (5.9).
 
 ---
 
@@ -1212,6 +1227,8 @@ pieces also run off-target:
   `grubenv`, the GPT names).
   The OTA `check`/`download` logic also runs against a local Range-capable
   HTTP server, with cut-offs injected mid-transfer and a tampered index.
+  `scripts/test-boat-storage.py` runs `boat-storage` against a fake board
+  and checks every command it would run on SWAP and DATA.
 
 Both run from `lint.sh`, so they cover every PR.
 
@@ -1337,7 +1354,7 @@ safe in-place conversion, and the plan does not attempt one.
 | D8 | Watchdog: systemd `RuntimeWatchdogSec` as the only `/dev/watchdog` opener? | **yes** (the `watchdog` daemon's custom checks aren't used) |
 | D9 | Key custody: dev keys outside `WORKROOT` with backup; production CA offline; bench CA separate | **yes** |
 | D10 | Attempt budget: trial 1, committed 2 | **yes** (bounded by NVIDIA's 3-warm-boot limit) |
-| D11 | `/home` on `/data` (persistent across updates) vs carry-over of `~/.ssh` only | **`/home` on `/data`** |
+| D11 | `/home` on `/data` (persistent across updates) vs carry-over of `~/.ssh` only | **`/home` on `/data`**: the login users' homes; `root`'s stays in the slot (5.8) |
 | D12 | How automatic is OTA? Check + download in the background, with install and reboot always started by you? | **yes** (`BOAT_UPDATE_AUTO=download`) |
 | D13 | Where to host the channel: your own HTTPS server or object storage (needs Range requests and per-file sizes of several GB) | **your own host or object storage**, not GitHub Releases |
 | D14 | Background downloads over metered (cellular) links | **no** by default; streaming at anchor when you choose to |
@@ -1438,6 +1455,20 @@ Claims the review checked and confirmed:
 | on vfat, a rename frees the replaced file's clusters at once but writes the moved file's directory entry only at writeback, so for ~30 s `grubenv` points at freed clusters: a power cut then undoes a commit, and `fsck` truncates both copies | the write fsyncs the renamed file itself before the directory |
 | `boot-efi.mount`, which the ESP drop-in amends, only reaches an image through `tegra-redundant-boot` in `MACHINE_EXTRA_RDEPENDS` | `boat-ab-boot` depends on `setup-nv-boot-control-service` itself |
 | `grub-emu` has every module; the board's GRUB has only `GRUB_BUILDIN`, and a missing command only prints an error, so the harness could not see one (`true` was missing) | `test-grub-ab.py` checks every `grub.cfg` command against `GRUB_BUILDIN` and its dependencies; `true` added |
+
+### Review pass 5 (findings while implementing Phase 2)
+
+| finding | resolution |
+|---|---|
+| `initrd-flash` substitutes the `DATAFILE` placeholder, or with no data file deletes every line containing it (`sed '/DATAFILE/d'`); a layout that keeps several elements on one line would lose `SWAP`, `DATA` and the secondary GPT with it | the generated layout keeps one element per line, and the build fails if a placeholder shares its line |
+| bind-mounting all of `/home` hides `root`'s home (`/home/root` on this distro), and its SSH keys with it whenever `DATA` fails | only the login users' homes move to `/data` (D11, 5.8) |
+| with `VOLATILE_LOG_DIR`, `/var/log` is a symlink into a tmpfs, and a mount unit on a symlinked path never starts | the journal mount names the real directory |
+| the board should never decide on its own to format a partition that might hold data | the flash writes a small, empty ext4 seed into `DATA`; the first boot only grows it, and `boat-storage format-data` is a manual, confirmed step |
+| systemd's `gpt-auto-generator` enables any partition of the Linux swap type on the root disk - `SWAP` is one - without `boat-storage`'s checks, and races its `mkswap` on the first boot | `boat-storage` masks the unit it would generate (`dev-<disk>p<N>.swap`) |
+| ordering `systemd-journal-flush` after the journal's bind mount made the whole boot, which waits for that unit, wait for `DATA`'s `e2fsck` - minutes for a repair on a large drive, which a time limit would then kill half way | the early flush is skipped unless the mount is already there; `boat-journal-flush.service`, pulled in by the mount, moves the journal onto `DATA`, and the check has no time limit |
+| with the seed in every flash, a USB reflash also empties `/data` | stated in 5.9 and docs; a flash that keeps `DATA` is Phase 8 |
+| a power cut just after seeding `/home/boat` could leave a home of empty files that is never seeded again | `sync` before and after the rename that makes it final |
+| `scripts/test-ab-scripts.py` did not cover `boat-storage` | `scripts/test-boat-storage.py` runs it against a fake board: swap, the `DATA` check, seeding, `format-data`, `status` |
 
 ### Your review
 

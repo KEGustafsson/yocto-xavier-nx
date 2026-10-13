@@ -17,7 +17,9 @@ docs/plans/ab-os-updates.md section 5.2:
   * A SWAP partition and a fill-to-end DATA partition are appended after
     APP_b. make-sdcard grows the first partition carrying the 0x800
     allocation bit to the end of the disk, so DATA takes whatever the SSD
-    has beyond the fixed partitions.
+    has beyond the fixed partitions. DATA's contents are meta-tegra's
+    DATAFILE: the flash writes boat-data-seed's small ext4 there (or, with
+    no DATAFILE, leaves DATA unwritten).
   * Every partition named in NUMBERS ends up at exactly that GPT entry
     number - SWAP and DATA by explicit id, the rest verified - or the build
     fails here.
@@ -48,7 +50,8 @@ def die(msg):
     sys.exit(1)
 
 
-def new_partition(name, number, size, alloc, type_guid, description):
+def new_partition(name, number, size, alloc, type_guid, description,
+                  filename=None):
     part = ET.Element("partition", {"name": name, "id": str(number),
                                     "type": "data"})
     for tag, text in (
@@ -59,11 +62,39 @@ def new_partition(name, number, size, alloc, type_guid, description):
         ("allocation_attribute", alloc),
         ("align_boundary", "4096"),
         ("percent_reserved", "0"),
+        ("filename", filename),
         ("partition_type_guid", type_guid),
         ("description", description),
     ):
-        ET.SubElement(part, tag).text = " %s " % text
+        if text is not None:
+            ET.SubElement(part, tag).text = " %s " % text
+    # One element per line, indented like NVIDIA's own: the flash helpers
+    # edit this file with line-based sed, and initrd-flash drops an unused
+    # DATAFILE with '/DATAFILE/d' - which, on a line ElementTree had packed
+    # with other elements, would delete those too.
+    part.text = "\n" + " " * 12
+    for child in part:
+        child.tail = "\n" + " " * 12
+    part[-1].tail = "\n" + " " * 8
+    part.tail = "\n" + " " * 8
     return part
+
+
+# Placeholders meta-tegra's flash helpers replace, or delete the whole line
+# of, with sed.
+FLASH_TOKENS = ("APPFILE", "APPFILE_b", "DATAFILE")
+
+
+def check_token_lines(path):
+    """Every line naming a flash placeholder must hold nothing else."""
+    with open(path, encoding="UTF-8") as f:
+        for lineno, line in enumerate(f, 1):
+            for token in FLASH_TOKENS:
+                if token in line and \
+                        line.strip() != "<filename> %s </filename>" % token:
+                    die("%s:%d: %s shares its line with other XML, which "
+                        "the flash helpers' sed would mangle: %s"
+                        % (path, lineno, token, line.strip()))
 
 
 def gpt_numbers(partitions):
@@ -144,7 +175,8 @@ def main(argv):
     device.insert(index + 1, new_partition(
         "DATA", want["DATA"], data_min, "0x808", LINUX_DATA_TYPE,
         "boat: /data, shared by both rootfs slots. Fills the rest of the "
-        "disk (0x800); its filesystem is grown on first boot."))
+        "disk (0x800); its filesystem is grown on first boot.",
+        filename="DATAFILE"))
 
     final = gpt_numbers(device.findall("partition"))
     for name, num in sorted(want.items()):
@@ -154,6 +186,7 @@ def main(argv):
                 % (name, final.get(name), num))
 
     tree.write(dst, encoding="UTF-8", xml_declaration=True)
+    check_token_lines(dst)
 
 
 if __name__ == "__main__":

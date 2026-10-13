@@ -1,0 +1,16 @@
+# A/B layout: grow DATA and this slot's root filesystem into their
+# partitions - after a flash both are written as small images. Online, with
+# no partition table change; a no-op on every later boot.
+[Unit]
+Description=Grow DATA and this slot's root filesystem into their partitions
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
+After=local-fs.target data.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/boat-storage grow
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

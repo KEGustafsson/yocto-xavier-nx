@@ -1,7 +1,8 @@
 # shellcheck shell=sh
 # Sourced; the scripts that source it read the variables set here.
 # shellcheck disable=SC2034
-# Shared by boat-bootmode-guard, boat-grubenv-guard and boat-ab-commit.
+# Shared by boat-bootmode-guard, boat-grubenv-guard, boat-ab-commit and
+# boat-storage.
 # Installed as /usr/lib/boat-ab/lib.sh with the build's layout values filled
 # in; see docs/plans/ab-os-updates.md sections 5.1-5.4.
 
@@ -9,6 +10,8 @@ BOAT_AB_DISK="@DISK@"
 BOAT_AB_PART_A="@PARTNUM_A@"
 BOAT_AB_PART_B="@PARTNUM_B@"
 BOAT_AB_PART_ESP="@PARTNUM_ESP@"
+BOAT_AB_PART_SWAP="@PARTNUM_SWAP@"
+BOAT_AB_PART_DATA="@PARTNUM_DATA@"
 BOAT_AB_ESP_MOUNT=/boot/efi
 BOAT_AB_GRUBENV="${BOAT_AB_ESP_MOUNT}/EFI/BOOT/grubenv"
 BOAT_AB_RUNDIR=/run/boat-ab
@@ -53,19 +56,32 @@ part_name() {
     blkid -p -o value -s PART_ENTRY_NAME "$(part_dev "$1")" 2>/dev/null
 }
 
+# True when GPT entry $1 is named $2. Prints the mismatch otherwise.
+check_part() {
+    _ab_have="$(part_name "$1")"
+    [ "$_ab_have" = "$2" ] && return 0
+    warn "$(part_dev "$1") is GPT entry '${_ab_have:-<none>}', expected '$2'"
+    return 1
+}
+
+# Wait up to $2 seconds for block device $1 to appear.
+wait_dev() {
+    _ab_n=0
+    while [ ! -b "$1" ]; do
+        [ "$_ab_n" -ge "$2" ] && return 1
+        sleep 1
+        _ab_n=$((_ab_n + 1))
+    done
+    return 0
+}
+
 # Refuse to act unless the numbers this build was configured with still
 # name the partitions they are meant to. Prints the problem and returns 1.
 check_layout() {
     _ab_ok=0
-    for _ab_pair in "${BOAT_AB_PART_A}:APP" "${BOAT_AB_PART_B}:APP_b" "${BOAT_AB_PART_ESP}:esp"; do
-        _ab_num="${_ab_pair%%:*}"
-        _ab_want="${_ab_pair#*:}"
-        _ab_have="$(part_name "$_ab_num")"
-        if [ "$_ab_have" != "$_ab_want" ]; then
-            warn "$(part_dev "$_ab_num") is GPT entry '${_ab_have:-<none>}', expected '$_ab_want'"
-            _ab_ok=1
-        fi
-    done
+    check_part "${BOAT_AB_PART_A}" APP || _ab_ok=1
+    check_part "${BOAT_AB_PART_B}" APP_b || _ab_ok=1
+    check_part "${BOAT_AB_PART_ESP}" esp || _ab_ok=1
     return $_ab_ok
 }
 
