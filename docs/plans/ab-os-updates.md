@@ -1,15 +1,17 @@
 # Plan: A/B OS updates with automatic fallback
 
-**Status: DRAFT v2 for review. Nothing here is implemented yet.** This is the
+**Status: DRAFT v3 for review. Nothing here is implemented yet.** This is the
 plan to review *before* any code is written. Section 10 lists the decisions
-that need an answer first. Section 11 records what the first review pass
-found and how v2 answers it.
+that need an answer first. Section 11 records what each review pass found and
+how the plan answers it.
 
 Scope: signed, power-fail-safe OS updates for the boat computer (Xavier NX
-devkit, SD-slot module P3668-0000, rootfs on NVMe, no SD card). Two complete
-root filesystems ("slots") live on the SSD. An update is written to the slot
-that is not running. The board tries it **once**, and goes back to the
-previous slot by itself if the new one does not come up healthy.
+devkit, SD-slot module P3668-0000, rootfs on NVMe, no SD card), delivered
+**over the air**. Two complete root filesystems ("slots") live on the SSD.
+- The board fetches signed update bundles from an HTTPS update channel.
+- Each update is written to the slot that is not running.
+- The board tries the new slot **once**, and goes back to the previous slot
+  by itself if the new one does not come up healthy.
 
 ---
 
@@ -29,10 +31,17 @@ previous slot by itself if the new one does not come up healthy.
 4. **Automatic failover.** "Did not boot correctly" is defined precisely
    (section 5.4), and every way of not booting correctly ends in a reset
    that lands on the old slot (section 5.5).
-5. **Operable from the chart table.**
-   - Install with one command over SSH or from a USB stick.
-   - `boat-update status` says what happened.
-   - Roll back with one command.
+5. **Over the air.** The board periodically checks an HTTPS update channel and
+   downloads a new bundle in the background. Downloads resume after a
+   dropped link, a sleep or a reboot, and stay off metered (cellular)
+   connections unless allowed. It never installs or reboots on its own
+   (D12). Streaming installs with adaptive (changed-blocks-only) downloads
+   follow in Phase 6.
+6. **Operable from the chart table.**
+   - `boat-update status` says what happened and whether an update is
+     downloaded and ready.
+   - Install with one command, and roll back with one.
+   - SSH push and a USB stick remain fallbacks for a boat with no internet.
 
 **Non-goals** (each is picked up again where it matters)
 
@@ -40,11 +49,15 @@ previous slot by itself if the new one does not come up healthy.
   hardware they cannot be made A/B-safe (section 3). They stay USB-recovery
   operations, as they are today.
 - UEFI Secure Boot, fuse burning, dm-verity, a read-only rootfs. The design
-  is compatible with them (Phase 7), but signed updates don't need them, and
+  is compatible with them (Phase 8), but signed updates don't need them, and
   burning fuses is irreversible.
 - App/container updates. These already move independently via compose files
   on `/data` (docs/05 "Updates").
-- Update servers and fleet management.
+- **An update server or fleet management (hawkBit, Mender server).** The
+  update channel is a few static files on any HTTPS host (section 5.10).
+  rauc-hawkbit-updater can be added later without changing the device design.
+- Unattended installs and reboots. A reboot while under way is the bigger
+  risk, so installing stays an operator action (D12).
 
 **Done means** the fault-injection matrix in section 7 passes on real
 hardware, including power cuts during install and during the first boot.
@@ -166,7 +179,8 @@ stops at L4T R35.6.x. A BSP bump becomes a planned USB reflash at the dock.
 Nothing in `meta-boat` patches the device tree today.
 
 Choose **B** if you would rather move to the eMMC module and want
-over-the-air firmware. Phases 2–7 carry over; only the boot backend differs.
+over-the-air firmware. Phases 2–7, including the OTA delivery (5.10), carry
+over; only the boot backend differs.
 Keep **C** as the fallback if the Phase 0 spike shows the GRUB route cannot
 boot this kernel correctly.
 
@@ -437,7 +451,10 @@ emergency mode.
 
 ### 5.6 The install sequence, and what a power cut does at each step
 
-`boat-update install <bundle>` is a thin wrapper around `rauc install`:
+`boat-update install` is a thin wrapper around `rauc install`. It takes the
+bundle that is downloaded and ready (5.10), or an explicit path from an SSH
+push or USB stick, or with `--stream`, the channel URL (Phase 6). Whatever
+the source, the steps below are the same.
 
 - It refuses unless booted via GRUB (`rauc.slot` present) and `/data` is a
   real mountpoint. Otherwise RAUC would `mkdir` its data directory on the
@@ -463,10 +480,14 @@ The order matches RAUC 1.13's `install.c`:
 - **Manual rollback:** `boat-update rollback` runs
   `rauc status mark-active other` and reboots. It refuses if the other slot
   is `OK=0`. It is a slot switch; nothing is reinstalled.
-- **Transport:** an SSH push to `/data` and then a local install, or a USB
-  stick. A bundle of several GB exceeds FAT32's 4 GiB file limit, so the
-  stick must be exFAT or ext4. `install <URL>` (RAUC streaming over nbd) is
-  deferred to Phase 7.
+- **Transport:** OTA from the update channel (5.10) is the normal path.
+  Fallbacks:
+  - an SSH push to `/data` (`scripts/push-update.sh`);
+  - a USB stick. A bundle of several GB exceeds FAT32's 4 GiB file limit,
+    so the stick must be exFAT or ext4.
+- **A stream that fails mid-install is safe.** RAUC aborts, and the target
+  is still `OK=0` from step 3, so the board stays on the current slot. A
+  retry starts the install again.
 
 ### 5.7 Security model
 
@@ -515,14 +536,34 @@ The order matches RAUC 1.13's `install.c`:
   bundles for other boards. RAUC's `min-bundle-version` (D6) covers
   downgrades. Falling back after a failed update is a slot switch, not an
   install, so the version policy never blocks a failover.
-- **Attack surface:** no update daemon and no new port. Installs start over
-  the existing SSH or from local media.
+- **Attack surface:** no new listening port. OTA is **pull-only**: the
+  board makes outbound HTTPS requests to the channel and nothing connects
+  in. Manual installs still go over the existing SSH or from local media.
+- **The OTA channel is not trusted for authenticity** (5.10). RAUC verifies
+  every bundle against the keyring whatever its source, so a compromised
+  server or a TLS interception can at most:
+  - **withhold updates** (a freeze attack). `status` shows the age of the
+    last successful check and the channel's publish date, so a stale
+    channel is visible. It cannot be prevented without an online
+    time-stamped authority; accepted.
+  - **waste bandwidth or offer an old bundle.** This is blocked *before*
+    downloading: the channel index is signed (5.10), carries the bundle's
+    size, SHA-256 and version, and is checked against `min-bundle-version`
+    first.
+  - **learn the board's version** from its requests. TLS keeps this from
+    passive observers. Optional channel credentials (HTTP Basic, a bearer
+    header, or a TLS client cert, all of which curl and RAUC's `[streaming]`
+    section support) keep it from the public.
+- **Channel credentials** live in `/etc/boat-update/channel.conf`
+  (root-only, mode 600, carried over, 5.8). The device's credential grants
+  **read** access to the channel only. Publishing uses a separate
+  credential that stays on the build host.
 - **Honest limits:**
   - This authenticates *updates*. Root on the running board can still write
     anything to disk, and the bench image's shared password (README
     "Credentials") still applies.
   - A physical attacker with USB recovery mode can reflash.
-  - Secure Boot and dm-verity (Phase 7) close those gaps. For option A that
+  - Secure Boot and dm-verity (Phase 8) close those gaps. For option A that
     also means signing GRUB and having it verify the kernel.
 
 ### 5.8 State that must survive a slot switch
@@ -543,7 +584,9 @@ The order matches RAUC 1.13's `install.c`:
   - the operator-edited `CONFFILES` (`/etc/default/boat-power`,
     `/etc/default/boat-bluetooth`, `/etc/docker/daemon.json`);
   - the password hash fields of `root` and `boat`, merged (**D5**);
-  - `/etc/nv_boot_control.conf`.
+  - `/etc/nv_boot_control.conf`;
+  - `/etc/boat-update/channel.conf` (channel URL, channel name, policy
+    knobs, optional read credential).
 - **Lives on `/data`:**
   - Docker and compose (already there);
   - RAUC's `data-directory` (`/data/rauc`, with `RequiresMountsFor=/data`
@@ -573,12 +616,145 @@ A BSP bump (new L4T) is therefore always a **full USB reflash**. The
 `pre-install` handler rejects a bundle whose `[meta.boat] l4t=` differs from
 the running `/etc/nv_tegra_release`.
 
+### 5.10 Over-the-air delivery
+
+OTA is about how a bundle *reaches* the board. Everything in 5.3–5.6 still
+applies once it is there. Delivery comes in two stages:
+
+- **Stage 1, download-then-install (Phase 5).** The default, and the robust
+  path on a link that keeps dropping.
+- **Stage 2, streaming with adaptive updates (Phase 6).** The bandwidth-lean
+  path on a link that stays up.
+
+#### The update channel
+
+The channel is static files on **any HTTPS host that supports HTTP Range
+requests**: nginx, Caddy, or S3/R2/B2-style object storage. Range support is
+what makes both resumable downloads and streaming work. GitHub Releases is a
+poor fit, because bundles carrying CUDA are likely to exceed its per-file
+size limit (check it, D13).
+
+```text
+https://<host>/boat-xavier-nx/<channel>/
+    index.json            current release for this channel
+    index.json.sig        detached CMS signature (DER), RAUC signing key
+    boat-bundle-<version>.raucb
+```
+
+- **`index.json`** carries `compatible`, `version`, `l4t`, `bundle`
+  (relative URL), `size`, `sha256`, `published` (UTC), `notes`, and
+  `requires_reflash`. That last one flags a BSP bump, which cannot ship as a
+  bundle (5.9). The board reports "come to the dock with a laptop" instead
+  of downloading.
+- **Two channels:** `testing` (bench boards) and `stable` (the boat). To
+  promote a release, re-publish the same bundle file to `stable` after it
+  has passed on the bench.
+- **`scripts/publish-update.sh <channel> <bundle>`** runs on the build host:
+  1. reads version and compatible with `rauc info` (from the build's native
+     tools);
+  2. computes `size` and `sha256`, and writes `index.json`;
+  3. signs it with
+     `openssl cms -sign -binary -outform DER -signer <signing cert> -inkey <key>`,
+     using the same codeSigning certificate as the bundles;
+  4. uploads to `BOAT_UPDATE_PUBLISH_TARGET` (rsync/scp/rclone), **bundle
+     first and index last**, so the index never points at a file that isn't
+     there yet.
+
+#### On the board: check, download, ready (stage 1)
+
+`boat-update` gains three verbs, and `status` reports all of their state.
+
+- **`check`** fetches `index.json` and its `.sig` (a few hundred bytes):
+  1. **Clock first.** The check only runs once the clock is plausible:
+     chrony has synced, or the clock is at least the image build date.
+     Before NTP the clock reads 1970 and TLS would fail anyway.
+  2. **Verify the signature** against `/etc/rauc/ca.cert.pem` with
+     `openssl cms -verify`.
+  3. **Then check, in order:** `compatible`, `l4t` against the running
+     `/etc/nv_tegra_release`, and the version (newer than the booted slot
+     and ≥ `min-bundle-version`). This rejects anything not worth
+     downloading **before** any bandwidth is spent.
+  4. **Record** the result and the channel's `published` date. `status`
+     shows the age of both, which is how a frozen channel shows up (5.7).
+- **`download`** writes to `/data/boat-update/downloads/<file>.part` with
+  resumable `curl --fail -C -`:
+  - It runs in bounded windows (`--max-time` of about 10 minutes, with
+    stall detection via `--speed-limit`/`--speed-time`). Between windows it
+    re-checks the metered state and the policy, so moving from shore Wi-Fi
+    to cellular pauses the download instead of draining the data plan.
+  - Before starting it checks free space on `/data` (bundle size + 1 GiB).
+  - At the end it verifies `size` and `sha256`, renames the file, and runs
+    `rauc info` on it for the full local signature/compatible check. Only
+    then is the state **"ready"**.
+  - There is only ever one pending bundle. A newer index supersedes it and
+    deletes the old partial file.
+  - A dropped link, an SC7 sleep or a reboot just means resuming on the next
+    run. Downloads **never hold a sleep inhibitor**: a background download
+    must not keep the boat awake.
+- **`install`** with no argument installs the ready bundle (5.6). After the
+  update commits, the downloaded file is deleted; the old slot is the
+  rollback, not the file.
+
+`boat-update-check.timer` drives it: `OnBootSec=10min`,
+`OnUnitActiveSec=6h`, `RandomizedDelaySec=30min`, `Persistent=true`. Policy
+lives in `/etc/boat-update/channel.conf`:
+
+| knob | default | meaning |
+|---|---|---|
+| `BOAT_UPDATE_CHANNEL` | `stable` | which channel to follow |
+| `BOAT_UPDATE_AUTO` | `download` | `off` / `check` (notify only) / `download` (also fetch in background). **Never installs or reboots** (D12). |
+| `BOAT_UPDATE_METERED` | `no` | download over a metered link? (D14) |
+| `BOAT_UPDATE_RATE_LIMIT` | empty | passed to curl `--limit-rate` |
+| channel credential | none | Basic auth, a bearer header, or a TLS client cert/key (5.7) |
+
+- **Metered state** comes from NetworkManager's global `Metered` property.
+  NM guesses `yes` for ModemManager (cellular) connections, and a phone
+  hotspot can be marked with `nmcli connection modify <c> connection.metered yes`.
+  When metered and not allowed, `check` still runs (it is tiny), and
+  `status` says "update X available, waiting for an unmetered link".
+- **No `/data`, no OTA.** Downloads never go to the rootfs. `status` says why
+  OTA is idle.
+
+#### Streaming with adaptive updates (stage 2)
+
+- **Bundles carry an adaptive index from the start.** From Phase 3 the
+  rootfs image is built with `adaptive=block-hash-index`. The index adds
+  about 0.8% to the bundle and is harmless for stage 1.
+- **`boat-update install --stream`** runs `rauc install <bundle URL>`,
+  passing the channel credential with RAUC's own `--http-header` or
+  `--tls-cert`/`--tls-key` options (never `--tls-no-verify`).
+  - RAUC reads only the blocks it cannot find locally in either slot.
+  - RAUC's documentation reports **about 10% of the bundle** crossing the
+    link for a small ext4 change.
+  - It stores per-slot hash indices in `/data/rauc` and builds them on the
+    first run, which takes extra time once.
+- **Needs** `CONFIG_BLK_DEV_NBD` (in `boat-rauc.cfg`; Phase 0 checks it),
+  RAUC's `streaming` PACKAGECONFIG (meta-rauc's default), and the Range
+  support the channel already requires.
+- **Trade-off:** the link must stay up for the whole install (minutes). A
+  drop aborts safely (5.6), but the install must be re-run. How much of a
+  retry is re-downloaded is measured in Phase 6.
+- **When to use which:** download-then-install on shore Wi-Fi or any flaky
+  link; streaming at anchor on a decent cellular link. `boat-update status`
+  shows the expected download for both when the channel's bundle is
+  adaptive-capable.
+- **Rejected: background streaming into the inactive slot.** RAUC's
+  `activate-installed=false` would allow it, but RAUC marks the target
+  `OK=0` while writing. The boat would lose its fallback slot for as long as
+  the activation waits for the operator. A downloaded file costs disk, not
+  safety, so the background step stays a download.
+
 ---
 
 ## 6. Implementation phases
 
 Each phase ends with something testable on the bench. Nothing ships to the
-boat before Phase 6 passes.
+boat before Phase 7 passes. OTA is part of the main line:
+
+- **Stage 1** (download, then install) lands in Phase 5, as soon as there is
+  a health gate to protect it.
+- **Stage 2** (streaming plus adaptive updates) follows in Phase 6.
+- **Phase 3 already builds bundles that are ready for both stages.**
 
 **Phase 0: hardware spike (bench board, USB recovery at hand, no repo changes).**
 A "no" on any of these re-opens section 4.
@@ -615,10 +791,16 @@ A "no" on any of these re-opens section 4.
      sticky-recovery procedure.
 5. *(Optional, bench only.)* Confirm section 3 by switching to firmware
    chain B and watching it fail and revert.
+6. **OTA prerequisites:**
+   - the kernel has NBD (step 1);
+   - the host you intend to use for the channel answers a Range request
+     (`curl -sI -r 0-99 <url>` returns `206`);
+   - NetworkManager reports `Metered` correctly for the boat's cellular
+     modem and for its Wi-Fi.
 
 **Phase 1: layout, GRUB, slot-aware boot.** Effort: M.
 
-- **Toggle.** `AB_LAYOUT` in `env.sh` (default **off** until Phase 6). For
+- **Toggle.** `AB_LAYOUT` in `env.sh` (default **off** until Phase 7). For
   kas, a separate overlay `kas/ab-updates.yml` (static YAML can't read
   env.sh), plus an A/B block in `config/local.conf.sample`.
 - **Build configuration** (`02-configure-build.sh` and the kas overlay):
@@ -687,9 +869,17 @@ A "no" on any of these re-opens section 4.
   - a `rauc.service` drop-in.
 - **Keys and bundle:**
   - `scripts/gen-update-keys.sh`;
-  - `boat-bundle.bb` (`inherit bundle`, `RAUC_BUNDLE_FORMAT = "verity"`, a
-    `[meta.boat]` section with `l4t` and `docker`, and a check that
-    `/boot/Image` and `/boot/initrd` exist).
+  - `boat-bundle.bb`, with:
+    - `inherit bundle` and `RAUC_BUNDLE_FORMAT = "verity"`;
+    - the rootfs image built with `adaptive=block-hash-index`, so every
+      bundle from now on is stream-ready for Phase 6;
+    - a `[meta.boat]` section with `l4t` and `docker`;
+    - a check that `/boot/Image` and `/boot/initrd` exist.
+  - Record each bundle's size. These are the real numbers behind the OTA
+    bandwidth estimates (D14).
+  - RAUC built with its default `network` + `streaming` PACKAGECONFIG, and
+    `CONFIG_BLK_DEV_NBD` in `boat-rauc.cfg`, so Phase 6 needs no image
+    rebuild just to enable streaming.
 - **Handlers:**
   - system `pre-install` (BSP/Docker checks, `COMMITTED=0` for the target);
   - slot `post-install` (carry-over);
@@ -710,20 +900,42 @@ A "no" on any of these re-opens section 4.
 - The inhibitor held until commit.
 - **Exit:** every row of 5.5 except firmware has been exercised once.
 
-**Phase 5: operator tooling and docs.** Effort: S–M.
+**Phase 5: OTA stage 1 (check, download, install) and operator tooling.** Effort: M.
 
-- **`boat-update`.** `status` is the default and read-only. It shows:
+- **`boat-update` (on the board).** `status` is the default and read-only.
+  It shows:
   - the booted slot and whether it is a trial or committed;
   - the last result and its reason;
   - both slots' versions;
-  - "booted outside GRUB" and `grubenv` alerts.
+  - "booted outside GRUB" and `grubenv` alerts;
+  - **OTA state:** channel, last check and its age, the channel's publish
+    date, available version, download progress or "ready", metered/waiting,
+    and "BSP bump: reflash needed".
 
-  Plus `install [--reboot]`, `rollback`, `history`, `debug-hold` (sets
-  `BOAT_STAY`).
-- **`scripts/push-update.sh <host> [bundle]`:** copy to `/data`, install,
-  reboot, then *wait and report which slot came back*, in the style of
-  `wol/boat-wake.sh`.
-- **`docs/07-updates.md`**, plus fixes to:
+  Verbs:
+  - `check`, `download` and `install [--reboot]` (5.10, 5.6);
+  - `rollback`, `history`, and `debug-hold` (sets `BOAT_STAY`).
+- **`boat-update-check.timer`** and its service, plus the policy knobs in
+  `/etc/boat-update/channel.conf` (5.10).
+- **The `openssl` CLI on the image** for verifying the index (check the
+  exact package name with `oe-pkgdata-util`; `curl` is already in
+  `packagegroup-boat-nettools`).
+- **Host scripts:**
+  - **`scripts/publish-update.sh <channel> <bundle>`**: write and sign the
+    index, upload bundle first and index last (5.10).
+  - **`scripts/push-update.sh <host> [bundle]`**, the no-internet fallback:
+    copy to `/data`, install, reboot, then *wait and report which slot came
+    back*, in the style of `wol/boat-wake.sh`.
+- **A bench update channel:** any local HTTPS server with Range support
+  (e.g. Caddy) serving a `testing` channel to the bench board.
+- **Exit:**
+  - a bundle published to `testing` is downloaded in the background,
+    survives a pulled Ethernet cable, an SC7 sleep and a reboot
+    mid-download, and becomes "ready";
+  - `boat-update install --reboot` takes it through trial to commit;
+  - with the connection marked metered, it waits instead of downloading.
+- **`docs/07-updates.md`**: day-to-day OTA, channel setup and publishing,
+  fallbacks, rollback, recovery. Plus fixes to:
   - docs/01 (boot flow) and docs/04 (layout, flash; the first A/B flash
     erases the SSD);
   - docs/04 `--host-drive`: `doexternal.sh` isn't shipped by meta-tegra
@@ -732,20 +944,41 @@ A "no" on any of these re-opens section 4.
   - docs/06 troubleshooting, including the sticky-recovery procedure;
   - README.
 
-**Phase 6: validation.** Effort: M, mostly bench time.
+**Phase 6: OTA stage 2 (streaming + adaptive installs).** Effort: S–M.
+
+- **`boat-update install --stream`**: `rauc install <channel bundle URL>`,
+  passing the channel credential via `--http-header` or
+  `--tls-cert`/`--tls-key` (5.10).
+- **Measure on the bench** the bytes transferred for:
+  - a one-package change;
+  - a kernel bump;
+  - a CUDA bump;
+  - a retry after a link drop mid-install.
+
+  Put the numbers in docs/07, so choosing stream versus download is based
+  on data rather than on RAUC's ~10% rule of thumb.
+- **`status`** shows the estimated transfer for each path.
+- **Exit:**
+  - a streamed, adaptive install commits;
+  - a link drop mid-stream leaves the board on its current slot with the
+    target `OK=0`, and a retry succeeds;
+  - a server without Range support fails cleanly, with a message pointing
+    at the download path.
+
+**Phase 7: validation.** Effort: M, mostly bench time.
 
 - Run the section 7 matrix.
-- Soak: 50 update cycles alternating good and faulty bundles, plus random
-  power cuts if a USB relay on the barrel jack is available.
-- Then flip `AB_LAYOUT` to default-on.
+- Soak: 50 update cycles **delivered over the air** from the `testing`
+  channel, alternating good and faulty bundles, plus random power cuts if a
+  USB relay on the barrel jack is available.
+- Then flip `AB_LAYOUT` to default-on and move the boat to `stable`.
 
-**Phase 7 (later, separate plans):**
+**Phase 8 (later, separate plans):**
 
-- HTTPS streaming + RAUC adaptive updates, so only changed blocks cross a
-  cellular link;
 - Secure Boot, dm-verity and a read-only rootfs;
 - credential lockdown;
-- option B on an eMMC module.
+- option B on an eMMC module;
+- rauc-hawkbit-updater, if this ever grows to more than one boat.
 
 ---
 
@@ -758,7 +991,9 @@ pieces also run off-target:
   (generic UEFI). They boot a dummy kernel and assert the `grubenv`
   transitions for every row of 5.3's table.
 - **Shell logic:** `boat-update`, the handlers and `boat-storage` get
-  host-side tests with `rauc`, `grub-editenv` and `blkid` mocked.
+  host-side tests with `rauc`, `grub-editenv`, `blkid` and `nmcli` mocked.
+  The OTA `check`/`download` logic also runs against a local Range-capable
+  HTTP server, with cut-offs injected mid-transfer and a tampered index.
 
 Both run from `lint.sh`, so they cover every PR.
 
@@ -794,6 +1029,18 @@ Both run from `lint.sh`, so they cover every PR.
 | 28 | both slots broken | A, A, B, then UEFI stop (sticky recovery) is the documented end state; the documented recovery works |
 | 29 | carry-over | SSH host key, `/root/.ssh`, `/home`, Wi-Fi, BT pairing, hostname, `boat-sleep.key`, passwords (D5) are unchanged after update and after rollback |
 | 30 | SC7 + WoL on both slots | works |
+| 31 | OTA: channel offers a newer bundle, unmetered link | background download; `status` shows "ready"; no install or reboot happens by itself |
+| 32 | OTA: link dropped, SC7 sleep, and reboot, each mid-download | resumes from where it stopped; final SHA-256 matches; never a second full download |
+| 33 | OTA: truncated or corrupted download | SHA-256/`rauc info` mismatch → discarded and re-fetched; never offered for install |
+| 34 | OTA: index with a bad signature, or signed by the bench CA on a boat image | ignored before any download; alert in `status` |
+| 35 | OTA: index offers an older version, the same version, another `compatible`, or another L4T | nothing downloaded; L4T case reports "reflash needed" |
+| 36 | OTA: cellular (metered) link, default policy | check only; download waits for an unmetered link; moving to cellular mid-download pauses at the next window |
+| 37 | OTA: clock at 1970 before NTP | check deferred, no TLS-error spam; runs after sync |
+| 38 | OTA: `/data` too full, or not mounted | download refused with the reason in `status`; rootfs never used |
+| 39 | OTA: channel credential, and carry-over | authenticated channel works; credential survives an update and a rollback |
+| 40 | OTA stream: adaptive install of a one-package change | commits; transferred bytes recorded (Phase 6) |
+| 41 | OTA stream: link drop mid-install | install aborts; current slot unaffected, target `OK=0`; retry succeeds |
+| 42 | OTA stream: server without Range support | clean failure pointing to the download path |
 
 The fault bundles for 12–19 come from a `boat-image-faulty` variant
 (`BOAT_FAULT=<kind>`), signed by the bench CA (5.7).
@@ -816,8 +1063,10 @@ safe in-place conversion, and the plan does not attempt one.
    runtime regardless.)
 3. First boot: `boat-storage` provisions `/data`, swap and the rootfs size.
    Restore the backup.
-4. Install a bundle once (A→B) and once more (B→A) to prove the round trip
-   before the boat leaves the dock.
+4. Put the channel credential in `/etc/boat-update/channel.conf`. Then, **over
+   the air**, install a bundle once (A→B) and once more (B→A) to prove the
+   round trip before the boat leaves the dock. After this, the only reasons
+   to bring a laptop to the boat are a BSP bump or a dead board.
 
 ---
 
@@ -832,7 +1081,11 @@ safe in-place conversion, and the plan does not attempt one.
 | `grubenv` torn on vfat | L / M | guard unit, `.bak`, defaults (5.3) |
 | ESP (vfat) damaged | L / H | rare, tiny writes; `fsck.fat` reported in `status`; recovery = USB reflash |
 | a shared `/data` written by a newer slot breaks an older one | L / M | Docker-version warning; Docker stays on the kirkstone major |
-| bundle size over cellular (several GB with CUDA) | H / M | shore Wi-Fi now; adaptive streaming in Phase 7 |
+| bundle size over cellular (several GB with CUDA) | H / M | metered policy (no background downloads on cellular by default); adaptive streaming (Phase 6); real sizes measured in Phases 3 and 6 |
+| a streamed install fails repeatedly on a weak link | M / L | safe by construction (5.6); `status` steers to download-then-install |
+| update channel down, or frozen by an attacker | L / M | the board simply stays on what it runs; channel age shown in `status` (5.7); SSH/USB fallbacks |
+| channel host lacks Range support, or per-file size limits (e.g. GitHub Releases) | M / M | Phase 0 step 6 checks the host; D13 |
+| background downloads fill `/data` | L / M | free-space check, one pending bundle, deleted after commit |
 | meta-rauc vs this repo's host workarounds (Python 3.14, gcc-12) | M / L | build `rauc-native` first in Phase 3 |
 | `IMAGE_ROOTFS_SIZE` override ignored by meta-tegra's sizing | M / L | Phase 1 check; otherwise accept 16 GiB writes |
 
@@ -848,11 +1101,14 @@ safe in-place conversion, and the plan does not attempt one.
 | D4 | One-time erase-and-reflash migration | **yes**, with the section 8 backup |
 | D5 | Carry passwords over, or reset them to the image's `BOAT_PASSWORD_HASH`? | **carry over** (merge the hash only) |
 | D6 | Downgrades: reject via `min-bundle-version`, raised deliberately per release? | **yes** |
-| D7 | Transport for now | SSH push + USB stick (exFAT/ext4); HTTPS streaming later |
+| D7 | Transport | **OTA** from an HTTPS channel: download-then-install (Phase 5), then streaming + adaptive (Phase 6). SSH push and USB (exFAT/ext4) stay as fallbacks. |
 | D8 | Watchdog: systemd `RuntimeWatchdogSec` as the only `/dev/watchdog` opener? | **yes** (the `watchdog` daemon's custom checks aren't used) |
 | D9 | Key custody: dev keys outside `WORKROOT` with backup; production CA offline; bench CA separate | **yes** |
 | D10 | Attempt budget: trial 1, committed 2 | **yes** (bounded by NVIDIA's 3-warm-boot limit) |
 | D11 | `/home` on `/data` (persistent across updates) vs carry-over of `~/.ssh` only | **`/home` on `/data`** |
+| D12 | How automatic is OTA? Check + download in the background, with install and reboot always started by you? | **yes** (`BOAT_UPDATE_AUTO=download`) |
+| D13 | Where to host the channel: your own HTTPS server or object storage (needs Range requests and per-file sizes of several GB) | **your own host or object storage**, not GitHub Releases |
+| D14 | Background downloads over metered (cellular) links | **no** by default; streaming at anchor when you choose to |
 
 ---
 
@@ -899,6 +1155,22 @@ Claims the review checked and confirmed:
   through `initrd-flash`.
 - **GRUB 2.06 and systemd 250:** no part-label search in GRUB;
   `boot-complete.target` and `JobTimeoutAction` exist in systemd 250.
+
+### Revision v3 (your request: OTA in the main phases)
+
+| change | where |
+|---|---|
+| OTA is now a goal, and installs stay operator-started (D12) | 1 |
+| New section on the update channel: signed index; check → resumable download → ready; metered policy; streaming + adaptive; background streaming rejected because it would drop the fallback slot (verified: RAUC leaves the target non-bootable when `activate-installed=false`) | 5.10 |
+| The pull-only OTA threat model: freeze, bandwidth, privacy, credentials | 5.7 |
+| The channel config is carried over | 5.8 |
+| Phase 3 builds adaptive, stream-ready bundles; Phase 5 = OTA stage 1; Phase 6 = OTA stage 2; validation moves to Phase 7, later work to Phase 8; Phase 0 gains the OTA prerequisites | 6 |
+| Tests 31–42 | 7 |
+| Over-the-air round trip in migration | 8 |
+| OTA risks | 9 |
+| D7 rewritten; D12–D14 added | 10 |
+
+The v3 additions have not yet had an independent adversarial pass like v1.
 
 ### Your review
 
@@ -959,7 +1231,16 @@ Sources:
   - `src/bootchooser.c` (grub backend);
   - `contrib/grub.conf`;
   - `data/de.pengutronix.rauc.conf` ("allows anyone to control rauc");
-  - meta-rauc `rauc-mark-good.service`.
+  - meta-rauc `rauc-mark-good.service`;
+  - `docs/advanced.rst` "HTTP Streaming" (needs verity bundles, Range
+    requests, kernel NBD) and "Adaptive Updates" (`block-hash-index`, ~10%
+    of a bundle for a small ext4 change, indices kept in the data directory);
+  - `docs/reference.rst` `[streaming]` (`tls-cert`, `tls-key`, `tls-ca`,
+    `send-headers`);
+  - `src/main.c` (`rauc install` takes `--tls-cert`, `--tls-key`,
+    `--tls-ca`, `--http-header`);
+  - `src/install.c` ("Leaving target slot non-bootable as requested by
+    activate_installed == false").
 - **GRUB 2.06:** `grub-core/kern/efi/init.c` (disables the UEFI watchdog);
   `normal/menu.c` (falls back to a prompt); `util/grub-editenv.c`
   (truncate + write).
