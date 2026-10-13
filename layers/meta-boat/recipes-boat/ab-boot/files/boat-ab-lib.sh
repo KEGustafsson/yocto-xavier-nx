@@ -1,8 +1,8 @@
 # shellcheck shell=sh
 # Sourced; the scripts that source it read the variables set here.
 # shellcheck disable=SC2034
-# Shared by boat-bootmode-guard, boat-grubenv-guard, boat-ab-commit and
-# boat-storage.
+# Shared by boat-bootmode-guard, boat-grubenv-guard, boat-commit, RAUC's
+# install handlers and boat-storage.
 # Installed as /usr/lib/boat-ab/lib.sh with the build's layout values filled
 # in; see docs/plans/ab-os-updates.md sections 5.1-5.4.
 
@@ -131,26 +131,31 @@ booted_on_trial() {
 # file's clusters at once but only marks the moved file's directory entry
 # dirty, so until writeback that entry still points at the freed clusters:
 # fsync the renamed file itself, which writes the entry, then the directory.
+# Every step must succeed: callers act on the result (and few run set -e).
 replace_file() {
-    sync "$1"
-    mv "$1" "$2"
-    sync "$2"
-    sync "$(dirname "$2")"
+    sync "$1" && mv "$1" "$2" && sync "$2" && sync "$(dirname "$2")"
 }
 
 # Set KEY=VALUE pairs in grubenv, on a copy that then replaces it, and bring
 # grubenv.bak - GRUB's fallback if grubenv is ever torn - up to date with it.
+# Fails, leaving grubenv as it was, if any step fails.
 grubenv_set() {
     rm -f "${BOAT_AB_GRUBENV}.new"
-    cp "$BOAT_AB_GRUBENV" "${BOAT_AB_GRUBENV}.new"
-    grub-editenv "${BOAT_AB_GRUBENV}.new" set "$@"
-    replace_file "${BOAT_AB_GRUBENV}.new" "$BOAT_AB_GRUBENV"
+    if ! { cp "$BOAT_AB_GRUBENV" "${BOAT_AB_GRUBENV}.new" \
+            && grub-editenv "${BOAT_AB_GRUBENV}.new" set "$@" \
+            && replace_file "${BOAT_AB_GRUBENV}.new" "$BOAT_AB_GRUBENV"; }; then
+        rm -f "${BOAT_AB_GRUBENV}.new"
+        return 1
+    fi
     grubenv_sync_bak
 }
 
 # Make grubenv.bak a copy of grubenv, if it is not one already.
 grubenv_sync_bak() {
     cmp -s "$BOAT_AB_GRUBENV" "${BOAT_AB_GRUBENV}.bak" && return 0
-    cp "$BOAT_AB_GRUBENV" "${BOAT_AB_GRUBENV}.bak.new"
-    replace_file "${BOAT_AB_GRUBENV}.bak.new" "${BOAT_AB_GRUBENV}.bak"
+    if ! { cp "$BOAT_AB_GRUBENV" "${BOAT_AB_GRUBENV}.bak.new" \
+            && replace_file "${BOAT_AB_GRUBENV}.bak.new" "${BOAT_AB_GRUBENV}.bak"; }; then
+        rm -f "${BOAT_AB_GRUBENV}.bak.new"
+        return 1
+    fi
 }

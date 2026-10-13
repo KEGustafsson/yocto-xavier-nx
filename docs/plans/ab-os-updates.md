@@ -1,7 +1,7 @@
 # Plan: A/B OS updates with automatic fallback
 
 **Status: v4, being implemented phase by phase (section 6).** Every
-decision in section 10 was taken at its recommendation. Phases 0 to 3 are
+decision in section 10 was taken at its recommendation. Phases 0 to 4 are
 in the repository, behind `AB_LAYOUT` (off by default); their exit tests
 need the bench board. Section 11 records what each review pass found and how
 the plan answers it.
@@ -206,8 +206,8 @@ boot this kernel correctly.
         v
    tegra-minimal-initramfs (patched: that slot only, GPT name checked, bounded retry, reboot)
         v
-   systemd -> boat-commit.service (health gate) -> rauc mark-good + COMMITTED=1
-                                                 or mark-bad + reboot (trial only)
+   systemd -> boat-commit.service (health gate) -> OK=1 TRY=0 COMMITTED=1
+                                                 or OK=0 + reboot (trial only)
 ```
 
 **Getting GRUB into the path** (review finding B1):
@@ -341,7 +341,7 @@ Points that need care:
 |---|---|---|
 | `ORDER` | RAUC | e.g. `"B A"`; GRUB tries slots in this order |
 | `A_OK` / `B_OK` | RAUC + GRUB | slot is usable. RAUC sets 0 before writing a slot; GRUB sets 0 when a slot has used up its attempts. |
-| `A_TRY` / `B_TRY` | GRUB counts up, RAUC `mark-good` resets to 0 | **unconfirmed boot attempts** (a count, not a flag) |
+| `A_TRY` / `B_TRY` | GRUB counts up, `boat-commit` resets to 0 | **unconfirmed boot attempts** (a count, not a flag) |
 | `A_COMMITTED` / `B_COMMITTED` | ours | 1 once that slot's image passed a trial boot. Cleared for the target by the **pre-install** handler, so a fresh slot is a trial *by default* (review M7). |
 | `BOAT_STAY` | ours | bench escape hatch: GRUB adds `boat.stay=1` (no automatic reboots, 5.5) |
 
@@ -390,7 +390,7 @@ At build time, `grub.cfg` is generated from `KERNEL_ARGS` and checked with
 | scenario | boots | outcome |
 |---|---|---|
 | trial B panics | B(1 try) → A | A commits; B `OK=0`; NVIDIA count reset on A |
-| committed A, one power cut mid-boot | A(TRY 1) → cold boot → A(TRY 2) → mark-good | stays on A (cold boot also re-seeds NVIDIA's register; Phase 0 confirms this) |
+| committed A, one power cut mid-boot | A(TRY 1) → cold boot → A(TRY 2) → `boat-commit` resets TRY | stays on A (cold boot also re-seeds NVIDIA's register; Phase 0 confirms this) |
 | committed A broken, B good | A → A → B | B runs; reported in `status` |
 | both broken | A → A → B → (4th warm boot) | NVIDIA sticky recovery → stops in UEFI. The recovery procedure is documented (UEFI menu path captured in Phase 0, or USB reflash). |
 
@@ -435,23 +435,32 @@ Mechanics (review M3: meta-rauc's `rauc-mark-good.service` is
 `WantedBy=multi-user.target`, which orders `multi-user.target` *after* it, so
 a "multi-user reached" check would deadlock):
 
-- Mask meta-rauc's `rauc-mark-good.service`. One unit does the gating and
-  the marking: `boat-commit.service`. It is `Type=oneshot` and
+- Leave meta-rauc's `rauc-mark-good` package out of the image (the `rauc`
+  recipe only recommends it). One unit does the gating and the marking:
+  `boat-commit.service`. It is `Type=oneshot` and
   `DefaultDependencies=no` (so no target orders after it), `After=` the
   critical units, `WantedBy=multi-user.target`, and retries checks for up to
-  `TimeoutStartSec=10min`.
-- On success: `rauc status mark-good` (TRY=0), then `<slot>_COMMITTED=1`.
-  Either order is safe under a power cut, because the next boot just
-  re-checks.
-- **Trial failure:** `rauc status mark-bad booted`, record the reason in
-  `/data/boat-update/last-result` (best effort), then reboot. GRUB skips the
-  slot.
+  `TimeoutStartSec=10min`. It is *not* ordered after Docker, which waits for
+  `/data` and its check: the checks retry for Docker instead, so nothing on
+  `/data` can hold up the verdict.
+- On success: `<slot>_OK=1 TRY=0 COMMITTED=1` in **one atomic `grubenv`
+  write** (copy, `grub-editenv`, rename), read back. Not `rauc status
+  mark-good`: RAUC's grub backend rewrites `grubenv` in place, and a power
+  cut that tears that write sends GRUB to `grubenv.bak`, where the passed
+  trial still looks used up.
+- **Trial failure:** `<slot>_OK=0` the same way, record the reason in
+  `/data/boat-update/last-result` (best effort, and only if `/data` is the
+  `DATA` partition), then reboot. GRUB skips the slot.
+- **Committed boot:** the attempt counter is reset *first*, before any
+  check that may take a while.
 - **Committed Tier 1 failure:** no mark, no reboot. An alert shows in
-  `status`. The slot keeps running; the GRUB counter only hands over if it
-  then *also* fails to boot.
+  `status`. The attempt counter is still reset, since the slot did boot, so
+  the slot keeps running and the GRUB counter only hands over if it then
+  *also* fails to boot, twice.
 - `boat-trial-deadline.timer` (`ConditionKernelCommandLine=boat.trial=1`,
   `OnBootSec=15min`): if the trial still isn't committed, mark-bad and
-  reboot. This catches a commit unit that hangs.
+  reboot. This catches a commit unit that hangs. The gate and the deadline
+  take one lock, so only one of them decides, and a commit stops the timer.
 - **The sleep inhibitor** is held from install until the trial is committed,
   not just during the write.
 - `nv_update_verifier.service` keeps running unconditionally. It only feeds
@@ -626,7 +635,8 @@ The order matches RAUC 1.13's `install.c`:
   - `/var/lib/bluetooth/`;
   - `/etc/hostname` and `/etc/localtime`;
   - the operator-edited `CONFFILES` (`/etc/default/boat-power`,
-    `/etc/default/boat-bluetooth`, `/etc/docker/daemon.json`);
+    `/etc/default/boat-bluetooth`, `/etc/docker/daemon.json`,
+    `/etc/boat-update/health.conf`);
   - the password hash fields of `root` and `boat`, merged (**D5**);
   - `/etc/nv_boot_control.conf`.
   - Not on this list: the OTA channel configuration. Its defaults ship in
@@ -1097,7 +1107,8 @@ bundle sizes wait for the bench board.*
   - `rauc status` is right on both slots;
   - an unprivileged `busctl call` to RAUC is denied.
 
-**Phase 4: health gate and reset coverage.** Effort: M.
+**Phase 4: health gate and reset coverage.** Effort: M. *Implemented; the
+exit criteria wait for the bench board.*
 
 - `boat-commit` (Tier 1/2, configured in `/etc/boat-update/health.conf`),
   replacing the Phase 1 stub.
@@ -1492,6 +1503,22 @@ Claims the review checked and confirmed:
 | `do_bundle`'s signature had the key's path, not its contents | `file-checksums` on the key, certificate and keyring |
 | RAUC splits a version at its last `-`, so `1.0.0-rc-1` would not parse | `BOAT_RELEASE` allows no `-` inside the pre-release part |
 | dbus-daemon's policy goes by uid, so a container running as root with the system bus passes the root-only policy | stated in the policy and 5.7: such a container must run as an unprivileged user |
+
+### Review pass 7 (findings while implementing Phase 4)
+
+| finding | resolution |
+|---|---|
+| a committed boot whose Tier 1 check fails, if it left its attempt count alone, would hand the boat to the older slot after one more unlucky boot, for a fault (an unmounted ESP, say) that the other slot shares | every committed boot that reaches `boat-commit` resets its count; a Tier 1 failure is an alert only (5.4) |
+| the `watchdog` daemon and systemd's `RuntimeWatchdogSec` cannot both open `/dev/watchdog` | A/B images leave the daemon out (D8); `boat-power`'s watchdog setting has no effect there, and Phase 7 re-tests SC7 that way |
+| an emergency-mode reboot with no delay gives nobody at the console the chance to read why | 60 s on the console first; `boat.stay=1` keeps the shell for bench work |
+| the gate was ordered after Docker, which waits for `/data` and its unbounded check: a slow `/data` could fail a good trial at the deadline, or leave a committed slot's count unreset through two power cuts | not ordered after Docker (the checks retry for it); a committed boot resets its count before any check |
+| Tier 1's `rauc status` goes through `rauc.service`, which waits for `/data` - so a `DATA` fault failed the OS's Tier 1 | checked only when `/data` is the `DATA` partition |
+| `grubenv_set` returned only its last step's status, so a commit whose write failed reported success (and the deadline then rolled it back without a word) | every step must succeed; the commit reads `COMMITTED=1` back |
+| `systemctl suspend` as root ignores block inhibitors unless asked to check them, so `boat-sleep` ignored the trial's inhibitor (and every other one) | `--check-inhibitors=yes`; and `boat-sleep` refuses during a trial even with `--force` |
+| RAUC's mark-good rewrites `grubenv` in place: a torn write leaves GRUB the `.bak` copy, where the passed trial still looks used up | commit and fail with one atomic `grubenv` write |
+| the gate and the deadline could decide at the same time, and through the same temporary file | one lock; a commit stops the deadline timer; `BOAT_HEALTH_DEADLINE` is held within the unit's limit |
+| with `/data` missing, `last-result` and `failed-versions` went onto the slot's own rootfs under the bare mount point | written only when `/data` is the `DATA` partition |
+| an operator's `health.conf` was replaced by the image's at every update | carried over (5.8) |
 
 ### Your review
 

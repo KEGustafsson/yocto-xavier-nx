@@ -1,0 +1,15 @@
+# A trial that is not committed 15 minutes after boot fails, whatever is
+# holding boat-commit up. OnBootSec= counts CLOCK_MONOTONIC, which stops
+# while the board sleeps; boat-trial-inhibit (honoured by boat-sleep, with
+# or without --force) keeps it awake meanwhile. A commit stops this timer.
+[Unit]
+Description=A/B trial deadline
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
+ConditionKernelCommandLine=boat.trial=1
+
+[Timer]
+OnBootSec=15min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

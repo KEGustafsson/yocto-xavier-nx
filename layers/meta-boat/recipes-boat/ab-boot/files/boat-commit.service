@@ -1,0 +1,30 @@
+# The A/B health gate (docs/plans/ab-os-updates.md 5.4). DefaultDependencies
+# =no on purpose: multi-user.target is then NOT ordered after it, so a gate
+# that waits for multi-user's units cannot deadlock the boot it is judging.
+[Unit]
+Description=A/B health gate: commit, or fail, the slot this boot came from
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
+DefaultDependencies=no
+ConditionKernelCommandLine=rauc.slot
+# Bench switch: a slot whose rootfs has /etc/boat-ab-nocommit is never
+# judged - e.g. to test that a crashing trial falls back. (The kernel
+# command line cannot be edited on this board: GRUB has no menu.)
+ConditionPathExists=!/etc/boat-ab-nocommit
+Requires=boat-grubenv-guard.service
+# Not after docker.service: Docker waits for /data, and /data for its own
+# check, which may take long. The checks retry for Docker instead, so a
+# /data problem can never hold up - or fail - the OS's own verdict.
+After=boat-grubenv-guard.service basic.target network.target NetworkManager.service systemd-logind.service dbus.service sshd.socket boat-bootmode-guard.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/boat-commit
+# The checks retry for BOAT_HEALTH_DEADLINE (9 minutes); this is the hard
+# stop if something in them hangs.
+TimeoutStartSec=10min
+
+[Install]
+WantedBy=multi-user.target

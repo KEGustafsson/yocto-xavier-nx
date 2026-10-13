@@ -1,0 +1,17 @@
+# systemd's emergency and rescue modes wait for a console login forever - on
+# a boat nobody is at the console, and a slot that cannot get past them
+# never gets the reboot that lets GRUB count it and fall back. This reboots
+# 60 seconds in. Shared mounts (ESP, /data, swap) are nofail, so only a
+# fault in the slot itself gets here. boat.stay=1 keeps the shell.
+[Unit]
+Description=Reboot out of emergency/rescue mode (A/B fallback)
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
+DefaultDependencies=no
+ConditionKernelCommandLine=!boat.stay=1
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'echo "boat: emergency/rescue mode - rebooting in 60 s so the A/B fallback can work (boat.stay=1 prevents this)" > /dev/console; sleep 60; exec systemctl --force reboot'
+
+[Install]
+WantedBy=emergency.target rescue.target

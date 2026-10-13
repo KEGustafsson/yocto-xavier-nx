@@ -31,8 +31,7 @@ do_install[prefuncs] += "boat_check_keyring"
 do_install[file-checksums] += "${BOAT_KEYS_DIR}/ca.cert.pem:True"
 
 # meta-rauc's mark-good unit commits a slot as soon as multi-user.target is
-# reached; on this board boat-ab-commit (and later boat-commit's health
-# gate) decides that instead.
+# reached; on this board boat-commit's health gate decides that instead.
 RRECOMMENDS:${PN}:remove = "${PN}-mark-good"
 
 # The unprivileged user RAUC's streaming client runs as ([streaming]

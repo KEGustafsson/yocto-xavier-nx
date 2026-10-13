@@ -59,6 +59,7 @@ copy /etc/nv_boot_control.conf
 copy /etc/default/boat-power
 copy /etc/default/boat-bluetooth
 copy /etc/docker/daemon.json
+copy /etc/boat-update/health.conf
 # root's home is in the slot on this distro (/home/root): its SSH keys.
 copy /home/root/.ssh
 

@@ -1,12 +1,15 @@
-SUMMARY = "A/B boot plumbing: keep GRUB in charge, guard its state, confirm boots"
+SUMMARY = "A/B boot plumbing: keep GRUB in charge, guard its state, gate commits"
 DESCRIPTION = "On-board half of the A/B boot path for an A/B boat image \
 (BOAT_AB_LAYOUT). boat-bootmode-guard keeps the UEFI variable \
 L4TDefaultBootMode at 0 so L4TLauncher hands off to GRUB, and records whether \
 this boot came through GRUB. boat-grubenv-guard validates GRUB's boot state on \
-the ESP and rebuilds it when a power cut tore it. boat-ab-commit confirms the \
-booted slot (a Phase 1 stub with no health gate - Phase 4 replaces it). The \
-ESP is mounted by device and partition number, not by label. See \
-docs/plans/ab-os-updates.md sections 5.1-5.4."
+the ESP and rebuilds it when a power cut tore it. boat-commit is the health \
+gate: it commits a slot on trial only once its checks pass, and otherwise \
+marks it bad and reboots into the other slot; a trial deadline, a sleep \
+inhibitor and an emergency-mode reboot make sure every failure ends in that \
+reboot, and systemd owns the hardware watchdog. The ESP is mounted by device \
+and partition number, not by label. See docs/plans/ab-os-updates.md sections \
+5.1-5.5."
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
@@ -16,9 +19,15 @@ SRC_URI = "\
     file://boat-bootmode-guard.service \
     file://boat-grubenv-guard.sh \
     file://boat-grubenv-guard.service \
-    file://boat-ab-commit.sh \
-    file://boat-ab-commit.service \
+    file://boat-commit.sh \
+    file://boat-commit.service \
+    file://boat-trial-deadline.service \
+    file://boat-trial-deadline.timer \
+    file://boat-trial-inhibit.service \
+    file://boat-emergency-reboot.service \
+    file://health.conf \
     file://10-boat-ab-esp.conf \
+    file://10-boat-ab-watchdog.conf \
 "
 
 S = "${WORKDIR}"
@@ -56,12 +65,23 @@ do_install() {
     install -d ${D}${sbindir}
     install -m 0755 ${WORKDIR}/boat-bootmode-guard.sh ${D}${sbindir}/boat-bootmode-guard
     install -m 0755 ${WORKDIR}/boat-grubenv-guard.sh ${D}${sbindir}/boat-grubenv-guard
-    install -m 0755 ${WORKDIR}/boat-ab-commit.sh ${D}${sbindir}/boat-ab-commit
+    install -m 0755 ${WORKDIR}/boat-commit.sh ${D}${sbindir}/boat-commit
 
     install -d ${D}${systemd_system_unitdir}
-    for u in boat-bootmode-guard boat-grubenv-guard boat-ab-commit; do
-        install -m 0644 ${WORKDIR}/$u.service ${D}${systemd_system_unitdir}/
+    for u in boat-bootmode-guard.service boat-grubenv-guard.service \
+             boat-commit.service boat-trial-deadline.service \
+             boat-trial-deadline.timer boat-trial-inhibit.service \
+             boat-emergency-reboot.service; do
+        install -m 0644 ${WORKDIR}/$u ${D}${systemd_system_unitdir}/
     done
+
+    install -d ${D}${sysconfdir}/boat-update
+    install -m 0644 ${WORKDIR}/health.conf ${D}${sysconfdir}/boat-update/health.conf
+
+    # systemd, not a daemon, owns /dev/watchdog on this layout (plan D8).
+    install -d ${D}${systemd_unitdir}/system.conf.d
+    install -m 0644 ${WORKDIR}/10-boat-ab-watchdog.conf \
+        ${D}${systemd_unitdir}/system.conf.d/10-boat-ab-watchdog.conf
 
     # meta-tegra's ESP mount unit is boot-efi.mount (ESPMOUNT = /boot/efi).
     install -d ${D}${systemd_system_unitdir}/boot-efi.mount.d
@@ -75,20 +95,32 @@ do_install() {
     # The scripts source the library from its installed path.
     sed -i -e 's|^\. /usr/lib/boat-ab/lib.sh$|. ${libdir}/boat-ab/lib.sh|' \
         ${D}${sbindir}/boat-bootmode-guard ${D}${sbindir}/boat-grubenv-guard \
-        ${D}${sbindir}/boat-ab-commit
+        ${D}${sbindir}/boat-commit
 }
 do_install[vardeps] += "BOAT_AB_DISK BOAT_AB_PARTNUM_APP_A BOAT_AB_PARTNUM_APP_B BOAT_AB_PARTNUM_ESP \
     BOAT_AB_PARTNUM_SWAP BOAT_AB_PARTNUM_DATA BOAT_AB_ESP_UNIT"
 
-SYSTEMD_SERVICE:${PN} = "boat-bootmode-guard.service boat-grubenv-guard.service boat-ab-commit.service"
+SYSTEMD_SERVICE:${PN} = "\
+    boat-bootmode-guard.service \
+    boat-grubenv-guard.service \
+    boat-commit.service \
+    boat-trial-deadline.timer \
+    boat-trial-inhibit.service \
+    boat-emergency-reboot.service \
+"
 
 FILES:${PN} = "\
     ${libdir}/boat-ab \
     ${sbindir}/boat-bootmode-guard \
     ${sbindir}/boat-grubenv-guard \
-    ${sbindir}/boat-ab-commit \
+    ${sbindir}/boat-commit \
     ${systemd_system_unitdir} \
+    ${systemd_unitdir}/system.conf.d \
+    ${sysconfdir}/boat-update/health.conf \
 "
+
+# The health gate's settings are the operator's to tune.
+CONFFILES:${PN} = "${sysconfdir}/boat-update/health.conf"
 
 # grub-editenv     - reads and writes GRUB's boot state on the ESP
 # efivar           - writes L4TDefaultBootMode (it handles efivarfs's
@@ -97,14 +129,17 @@ FILES:${PN} = "\
 # util-linux-blkid - "blkid -p -s PART_ENTRY_NAME": the GPT name check behind
 #                    every action; busybox's blkid cannot probe it
 # util-linux-mountpoint - mountpoint
-# coreutils        - od, and sync FILE for the grubenv writes (cmp comes
-#                    from busybox)
+# coreutils        - od, sync FILE for the grubenv writes, timeout for the
+#                    operator's health checks, "sleep infinity" for the trial
+#                    inhibitor (cmp comes from busybox)
 # util-linux-fsck, dosfstools - systemd-fsck's fsck and fsck.vfat, for the
 #                    ESP check before it is mounted
 # setup-nv-boot-control-service - boot-efi.mount, the unit the ESP drop-in
 #                    above amends. Otherwise only tegra-redundant-boot
 #                    (MACHINE_EXTRA_RDEPENDS) brings it, which an image
 #                    without packagegroup-base never gets.
+# util-linux-flock - boat-commit's gate and its trial deadline decide one at
+#                    a time
 RDEPENDS:${PN} = "\
     grub-editenv \
     efivar \
@@ -114,4 +149,5 @@ RDEPENDS:${PN} = "\
     dosfstools \
     coreutils \
     setup-nv-boot-control-service \
+    util-linux-flock \
 "
