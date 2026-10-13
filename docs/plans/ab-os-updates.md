@@ -1,7 +1,7 @@
 # Plan: A/B OS updates with automatic fallback
 
 **Status: v4, being implemented phase by phase (section 6).** Every
-decision in section 10 was taken at its recommendation. Phases 0 to 5 are
+decision in section 10 was taken at its recommendation. Phases 0 to 6 are
 in the repository, behind `AB_LAYOUT` (off by default); their exit tests
 need the bench board. Section 11 records what each review pass found and how
 the plan answers it.
@@ -598,7 +598,11 @@ The order matches RAUC 1.13's `install.c`:
     downloading. The index is signed by its own key (5.10), and the board
     checks its `channel`, a monotonic `serial` (no replay), the version
     against both slots and the failed list, `size` and SHA-256. Downloads
-    are size-capped, redirect-free and limited in re-fetches.
+    are size-capped, redirect-free and limited in re-fetches. A streamed
+    install cannot be checked first (RAUC reads the bundle as it writes
+    it, and follows redirects), so it is checked straight after: the
+    slot must hold the release the index named, or it is marked bad
+    before anything boots it (Phase 6).
   - **learn the board's version** from its requests. TLS keeps this from
     passive observers; a client certificate (D15) keeps it from the public.
 - **Index verification is pinned to our CA only.** OpenSSL's default store
@@ -606,8 +610,9 @@ The order matches RAUC 1.13's `install.c`:
   never sign an index (5.10).
 - **Credentials:**
   - The only supported credential is a **TLS client certificate**, in
-    `/data/boat-update/` (mode 640, group of the RAUC streaming sandbox
-    user). It grants **read** access to the channel only. Publishing uses a
+    `/data/boat-update/` (key mode 600, root only: only `boat-update`
+    uses it, also for streaming - RAUC streams through its relay, Phase 6).
+    It grants **read** access to the channel only. Publishing uses a
     separate credential that stays on the build host.
   - **Basic auth and bearer headers are not used:** they would follow
     redirects to other hosts (and to `http`) and be written to the journal
@@ -910,12 +915,26 @@ headers (review M3).
   sets `RAUC_SLOT_rootfs[adaptive] = "block-hash-index"`, a manifest flag.
   The index adds about 0.8% of the *uncompressed* image and is harmless
   for stage 1.
-- **`boat-update install --stream`** calls RAUC's D-Bus `InstallBundle`
-  directly, not the CLI, so nothing sensitive shows in `ps`.
-  - The client certificate goes in the `tls-cert`/`tls-key` arguments.
-  - `tls-no-verify` is never set.
-  - The bundle URL is the final, redirect-free one taken from the verified
-    index.
+- **`boat-update install --stream`** runs `rauc install` on a URL of a
+  relay inside `boat-update` on `127.0.0.1`. `rauc install` waits for
+  RAUC's `Completed` signal and fails if the service goes away mid-install.
+  - **RAUC never talks to the channel.** Its streaming client follows
+    redirects, to `http` too (`nbd.c`), and cannot be bound to a link. The
+    relay fetches each of RAUC's Range requests from the verified URL the
+    way `boat-update`'s downloads do: `https` only, no redirect followed,
+    with the client certificate, and bound (`SO_BINDTODEVICE`) to the link
+    checked when the stream started - not metered, unless `--allow-metered`
+    or `BOAT_UPDATE_METERED=yes` allows it. Anything but a 206 of exactly
+    the range asked for (same `Content-Range` offsets, that many bytes) is
+    a 502 to RAUC, which fails the install; RAUC checks `Content-Range`
+    only on its first request. A link that goes away fails it too. RAUC
+    gets no TLS options, so the key stays root-only and nothing
+    credential-bearing is on any command line.
+  - The bundle URL is the one from the verified index, on the channel the
+    offer was checked on. A preflight request for the first byte refuses a
+    redirecting or Range-less channel before RAUC marks the slot
+    unbootable, and the installed release is checked against the index
+    afterwards (5.7).
   - RAUC reads only the blocks it cannot find locally in either slot.
     RAUC's documentation reports **about 10% of the bundle** crossing the
     link for a small ext4 change.
@@ -928,9 +947,9 @@ headers (review M3).
     `CONFIG_BLK_DEV_NBD=y`; the fallback is `KERNEL_MODULE_AUTOLOAD += "nbd"`.
   - RAUC's `streaming` PACKAGECONFIG (meta-rauc's default).
   - The channel's Range support.
-  - **A dedicated `[streaming] sandbox-user`** that can read the client
-    key, through a group the key file belongs to. The sandbox drops root
-    before curl opens the key, so a root-only key would fail.
+  - **A dedicated `[streaming] sandbox-user`**, so RAUC's streaming
+    client does not run as root. It needs no credential: the relay holds
+    the client certificate.
 - **Limits on this BSP:**
   - kirkstone's libcurl has no HTTP/2, which RAUC recommends for
     high-latency links;
@@ -1194,14 +1213,21 @@ exit criteria wait for the bench board.*
   - README.
 
 **Phase 6: OTA stage 2 (streaming + adaptive installs).** Effort: S–M.
+*Implemented; the measurements and exit criteria wait for the bench board.*
 
-- **`boat-update install --stream`:** RAUC's D-Bus `InstallBundle` with the
-  final, redirect-free bundle URL from the verified index. The client
-  certificate, if any, goes in `tls-cert`/`tls-key`; never `tls-no-verify`,
-  and never a header credential (5.10).
-- **The `rauc-stream` sandbox user** and group-readable client key.
+- **`boat-update install --stream`:** `rauc install` through `boat-update`'s
+  local relay, which fetches from the verified URL with no redirects, the
+  client certificate and only over the checked link (5.10); never a header
+  credential. Only an offer a download would take is streamed (newer than
+  the running release, not failed here, checked on this channel), and
+  afterwards the slot must hold the release the index named, or it is
+  marked bad.
+- **The `rauc-stream` sandbox user**, with no credential of its own.
 - **Optional:** `rauc info <URL>` as a second, RAUC-native authenticity
-  check before a streamed install.
+  check before a streamed install. Not taken: it would check a different
+  fetch than the install's. RAUC checks the bundle's signature before it
+  writes a block, and the release check after the install ties the slot
+  to the index.
 - **Measure on the bench** the bytes transferred for:
   - a one-package change;
   - a kernel bump;
@@ -1210,7 +1236,9 @@ exit criteria wait for the bench board.*
 
   Put the numbers in docs/07, so choosing stream versus download is based
   on data rather than on RAUC's ~10% rule of thumb.
-- **`status`** shows the estimated transfer for each path.
+- **`status`** shows the estimated transfer for each path. Until the bench
+  numbers exist, it gives the download's remaining size and says a stream
+  fetches only the blocks neither slot has.
 - **Exit:**
   - from a cold boot with no manual `modprobe`, `rauc info https://…` and a
     streamed, adaptive install both work, with and without a client
@@ -1366,7 +1394,7 @@ safe in-place conversion, and the plan does not attempt one.
 | a streamed install fails repeatedly on a weak link | M / L | safe by construction (5.6); `status` steers to download-then-install |
 | update channel down, or frozen by an attacker | L / M | the board simply stays on what it runs; channel age shown in `status` (5.7); SSH/USB fallbacks |
 | index verification subtly wrong (OpenSSL purpose, trust store, binary mode) | M / H | exact flags pinned in 5.10, including `-no-CApath -no-CAstore`; tests 34, 43–45; host-side tests run the same `openssl` commands |
-| channel credential leaks (redirects, logs, `ps`) | M / M | client certificate only, no redirects, D-Bus instead of the CLI; tests 39, 47 |
+| channel credential leaks (redirects, logs, `ps`) | M / M | client certificate only, no redirects - streams too, through `boat-update`'s relay; tests 39, 47 |
 | channel host lacks Range support, or per-file size limits (e.g. GitHub Releases) | M / M | Phase 0 step 6 checks the host; D13 |
 | background downloads fill `/data` | L / M | free-space check, one pending bundle, deleted after commit |
 | meta-rauc vs this repo's host workarounds (Python 3.14, gcc-12) | M / L | build `rauc-native` first in Phase 3 |
@@ -1556,6 +1584,21 @@ Claims the review checked and confirmed:
 | index fields shown to the operator could carry control characters | refused (notes are filtered of C0, C1 and DEL) |
 | the accepted index's hash was kept once for all channels: back on a channel whose index had not changed, the board cried replay, and dropped that channel's given-up and re-fetch state (CodeRabbit) | the hash is kept per channel, like the serial |
 | `push-update.sh` ignored the install's exit status, so a refused install surfaced as "did not reboot within 5 minutes" (CodeRabbit) | only ssh's 255 - the connection dropped by the reboot - is the expected end; any other failure stops with the install's error |
+
+### Review pass 9 (findings while implementing Phase 6)
+
+| finding | resolution |
+|---|---|
+| `InstallBundle` returns as soon as the install starts, so its exit status says nothing about the result | `rauc install`, which waits for RAUC's `Completed` signal (below) |
+| RAUC's streaming client drops to `rauc-stream` before it opens the client certificate and key, so root-only files fail the stream, not the check | RAUC no longer opens them: it streams through `boat-update`'s relay, which holds the certificate; the key stays root-only (below) |
+| following `Operation` and `LastError` over `busctl` read a failed property read, and a RAUC that died mid-install (D-Bus activation restarts it idle, with no error), as a finished install - recorded, rebooted into, then recorded as a failed trial | `rauc install`: it subscribes to `Completed` before the call and fails when the service disappears |
+| a stream installed whatever signed bundle the channel served: RAUC checks the signature, not that it is the release the index offered, and its streaming client follows redirects - an older, vulnerable release could be installed | after the stream, the slot must hold the index's release (RAUC's slot status), or it is marked bad (`ORDER` back, `OK=0`) before any reboot |
+| a stream skipped the download path's checks: a failed release, or one no newer than the running slot (overwriting the rollback), was streamed; a streamed release's offer outlived its commit | a stream takes only an offer that is newer and not failed; housekeeping drops an offer that is neither |
+| an install that failed left the previous install's record in place, so the slot it had marked bad was recorded as that release failing a trial | each install forgets the previous record before RAUC writes the slot |
+| a stream fetched the offer's bundle by name from whatever channel was configured by then, though it was checked on another (CodeRabbit) | the offer records its channel and URL; a stream refuses an offer checked elsewhere |
+| RAUC's streaming client follows redirects, to `http` too, so a channel could send the board's requests elsewhere - its client certificate to another host, or GETs into the boat's own network (CodeRabbit) | RAUC streams from `boat-update`'s relay on `127.0.0.1`, which follows no redirect and passes on nothing but a 206 of exactly the range asked for; a preflight also refuses a redirecting or Range-less channel before RAUC marks the slot unbootable |
+| the metered-link check was made once, when a stream starts, and RAUC's client cannot be bound to a link: a route that moved to cellular mid-stream would be used (CodeRabbit) | the relay's connections are bound to the checked link (`SO_BINDTODEVICE`); if it goes away, the stream fails and the board stays on its slot |
+| the relay passed on any 206 no longer than the range asked for, and RAUC checks `Content-Range` only on its first request: bytes from elsewhere in the bundle would be written at the offset RAUC asked for (CodeRabbit) | the relay passes on only a 206 whose `Content-Range` names the offsets asked for and whose body is exactly that long; anything else is a 502 |
 
 ### Your review
 

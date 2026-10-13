@@ -7,6 +7,10 @@
     boat-update install [BUNDLE] [--reboot]
                                   install the ready bundle (or BUNDLE) into
                                   the other slot; it boots as a trial
+    boat-update install --stream [--reboot]
+                                  stream the offered bundle straight into the
+                                  other slot, fetching only the blocks
+                                  neither slot already has
     boat-update rollback [--yes]  switch to the other slot and reboot
     boat-update history           installs, trials and their results
     boat-update debug-hold on|off keep the board up after a failure
@@ -35,15 +39,21 @@ import configparser
 import contextlib
 import fcntl
 import hashlib
+import http.client
+import http.server
 import json
 import os
 import re
 import shlex
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.parse
 
 # Filled in at build time by the recipe: the A/B layout's disk and
 # partition numbers (BOAT_AB_* in meta-boat's layer.conf).
@@ -642,6 +652,7 @@ def do_check(conf, state, quiet=False):
     state["last_check"] = int(time.time())
     state["published"] = idx["published"]
     state["channel"] = conf["BOAT_UPDATE_CHANNEL"]
+    state["channel_url"] = conf["BOAT_UPDATE_URL"]
     state["message"] = message
     state["notes"] = idx["notes"]
     if offer:
@@ -649,7 +660,7 @@ def do_check(conf, state, quiet=False):
         if prev.get("bundle") != offer["bundle"]:
             # Content-addressed names: a different name is a different file.
             discard_downloads(keep=None)
-        state["offer"] = {k: offer[k] for k in ("version", "bundle", "size", "sha256", "l4t")}
+        state["offer"] = {k: offer[k] for k in ("version", "bundle", "size", "sha256", "l4t", "channel")}
     else:
         state.pop("offer", None)
     save_state(state)
@@ -854,27 +865,35 @@ def trial_outcome(state):
     save_state(state)
 
 
-def housekeeping(state):
-    """A ready bundle that is now running (committed), failed its trial or is
-    no newer than the running release is no longer needed: the old slot is
-    the rollback, not the file."""
-    trial_outcome(state)
-    r = state.get("ready")
-    if not r:
-        return
-    slot = booted_slot()
-    env = grubenv() or {}
-    done = (r["version"] == running_release() and slot and env.get("%s_COMMITTED" % slot) == "1")
+def no_longer_wanted(version):
+    """No newer than the running release, or failed a trial here."""
     try:
-        stale = not newer(r["version"], running_release())
+        stale = not newer(version, running_release())
     except ValueError:
         stale = False
-    if done or stale or r["version"] in failed_versions():
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(os.path.join(downloads_dir(), r["bundle"]))
-        state.pop("ready", None)
-        if (state.get("offer") or {}).get("version") == r["version"]:
-            state.pop("offer", None)
+    return stale or version in failed_versions()
+
+
+def housekeeping(state):
+    """A ready bundle - or an offer - that is now running (committed), failed
+    its trial or is no newer than the running release is no longer needed:
+    the old slot is the rollback, not the file."""
+    trial_outcome(state)
+    changed = False
+    r = state.get("ready")
+    if r:
+        slot = booted_slot()
+        env = grubenv() or {}
+        done = (r["version"] == running_release() and slot and env.get("%s_COMMITTED" % slot) == "1")
+        if done or no_longer_wanted(r["version"]):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(os.path.join(downloads_dir(), r["bundle"]))
+            state.pop("ready", None)
+            changed = True
+    if state.get("offer") and no_longer_wanted(state["offer"]["version"]):
+        state.pop("offer", None)
+        changed = True
+    if changed:
         save_state(state)
 
 
@@ -896,6 +915,29 @@ def ready_to_install(state):
     return bundle
 
 
+def offer_to_stream(state, conf):
+    """The current offer, if it is still worth installing - the checks
+    ready_to_install makes for a downloaded bundle - and still from the
+    channel it was checked on: the bundle is fetched by name from the
+    channel configured now."""
+    housekeeping(state)
+    offer = state.get("offer")
+    if not offer:
+        raise UpdateError("the channel offers nothing newer to stream (or it failed a trial here) - "
+                          "'boat-update check' first")
+    if offer.get("channel") != conf["BOAT_UPDATE_CHANNEL"] or state.get("channel_url") != conf["BOAT_UPDATE_URL"]:
+        raise UpdateError("the channel has changed since this offer was checked - 'boat-update check' first")
+    return offer
+
+
+def forget_installed(state):
+    """The other slot is about to be overwritten: whatever was installed
+    there before is no longer waiting for its trial (and must not be
+    recorded as failing one when this install leaves the slot bad)."""
+    if state.pop("installed", None) is not None:
+        save_state(state)
+
+
 def resolve_bundle(state, bundle):
     if bundle is None:
         bundle = ready_to_install(state)
@@ -907,20 +949,35 @@ def resolve_bundle(state, bundle):
     return bundle
 
 
-def do_install(conf, state, bundle=None, reboot=False):
-    slot, _ = gates(for_install=True)
+def do_install(conf, state, bundle=None, reboot=False, stream=False, allow_metered=False):
+    slot, _ = gates(for_install=not stream)
+    if stream:
+        if bundle is not None:
+            raise UpdateError("--stream installs what the channel offers; it does not take a file")
+        dev, metered, why = link()
+        if metered and conf["BOAT_UPDATE_METERED"] != "yes" and not allow_metered:
+            raise UpdateError("the link is metered (%s) - --allow-metered to stream over it anyway" % why)
     if os.environ.get("BOAT_UPDATE_INNER") != "1":
         # Run the install as its own systemd unit, so a dropped SSH session
         # cannot kill this wrapper while RAUC carries on without it. The
         # lock is taken here too: to fail fast if a download holds it, and
-        # because choosing the bundle tidies the state.
+        # because choosing the bundle tidies the state. A streamed install
+        # holds off sleep and shutdown from here; a local one takes the
+        # inhibitor around 'rauc install' itself.
         with locked():
-            bundle = resolve_bundle(load_state(), bundle)
+            if stream:
+                offer_to_stream(load_state(), conf)
+            else:
+                bundle = resolve_bundle(load_state(), bundle)
         unit = "boat-update-install"
         run(["systemctl", "reset-failed", unit])
+        inner = [sys.argv[0], "install"] + (["--stream"] if stream else [bundle]) \
+            + (["--reboot"] if reboot else []) + (["--allow-metered"] if allow_metered else [])
+        if stream:
+            inner = ["systemd-inhibit", "--what=sleep:shutdown", "--who=boat-update",
+                     "--why=streaming into the other A/B slot", "--mode=block"] + inner
         args = ["systemd-run", "--unit=" + unit, "--setenv=BOAT_UPDATE_INNER=1",
-                "--description=boat-update install",
-                sys.argv[0], "install", bundle] + (["--reboot"] if reboot else [])
+                "--description=boat-update install"] + inner
         r = run(args)
         if r.returncode != 0:
             raise UpdateError("could not start the install unit: %s" % r.stderr.strip())
@@ -940,9 +997,19 @@ def do_install(conf, state, bundle=None, reboot=False):
             run(["systemctl", "reset-failed", unit])
             raise UpdateError("the install failed (%s) - see above; the board stays on this slot" % result)
         return
+    if stream:
+        version = stream_install(conf, state, slot, dev)
+        # Remembered so a trial that never reaches boat-commit is still recorded.
+        state["installed"] = {"version": version, "slot": other(slot)}
+        save_state(state)
+        if reboot:
+            say("rebooting now")
+            run(["systemctl", "reboot"])
+        return
     bundle = resolve_bundle(state, bundle)
     info = verify_bundle_info_only(bundle)
     say("installing %s (%s) into the other slot" % (bundle, info.get("version", "?")))
+    forget_installed(state)
     # Sleep and shutdown are held off for the whole write (plan 5.6); the
     # trial's own inhibitor takes over after the reboot.
     r = subprocess.run(["systemd-inhibit", "--what=sleep:shutdown", "--who=boat-update",
@@ -957,6 +1024,175 @@ def do_install(conf, state, bundle=None, reboot=False):
     if reboot:
         say("rebooting now")
         run(["systemctl", "reboot"])
+
+
+class BoundHTTPS(http.client.HTTPSConnection):
+    """An HTTPS connection that can only go out through one network device:
+    when that link goes away, it fails - it never moves to another route."""
+
+    def __init__(self, host, port, context, dev, timeout=60):
+        super().__init__(host, port, context=context, timeout=timeout)
+        self.dev = dev
+
+    def connect(self):
+        err = OSError("cannot resolve %s" % self.host)
+        for family, kind, proto, _, addr in socket.getaddrinfo(self.host, self.port, 0, socket.SOCK_STREAM):
+            sock = socket.socket(family, kind, proto)
+            try:
+                if self.dev:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, self.dev.encode())
+                sock.settimeout(self.timeout)
+                sock.connect(addr)
+            except OSError as e:
+                sock.close()
+                err = e
+                continue
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+            return
+        raise err
+
+
+RANGE_RE = re.compile(r"bytes=(\d+)-(\d+)$")
+CONTENT_RANGE_RE = re.compile(r"bytes\s+(\d+)-(\d+)/(?:\d+|\*)", re.IGNORECASE)
+RELAY_MAX = 64 << 20      # far above any one request RAUC's streaming client makes
+
+
+def start_relay(conf, url, dev):
+    """RAUC streams from a relay inside boat-update on 127.0.0.1, never from
+    the channel itself. Each of RAUC's Range requests is fetched from the
+    verified URL the way boat-update's own transfers are made: https only,
+    no redirect followed (RAUC's own client would follow one, to http too),
+    over the link checked when the stream started and nothing else (not
+    metered unless that was allowed), with the client certificate - which RAUC never sees, so the key stays
+    root-only. Anything but a 206 of exactly the range asked for (its
+    Content-Range naming the same offsets, its body that long) is a 502 to
+    RAUC, which then fails the install: RAUC checks Content-Range only on
+    its first request, so bytes from elsewhere in the bundle would be
+    written at the offset it asked for. Returns (server, the URL to hand
+    RAUC)."""
+    u = urllib.parse.urlsplit(url)
+    ctx = ssl.create_default_context()
+    if conf["BOAT_UPDATE_CLIENT_CERT"]:
+        ctx.load_cert_chain(conf["BOAT_UPDATE_CLIENT_CERT"], conf["BOAT_UPDATE_CLIENT_KEY"] or None)
+    local = threading.local()
+
+    class Relay(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def refuse(self, code, why):
+            self.send_response_only(code)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            warn("stream relay: %s" % why)
+
+        def do_GET(self):
+            m = RANGE_RE.match(self.headers.get("Range", ""))
+            if not m or self.path != u.path or int(m.group(2)) - int(m.group(1)) >= RELAY_MAX:
+                return self.refuse(400, "unexpected request %s %r" % (self.path, self.headers.get("Range")))
+            want = int(m.group(2)) - int(m.group(1)) + 1
+            for attempt in (1, 2):           # a kept-alive connection may have been closed
+                conn = getattr(local, "conn", None) or BoundHTTPS(u.hostname, u.port or 443, ctx, dev)
+                local.conn = conn
+                try:
+                    conn.request("GET", u.path, headers={"Range": m.group(0)})
+                    resp = conn.getresponse()
+                    body = resp.read(want + 1)
+                    break
+                except (OSError, http.client.HTTPException) as e:
+                    conn.close()
+                    local.conn = None
+                    if attempt == 2:
+                        return self.refuse(502, "the channel did not answer: %s" % e)
+            got = CONTENT_RANGE_RE.fullmatch(resp.getheader("Content-Range", "").strip())
+            if resp.status != 206 or len(body) != want or not got \
+                    or tuple(map(int, got.group(1, 2))) != tuple(map(int, m.group(1, 2))):
+                conn.close()
+                local.conn = None
+                if resp.status != 206:
+                    why = "HTTP %d%s" % (resp.status, " (a redirect)" if 300 <= resp.status < 400 else "")
+                else:
+                    why = "%d bytes as %r for %s" % (len(body), resp.getheader("Content-Range"), m.group(0))
+                return self.refuse(502, "the channel answered %s - not passed on to RAUC" % why)
+            self.send_response_only(206)
+            for name in ("Content-Range", "Date", "Last-Modified"):
+                if resp.getheader(name):
+                    self.send_header(name, resp.getheader(name))
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Relay)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, "http://127.0.0.1:%d%s" % (server.server_address[1], u.path)
+
+
+def stream_preflight(conf, url, dev):
+    """Ask for the bundle's first byte the way a download does - https
+    only, no redirects, the same client certificate, over the link that was
+    checked. RAUC's streaming client follows redirects, to http too, and
+    finds a missing Range support only after it has marked the slot
+    unbootable; both are refused here, before RAUC starts."""
+    r = run(curl_base(conf, dev) + ["--range", "0-0", "--max-filesize", "65536", "--max-time", "60",
+                                    "--output", "/dev/null", "--write-out", "%{http_code}", url])
+    code = r.stdout.strip()
+    if code == "206":
+        return
+    if code.startswith("3"):
+        raise UpdateError("the channel redirects the bundle (HTTP %s) - not streamed, since RAUC would "
+                          "follow it; 'boat-update download' and then 'install' never follow one" % code)
+    if code == "200":
+        raise UpdateError("the channel ignores Range requests, which streaming needs - "
+                          "'boat-update download' and then 'install' works without them")
+    raise UpdateError("the channel did not serve the bundle (HTTP %s): %s" % (code or "-", r.stderr.strip()))
+
+
+def stream_install(conf, state, slot, dev):
+    """The inner half of 'install --stream': RAUC streams the offered bundle
+    into the other slot, which must then hold the release the index named.
+    Returns that release."""
+    offer = offer_to_stream(state, conf)
+    url = channel_url(conf, offer["bundle"])
+    stream_preflight(conf, url, dev)
+    forget_installed(state)
+    say("streaming %s into the other slot (only the blocks it does not already have)" % offer["version"])
+    relay, local_url = start_relay(conf, url, dev)
+    try:
+        # 'rauc install', not a bare D-Bus call: it waits for RAUC's
+        # Completed signal and fails if the service goes away mid-install,
+        # so a RAUC that died is never read as one that finished.
+        p = subprocess.Popen(["rauc", "install", local_url],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        error = ""
+        for line in p.stdout:
+            line = line.rstrip("\n")
+            print(line, flush=True)
+            if "LastError:" in line:
+                error = line.split("LastError:", 1)[1].strip()
+        rc = p.wait()
+    finally:
+        relay.shutdown()
+        relay.server_close()
+    if rc != 0:
+        raise UpdateError("the streamed install failed - the board stays on this slot: %s. Streaming needs "
+                          "a link that stays up and a channel with Range support; 'boat-update download' "
+                          "and then 'install' is the robust path." % (error or "rauc exit %d" % rc))
+    # RAUC checks the bundle's signature and compatible, not that it is the
+    # release the index offered: an older signed bundle served at this URL
+    # would install. So the slot is checked now, before anything boots it
+    # (plan 5.7).
+    t = other(slot)
+    got = slot_version(t, rauc_slots())
+    if got != offer["version"]:
+        grubenv_set(**{"ORDER": "%s %s" % (slot, t), "%s_OK" % t: "0", "%s_TRY" % t: "0"})
+        raise UpdateError("the channel streamed %s, the index offered %s - slot %s is marked bad and "
+                          "the board stays on this slot" % (got or "an unknown release", offer["version"], t))
+    say("installed %s: the other slot boots as a trial on the next reboot, and falls back if it fails"
+        % offer["version"])
+    return offer["version"]
 
 
 def verify_bundle_info_only(bundle):
@@ -1079,6 +1315,9 @@ def do_status(conf, state):
             have = os.path.getsize(part) if os.path.exists(part) else 0
             print("  download  %s: %d of %d MiB%s" % (offer["version"], have >> 20, offer["size"] >> 20,
                                                       ", waiting: " + state["waiting"] if state.get("waiting") else ""))
+            print("  transfer  download-then-install: %d MiB more; 'install --stream': only the blocks"
+                  " neither slot has - typically a fraction of that (docs/07-updates.md)"
+                  % ((offer["size"] - have) >> 20))
     if state.get("notes"):
         print("  notes     " + state["notes"].replace("\n", "\n            "))
 
@@ -1104,7 +1343,8 @@ def main(argv):
             files = [a for a in rest if not a.startswith("--")]
             if len(files) > 1:
                 raise UpdateError("install takes at most one bundle")
-            do_install(conf, state, files[0] if files else None, reboot="--reboot" in rest)
+            do_install(conf, state, files[0] if files else None, reboot="--reboot" in rest,
+                       stream="--stream" in rest, allow_metered="--allow-metered" in rest)
         elif verb in ("check", "download", "auto", "install"):
             if os.geteuid() != 0:
                 raise UpdateError("run as root")
@@ -1120,7 +1360,8 @@ def main(argv):
                     files = [a for a in rest if not a.startswith("--")]
                     if len(files) > 1:
                         raise UpdateError("install takes at most one bundle")
-                    do_install(conf, state, files[0] if files else None, reboot="--reboot" in rest)
+                    do_install(conf, state, files[0] if files else None, reboot="--reboot" in rest,
+                               stream="--stream" in rest, allow_metered="--allow-metered" in rest)
         elif verb == "rollback":
             do_rollback(yes="--yes" in rest)
         elif verb == "debug-hold":

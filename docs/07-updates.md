@@ -112,6 +112,7 @@ boat-update                  # status: slots, versions, last result, OTA state
 sudo boat-update check       # ask the channel now
 sudo boat-update download    # fetch the offered bundle now (resumable)
 sudo boat-update install --reboot     # write it to the other slot, reboot into it
+sudo boat-update install --stream --reboot   # same, streamed from the channel
 boat-update history          # installs, trials and what became of them
 sudo boat-update rollback    # switch to the other slot (if it is usable) and reboot
 sudo boat-update debug-hold on|off    # after a failure, stop for inspection instead of resetting
@@ -244,6 +245,64 @@ secret: the image's password hash is already in this repository. To restrict
 it, use a TLS client certificate: put `client.crt` and `client.key` in
 `/data/boat-update/`. Basic auth and bearer tokens are not supported, because
 they leak across redirects and into logs.
+
+### Streaming instead of downloading
+
+```bash
+sudo boat-update check
+sudo boat-update install --stream --reboot
+```
+
+`--stream` has RAUC read the offered bundle straight from the channel into
+the other slot. Every bundle is built **adaptive**, so RAUC fetches only
+the blocks that neither slot already has. On a small change that is a
+fraction of the bundle; RAUC's own documentation suggests about a tenth.
+RAUC never talks to the channel itself: it streams from a relay inside
+`boat-update` on `127.0.0.1`, which fetches each block from the verified
+URL the way `boat-update`'s own downloads do - `https` only, no redirect
+ever followed, with the client certificate (which RAUC never sees, so the
+key stays root-only), and only over the link that was checked when the
+stream started. That link must not be metered unless `--allow-metered` is
+given (or `BOAT_UPDATE_METERED=yes`); either way the stream stays bound to
+it. The relay passes on only an answer for exactly the range RAUC asked
+for. If that link goes away mid-stream, the stream fails and the board
+stays on its slot; it never moves to another route. On top of that:
+
+- before RAUC starts, `boat-update` asks for the bundle's first byte and
+  refuses to stream from a channel that redirects it or ignores Range
+  requests;
+- after the stream, the other slot must hold exactly the release the index
+  offered (RAUC itself checks only the bundle's signature); otherwise it is
+  marked bad before anything boots it, and the install fails.
+
+A stream is offered only what a download would be: newer than the running
+release, not a release that failed a trial here, and checked on the channel
+that is configured now (after changing channels, `check` again).
+
+| | download, then install | `install --stream` |
+|---|---|---|
+| link | any - resumes across drops, sleeps and reboots | must stay up for the whole install |
+| bytes over the link | the whole bundle | the changed blocks |
+| a drop half way | the next window resumes | RAUC aborts, the board stays on its slot, run it again (a retry reuses what it already has) |
+| use it | on shore Wi-Fi, cellular, anything flaky | at anchor on a decent link |
+
+Measured transfers on this board are filled in by the bench validation
+(plan Phase 6):
+
+| change | bundle | streamed |
+|---|---|---|
+| one package | not yet measured | not yet measured |
+| kernel | not yet measured | not yet measured |
+| CUDA | not yet measured | not yet measured |
+
+To measure: note the default-route interface's RX bytes
+(`/sys/class/net/<dev>/statistics/rx_bytes`) before and after an `install
+--stream`.
+
+Streaming needs the channel's Range support (the same check as above) and
+kernel NBD support, which the A/B image builds in. A server without Range
+support is refused before RAUC starts, with a message saying so; download-
+then-install is the fallback.
 
 ## Storage on the A/B layout
 

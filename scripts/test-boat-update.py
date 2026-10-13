@@ -33,6 +33,7 @@ import http.server
 import importlib.util
 import json
 import os
+import re
 import shutil
 import ssl
 import subprocess
@@ -93,7 +94,10 @@ class Channel(http.server.SimpleHTTPRequestHandler):
     bundle stop after that many bytes, like a link that drops. mode makes it
     misbehave: "chunked-endless" (the index) and "chunked-oversize" (a
     bundle) send a chunked body far past the file - no Content-Length for
-    curl to check - and "ignore-range" answers a Range request with 200."""
+    curl to check - "ignore-range" answers a Range request with 200,
+    "redirect" sends a bundle request somewhere else, and "shifted-range"
+    and "short-range" answer a bundle's Range request with a 206 for other
+    offsets or fewer bytes."""
     cut_after = None
     root = None
     mode = None
@@ -123,29 +127,42 @@ class Channel(http.server.SimpleHTTPRequestHandler):
         if not os.path.isfile(fpath):
             self.send_error(404)
             return
+        if Channel.mode == "redirect" and fpath.endswith(".raucb"):
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:9/elsewhere.raucb")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if (Channel.mode == "chunked-endless" and fpath.endswith("index.p7")) or \
                 (Channel.mode == "chunked-oversize" and fpath.endswith(".raucb")):
             self.flood()
             return
         size = os.path.getsize(fpath)
-        start = 0
+        start, end = 0, size - 1
         rng = self.headers.get("Range")
         if rng and Channel.mode != "ignore-range":
-            start = int(rng.split("=")[1].split("-")[0])
+            first, last = rng.split("=")[1].split("-")
+            start = int(first)
+            if last:
+                end = min(int(last), size - 1)
             if start >= size:
                 self.send_response(416)
                 self.send_header("Content-Range", "bytes */%d" % size)
                 self.end_headers()
                 return
+            if fpath.endswith(".raucb") and Channel.mode == "shifted-range":
+                start, end = start + 1, min(end + 1, size - 1)
+            elif fpath.endswith(".raucb") and Channel.mode == "short-range":
+                end -= 1
             self.send_response(206)
-            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, size - 1, size))
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
         else:
             self.send_response(200)
-        self.send_header("Content-Length", str(size - start))
+        self.send_header("Content-Length", str(end + 1 - start))
         self.end_headers()
         with open(fpath, "rb") as f:
             f.seek(start)
-            data = f.read()
+            data = f.read(end + 1 - start)
         if fpath.endswith(".raucb") and Channel.cut_after is not None:
             data = data[:Channel.cut_after]
             Channel.cut_after = None
@@ -225,6 +242,7 @@ def main():
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         url = "https://localhost:%d/boat-xavier-nx" % httpd.server_address[1]
         os.environ["CURL_CA_BUNDLE"] = keys + "/tlsca.pem"   # test only
+        os.environ["SSL_CERT_FILE"] = keys + "/tlsca.pem"    # the stream relay's Python TLS
 
         def publish(serial, channel="stable", signer="index", version="1.1.0", where="stable", **extra):
             doc = dict(channel=channel, serial=serial, compatible=COMPATIBLE, version=version,
@@ -260,16 +278,45 @@ def main():
         write(binp + "/nmcli", "#!/bin/sh\nprintf '%%s\\nloopback\\n' \"$(cat %s/metered)\"\n" % board, 0o755)
         write(binp + "/chronyc", "#!/bin/sh\necho 'Leap status     : Normal'\n", 0o755)
         write(binp + "/blkid", "#!/bin/sh\nexit 2\n", 0o755)
-        # RAUC: slot B holds 1.0.0; "info" accepts the test bundle.
-        rauc_status = json.dumps({"slots": [
-            {"rootfs.0": {"bootname": "A", "slot_status": {"bundle": {"version": "1.0.0"}}}},
-            {"rootfs.1": {"bootname": "B", "slot_status": {"bundle": {"version": "1.0.0"}}}}]})
+        # RAUC: slot B holds 1.0.0; "info" accepts the test bundle. A
+        # streamed "install" logs its arguments; then it fails with
+        # rauc-error (LastError), or exits with rauc-exit as a RAUC that
+        # went away does, or puts the release in rauc-serves into slot B
+        # and activates it, as RAUC would.
+        def rauc_status(b_version):
+            return json.dumps({"slots": [
+                {"rootfs.0": {"bootname": "A", "slot_status": {"bundle": {"version": "1.0.0"}}}},
+                {"rootfs.1": {"bootname": "B", "slot_status": {"bundle": {"version": b_version}}}}]})
+        write(board + "/rauc-status", rauc_status("1.0.0"))
+        write(board + "/rauc-error", "")
+        write(board + "/rauc-exit", "0")
         write(binp + "/rauc", """#!/bin/sh
 case "$1" in
-    status) echo '%s' ;;
-    info) echo '{"compatible": "%s", "version": "1.1.0"}' ;;
+    status) cat %(b)s/rauc-status ;;
+    info) echo '{"compatible": "%(c)s", "version": "1.1.0"}' ;;
+    install)
+        echo "rauc $*" >> %(b)s/rauc.log
+        echo "  0%% Installing"
+        if [ -s %(b)s/rauc-error ]; then
+            echo "LastError: $(cat %(b)s/rauc-error)"; echo "Installing failed" >&2; exit 1
+        fi
+        rc=$(cat %(b)s/rauc-exit)
+        if [ "$rc" != 0 ]; then
+            echo "RAUC service disappeared" >&2; exit "$rc"
+        fi
+        # RAUC's NBD client: the "sqsh" magic first, then blocks further in.
+        a=$(curl --noproxy '*' -s -o /dev/null -w '%%{http_code}' -r 0-3 "$2")
+        b=$(curl --noproxy '*' -s -o /dev/null -w '%%{http_code}' -r 1048576-1179647 "$2")
+        echo "fetched $a $b" >> %(b)s/rauc.log
+        if [ "$a" != 206 ] || [ "$b" != 206 ]; then
+            echo "LastError: unexpected HTTP response code $a/$b"; exit 1
+        fi
+        sed "s/B_VERSION/$(cat %(b)s/rauc-serves)/" %(b)s/rauc-status.in > %(b)s/rauc-status
+        grub-editenv %(e)s set "ORDER=B A" B_OK=1 B_TRY=0 B_COMMITTED=0
+        echo "100%% Installing done." ;;
 esac
-""" % (rauc_status, COMPATIBLE), 0o755)
+""" % dict(b=board, c=COMPATIBLE, e=board + "/boot/efi/EFI/BOOT/grubenv"), 0o755)
+        write(board + "/rauc-status.in", rauc_status("B_VERSION"))
         os.environ["PATH"] = binp + ":" + os.environ["PATH"]
         bu.PATHS.update({
             "cmdline": board + "/proc/cmdline", "mounts": board + "/proc/mounts",
@@ -482,6 +529,120 @@ esac
         bu.housekeeping(bu.load_state())
         check("a trial that ended before boat-commit (a panic, a power cut) is recorded as failed",
               "1.4.0" in bu.failed_versions() and "installed" not in bu.load_state(), str(bu.load_state()))
+
+        # --- streaming (Phase 6): what RAUC is handed, and its failure paths -
+        write(board + "/etc/boat-release", "1.0.0\n")
+        subprocess.run(["grub-editenv", env, "set", "ORDER=A B", "B_OK=1", "B_TRY=0", "B_COMMITTED=1"],
+                       check=True)
+        publish(13, version="1.2.0")
+        with open(board + "/data/boat-update/failed-versions", "w"):
+            pass
+        offer, err = run_check()
+        # A real client certificate: the preflight's curl loads it.
+        make_leaf(keys, "tlsca", "client", "clientAuth", cn="boat")
+        key_pem = open(keys + "/client.key").read()
+        write(board + "/data/boat-update/client.key", key_pem, 0o600)
+        write(board + "/data/boat-update/client.crt", open(keys + "/client.pem").read(), 0o600)
+        key_line = key_pem.splitlines()[1]
+        write(board + "/rauc-serves", "1.2.0")
+        conf = bu.load_conf()
+        os.environ["BOAT_UPDATE_INNER"] = "1"
+
+        def stream():
+            try:
+                bu.do_install(conf, bu.load_state(), stream=True)
+                return None
+            except bu.UpdateError as e:
+                return str(e)
+
+        def envvar(name):
+            return subprocess.run(["grub-editenv", env, "list"], capture_output=True, text=True,
+                                  check=True).stdout.count("%s\n" % name) == 1
+
+        err = stream()
+        log = open(board + "/rauc.log").read()
+        want_url = "%s/stable/%s" % (url, bundle_name)
+        check("a streamed install hands RAUC only the local relay's URL - no certificate, no key",
+              err is None and re.search(r"rauc install http://127\.0\.0\.1:\d+/boat-xavier-nx/stable/%s\n"
+                                        % re.escape(bundle_name), log)
+              and "--tls" not in log and key_line not in log, "%s\n%s" % (err, log))
+        check("... and RAUC's Range requests are answered through it, from the channel",
+              "fetched 206 206" in log, log)
+        check("the client key stays root-only (RAUC never opens it)",
+              oct(os.stat(board + "/data/boat-update/client.key").st_mode & 0o777) == "0o600")
+        check("a streamed install is remembered for its trial",
+              bu.load_state().get("installed") == {"version": "1.2.0", "slot": "B"}, str(bu.load_state()))
+        write(board + "/rauc-error", "HTTP range request not supported")
+        err = stream()
+        check("a failed stream says so, and points at download-then-install",
+              err is not None and "range request" in err and "boat-update download" in err, str(err))
+        check("... and the release it replaced is no longer waiting for a trial",
+              "installed" not in bu.load_state() and "1.2.0" not in bu.failed_versions(), str(bu.load_state()))
+        write(board + "/rauc-error", "")
+        write(board + "/rauc-exit", "2")
+        err = stream()
+        check("RAUC going away mid-install is a failure, not an install",
+              err is not None and "rauc exit 2" in err and "installed" not in bu.load_state(), str(err))
+        write(board + "/rauc-exit", "0")
+        write(board + "/rauc-serves", "1.1.0")
+        err = stream()
+        check("a channel that streams another (signed) release than the index offered: refused, "
+              "and that slot never boots",
+              err is not None and "index offered 1.2.0" in err and envvar("B_OK=0") and envvar("ORDER=A B")
+              and "installed" not in bu.load_state(), str(err))
+        write(board + "/rauc-serves", "1.2.0")
+        with open(board + "/rauc.log", "w"):
+            pass
+        bu.mark_failed("1.2.0")
+        err = stream()
+        check("a version that failed a trial here is not streamed",
+              err is not None and "nothing newer" in err and not open(board + "/rauc.log").read(), str(err))
+        with open(board + "/data/boat-update/failed-versions", "w"):
+            pass
+        offer, err = run_check()
+        write(board + "/etc/boat-release", "1.2.0\n")
+        err = stream()
+        check("an offer no newer than the running release is not streamed (it would overwrite the rollback)",
+              err is not None and "nothing newer" in err and not open(board + "/rauc.log").read()
+              and "offer" not in bu.load_state(), str(err))
+        write(board + "/etc/boat-release", "1.0.0\n")
+        offer, err = run_check()
+        for mode, what, why in (("redirect", "redirects the bundle", "redirects"),
+                                ("ignore-range", "ignores Range requests", "Range")):
+            Channel.mode = mode
+            err = stream()
+            Channel.mode = None
+            check("a channel that %s is refused before RAUC starts" % what,
+                  err is not None and why in err and not open(board + "/rauc.log").read(), str(err))
+        write(board + "/data/boat-update/channel.conf", "BOAT_UPDATE_CHANNEL=testing\n")
+        conf = bu.load_conf()
+        err = stream()
+        os.unlink(board + "/data/boat-update/channel.conf")
+        conf = bu.load_conf()
+        check("an offer checked on another channel is not streamed from this one",
+              err is not None and "channel has changed" in err and not open(board + "/rauc.log").read(), str(err))
+        del os.environ["BOAT_UPDATE_INNER"]
+
+        # --- the relay itself: what it will not pass on to RAUC -------------
+        def through_relay(dev="lo"):
+            relay, local_url = bu.start_relay(conf, want_url, dev)
+            try:
+                return subprocess.run(["curl", "--noproxy", "*", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                       "-r", "0-3", local_url], capture_output=True, text=True).stdout
+            finally:
+                relay.shutdown()
+                relay.server_close()
+        check("the relay answers a Range request from the channel", through_relay() == "206")
+        for mode, what in (("redirect", "a redirect the channel sends later"),
+                           ("ignore-range", "a full body instead of the range"),
+                           ("shifted-range", "a range other than the one asked for"),
+                           ("short-range", "a range shorter than the one asked for")):
+            Channel.mode = mode
+            got = through_relay()
+            Channel.mode = None
+            check("the relay never passes on %s" % what, got == "502", got)
+        check("the relay never leaves the link that was checked",
+              through_relay(dev="boatnodev0") == "502")
         httpd.shutdown()
     finally:
         shutil.rmtree(work, ignore_errors=True)
