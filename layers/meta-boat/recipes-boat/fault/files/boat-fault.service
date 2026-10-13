@@ -1,0 +1,15 @@
+# BENCH IMAGES ONLY - see boat-fault. Runs before the health gate, on trial
+# boots only.
+[Unit]
+Description=BENCH: inject an A/B trial-boot fault (boat-image-faulty)
+DefaultDependencies=no
+ConditionKernelCommandLine=boat.trial=1
+After=local-fs.target
+Before=boat-commit.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/boat-fault
+
+[Install]
+WantedBy=multi-user.target

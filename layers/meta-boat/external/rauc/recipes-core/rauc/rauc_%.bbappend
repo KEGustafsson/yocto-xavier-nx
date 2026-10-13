@@ -26,6 +26,17 @@ python boat_check_keyring() {
         bb.fatal("RAUC needs the update CA certificate: BOAT_KEYS_DIR (%r) has no "
                  "ca.cert.pem. Run scripts/gen-update-keys.sh once, keep the "
                  "directory safe, and point BOAT_KEYS_DIR at it (scripts/env.sh)." % keys)
+    bench = d.getVar('BOAT_BENCH_KEYS_DIR')
+    if d.getVar('BOAT_BENCH') == '1':
+        if not bench or not os.path.isfile(os.path.join(bench, 'ca.cert.pem')):
+            bb.fatal("BOAT_BENCH = \"1\" needs the bench CA: BOAT_BENCH_KEYS_DIR (%r) has no "
+                     "ca.cert.pem. Run scripts/gen-update-keys.sh --bench." % bench)
+        with open(os.path.join(bench, 'ca.cert.pem'), 'rb') as b, \
+                open(os.path.join(keys, 'ca.cert.pem'), 'rb') as f:
+            if b.read() == f.read():
+                bb.fatal("BOAT_BENCH_KEYS_DIR (%r) holds the fleet CA: the bench needs its own "
+                         "(scripts/gen-update-keys.sh --bench), or its fault bundles would be "
+                         "trusted by every boat." % bench)
 }
 do_install[prefuncs] += "boat_check_keyring"
 do_install[file-checksums] += "${BOAT_KEYS_DIR}/ca.cert.pem:True"
@@ -59,6 +70,17 @@ do_install:prepend() {
 }
 do_install[vardeps] += "BOAT_BUNDLE_COMPATIBLE BOAT_AB_DISK BOAT_AB_PARTNUM_APP_A \
     BOAT_AB_PARTNUM_APP_B BOAT_MIN_BUNDLE_VERSION"
+
+# A bench image (BOAT_BENCH = "1") also trusts the bench CA, which signs the
+# fault-injection bundles (boat-bundle-faulty). A boat's image never does:
+# such a bundle is rejected there before anything is written (plan 5.7).
+do_install:append() {
+    if [ "${BOAT_BENCH}" = "1" ]; then
+        cat "${BOAT_BENCH_KEYS_DIR}/ca.cert.pem" >> ${D}${RAUC_CONF_DIR}/ca.cert.pem
+    fi
+}
+do_install[vardeps] += "BOAT_BENCH BOAT_BENCH_KEYS_DIR"
+do_install[file-checksums] += "${@'%s/ca.cert.pem:True' % d.getVar('BOAT_BENCH_KEYS_DIR') if d.getVar('BOAT_BENCH') == '1' else ''}"
 
 do_install:append() {
     if [ -f ${D}${datadir}/dbus-1/system.d/de.pengutronix.rauc.conf ]; then

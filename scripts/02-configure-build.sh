@@ -33,6 +33,14 @@ if [[ "${AB_LAYOUT}" == 1 ]]; then
   [[ -z "${BOAT_RELEASE}" || "${BOAT_RELEASE}" =~ ^[0-9]+(\.[0-9]+){0,2}(-[0-9A-Za-z.]+)?(\+[0-9A-Za-z.]+)?$ ]] \
     || die "BOAT_RELEASE must be a version like 1.4.0 or 2026.10.1-rc.1 (no '-' inside the pre-release part: RAUC splits at the last one), got '${BOAT_RELEASE}'"
   [[ "${BOAT_KEYS_DIR}" == /* ]] || die "BOAT_KEYS_DIR must be an absolute path, got '${BOAT_KEYS_DIR}'"
+  [[ "${BOAT_BENCH}" == 0 || "${BOAT_BENCH}" == 1 ]] || die "BOAT_BENCH must be 0 or 1, got '${BOAT_BENCH}'"
+  if [[ "${BOAT_BENCH}" == 1 && "$(realpath -m "${BOAT_BENCH_KEYS_DIR}")" == "$(realpath -m "${BOAT_KEYS_DIR}")" ]]; then
+    die "BOAT_BENCH_KEYS_DIR is BOAT_KEYS_DIR - the bench needs its own CA (scripts/gen-update-keys.sh --bench)"
+  fi
+  case "${BOAT_FAULT}" in
+    ""|panic|emergency|tier2|hang) ;;
+    *) die "BOAT_FAULT must be one of panic, emergency, tier2, hang - got '${BOAT_FAULT}'" ;;
+  esac
   case "${BOAT_KEYS_DIR}/" in
     "${REPO_ROOT}/"*|"${WORKROOT}/"*)
       die "BOAT_KEYS_DIR (${BOAT_KEYS_DIR}) is inside the repository or WORKROOT - keep the update keys somewhere a clean-up cannot delete them" ;;
@@ -339,6 +347,12 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
       if [[ -n "${BOAT_RELEASE}" ]]; then
         echo "BOAT_RELEASE = \"${BOAT_RELEASE}\""
       fi
+      if [[ "${BOAT_BENCH}" == 1 ]]; then
+        # Bench image: also trusts the bench CA that signs fault bundles.
+        echo 'BOAT_BENCH = "1"'
+        echo "BOAT_BENCH_KEYS_DIR = \"${BOAT_BENCH_KEYS_DIR}\""
+        [[ -z "${BOAT_FAULT}" ]] || echo "BOAT_FAULT = \"${BOAT_FAULT}\""
+      fi
     fi
   fi
   echo "${MARKER_END}"
@@ -352,6 +366,10 @@ log "  AB_LAYOUT        = ${AB_LAYOUT}$([[ "${AB_LAYOUT}" == 1 ]] && echo '  (A/
 if [[ "${AB_LAYOUT}" == 1 ]]; then
   log "  BOAT_RELEASE     = ${BOAT_RELEASE:-0.0.0-dev}"
   log "  BOAT_KEYS_DIR    = ${BOAT_KEYS_DIR}"
+  if [[ "${BOAT_BENCH}" == 1 ]]; then
+    warn "  BOAT_BENCH       = 1  (BENCH image: trusts the bench CA - never put it on a boat)"
+    log "  BOAT_FAULT       = ${BOAT_FAULT:-<none>}"
+  fi
 fi
 log "  BUILD_DIR        = ${BUILD_DIR}"
 log "Next: scripts/03-build.sh  (builds IMAGE=${IMAGE})"
