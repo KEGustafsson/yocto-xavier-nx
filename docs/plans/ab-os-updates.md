@@ -232,9 +232,22 @@ boot this kernel correctly.
 - `boot.img` is a last resort only. Its kernel is the flash-time one and
   will not match a newer slot's `/lib/modules`.
 - **GRUB *starting* and then failing does not fall back.** L4TLauncher only
-  falls back when the *load* fails, and GRUB disables the UEFI watchdog
-  during its own init. `grub.cfg` must therefore never stop at a prompt
-  (5.3).
+  falls back when the *load* fails, so `grub.cfg` must never stop at a
+  prompt (5.3).
+- **GRUB hangs: keep the UEFI watchdog armed.**
+  - L4TLauncher arms a 5-minute UEFI watchdog before starting GRUB, but
+    stock GRUB 2.06 cancels it in its EFI init
+    (`grub-core/kern/efi/init.c`: `set_watchdog_timer(0, …)`).
+  - A one-line `meta-boat` patch to `grub-efi` **re-arms it instead**
+    (300 s).
+  - A GRUB that wedges, or a kernel load that never returns, then ends in a
+    firmware reset.
+  - The UEFI spec has `ExitBootServices` disarm the watchdog, so it stops
+    the moment the kernel takes over. There is no menu (`timeout=0`), so it
+    can never fire while someone is reading the screen.
+  - Phase 1 proves it with a `grub.cfg` that only sleeps. The Tegra hardware
+    WDT, if Phase 0 shows it runs this early, is a second layer, not the
+    one the design depends on.
 
 ### 5.2 Disk layout (custom external layout, `boat-nvme-ab.xml`)
 
@@ -436,7 +449,7 @@ in a reset. The exception is a deliberate stay on a committed slot.
 | firmware fails before UEFI | not covered (single chain); firmware never changes in the field | none |
 | `grubaa64.efi` missing/unloadable | L4TLauncher falls back to DIRECT → extlinux on `APP` (A) → `boot.img` | none; `status` flags "booted outside GRUB" |
 | `grub.cfg` / kernel / initrd load error | guarded loads → mark slot, `reboot` (5.3) | grub.cfg design + build checks |
-| GRUB itself hangs | **only the hardware WDT, if it runs during UEFI/GRUB** (GRUB disables the UEFI watchdog) | Phase 0 question; otherwise documented as power-cycle-to-recover |
+| GRUB itself hangs | **the UEFI watchdog, kept armed through GRUB** (300 s; 5.1). The Tegra hardware WDT is a second layer if Phase 0 shows it runs this early. | `grub-efi` bbappend: re-arm instead of cancel. **Phase 1 exit test.** If firmware ignores the re-arm, this row narrows to "power cycle to recover" and goal 4 says so. |
 | kernel panic | `panic=10` | cmdline |
 | kernel hard hang | Tegra WDT running from early kernel | Phase 0: armed before userspace? If not, enable it at probe |
 | initramfs can't mount root | today: **hangs forever** | `tegra-minimal-init` bbappend: `root=PARTUUID` only, bounded retries, then `reboot -f` (`boat.stay=1` keeps the shell) |
@@ -819,6 +832,8 @@ A "no" on any of these re-opens section 4.
   - a `tegra-espimage` bbappend;
   - a `tegra-minimal-init` bbappend;
   - `grub-editenv` on the target;
+  - a `grub-efi` bbappend whose patch re-arms the UEFI watchdog (300 s)
+    where stock GRUB cancels it (5.1);
   - `boat-grubenv-guard`;
   - **a stub commit unit** that runs `grub-editenv … TRY=0 COMMITTED=1`.
     Without it, slot A would be marked bad on its second boot (review M10).
@@ -828,7 +843,9 @@ A "no" on any of these re-opens section 4.
   - a test image `dd`'d into B boots via `grub-editenv`;
   - `sysrq-c` during a B trial lands on A;
   - **≥4 consecutive warm reboots on B** do not trip NVIDIA's counter;
-  - removing `grubaa64.efi` still boots A via DIRECT.
+  - removing `grubaa64.efi` still boots A via DIRECT;
+  - a test `grub.cfg` that only sleeps is reset by the UEFI watchdog within
+    about 5 minutes.
 
 **Phase 2: storage and state.** Effort: S–M.
 
@@ -1075,7 +1092,8 @@ safe in-place conversion, and the plan does not attempt one.
 | risk | likelihood / impact | mitigation |
 |---|---|---|
 | GRUB on this UEFI mishandles the DTB, initrd or cmdline (SC7, display) | M / H | Phase 0 step 2 first; option C is the fallback |
-| Tegra WDT not running in GRUB or early kernel | M / M | Phase 0 step 3; enable at probe; otherwise document power-cycle-to-recover |
+| a GRUB-stage hang with no watchdog running | L / H | GRUB patched to keep the UEFI watchdog armed (5.1); Phase 1 exit test; Tegra WDT as a second layer (Phase 0) |
+| Tegra WDT not running in the early kernel | M / M | Phase 0 step 3; enable at probe; otherwise document power-cycle-to-recover for a kernel hang before systemd starts |
 | NVIDIA sticky recovery reached (both slots fail, or a shared fault that slipped past `nofail`) | L / H | the 2+1 attempt budget (5.3); `nofail` shared mounts; documented UEFI-menu reset; test 28 |
 | `nvbootctrl verify` doesn't reset the count when booted from `APP_b` | M / H | Phase 1 exit criterion; if it fails, `boat-commit` resets it another way, or the budget becomes 1+1 |
 | `grubenv` torn on vfat | L / M | guard unit, `.bak`, defaults (5.3) |
