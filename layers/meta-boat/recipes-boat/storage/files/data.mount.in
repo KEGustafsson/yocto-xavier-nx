@@ -1,0 +1,18 @@
+# A/B layout: the DATA partition, shared by both rootfs slots, on /data.
+# By partition number (its GPT name is checked by boat-data-check first) -
+# never by label, which a JetPack SD card or USB stick could also carry.
+# nofail: a missing or broken DATA must not keep a slot from booting.
+[Unit]
+Description=Shared data partition (A/B layout DATA)
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
+Requires=boat-data-check.service
+After=boat-data-check.service
+
+[Mount]
+What=@DATA_DEV@
+Where=/data
+Type=ext4
+Options=noatime,nofail
+
+[Install]
+WantedBy=local-fs.target

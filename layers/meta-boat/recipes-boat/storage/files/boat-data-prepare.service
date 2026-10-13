@@ -1,0 +1,16 @@
+# A/B layout: /data's directories, and each listed user's home copied there
+# from the image the first time. Runs before the bind mounts that put those
+# directories in place, and needs /data mounted from DATA.
+[Unit]
+Description=Lay out /data and seed the homes kept on it
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
+DefaultDependencies=no
+Requires=data.mount
+After=data.mount
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/boat-storage prepare-data

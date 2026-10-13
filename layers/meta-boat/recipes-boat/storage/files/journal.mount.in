@@ -1,0 +1,18 @@
+# A/B layout: the persistent journal on DATA, so 'journalctl -b -1' after a
+# fallback shows why the previous boot - perhaps a trial of the other slot -
+# failed. Size-capped by journald.conf.d/10-boat-ab.conf. If DATA is missing
+# the journal simply stays in RAM, as it does without the A/B layout.
+[Unit]
+Description=Persistent journal on the shared data partition
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
+Requires=boat-data-prepare.service
+After=boat-data-prepare.service
+
+[Mount]
+What=/data/log/journal
+Where=@JOURNAL_DIR@
+Type=none
+Options=bind,nofail
+
+[Install]
+WantedBy=local-fs.target

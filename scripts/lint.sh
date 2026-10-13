@@ -313,6 +313,20 @@ else
     fi
 fi
 
+# --- 5a. boat-storage, run against a fake board ----------------------------
+# boat-storage decides at every boot what is made swap, whether DATA is
+# mounted and what is copied onto it. scripts/test-boat-storage.py runs it
+# as shipped with blkid, mkswap, swapon, e2fsck, mkfs.ext4 and sync stubbed,
+# and checks exactly what it would have run - and what it refused to.
+log "boat-storage ..."
+if [[ "${HAVE_PYTHON}" == "0" ]]; then
+    skip_check "python3 not installed - boat-storage not run"
+elif python3 scripts/test-boat-storage.py; then
+    log "  boat-storage: clean"
+else
+    fail_check "boat-storage failed a case"
+fi
+
 # --- 5b. The A/B on-board scripts, run against a fake board -----------------
 # The grubenv guard and the commit step decide, unattended, which slot stays
 # bootable. scripts/test-ab-scripts.py runs them as shipped against a scratch

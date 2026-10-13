@@ -1,0 +1,21 @@
+# A/B layout: move the journal from /run onto DATA once its bind mount is
+# up, and hand it back to /run before that mount goes away at shutdown (the
+# stop order is the reverse of After=). Pulled in by the mount itself, so
+# nothing else in the boot waits for DATA's check.
+[Unit]
+Description=Move the journal onto the shared data partition
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
+DefaultDependencies=no
+Requires=@JOURNAL_UNIT@
+After=@JOURNAL_UNIT@ systemd-journald.service
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/journalctl --flush
+ExecStop=/usr/bin/journalctl --smart-relinquish-var
+
+[Install]
+WantedBy=@JOURNAL_UNIT@

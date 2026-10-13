@@ -42,6 +42,8 @@ do_install() {
         -e 's|@PARTNUM_A@|${BOAT_AB_PARTNUM_APP_A}|g' \
         -e 's|@PARTNUM_B@|${BOAT_AB_PARTNUM_APP_B}|g' \
         -e 's|@PARTNUM_ESP@|${BOAT_AB_PARTNUM_ESP}|g' \
+        -e 's|@PARTNUM_SWAP@|${BOAT_AB_PARTNUM_SWAP}|g' \
+        -e 's|@PARTNUM_DATA@|${BOAT_AB_PARTNUM_DATA}|g' \
         ${WORKDIR}/boat-ab-lib.sh > ${D}${libdir}/boat-ab/lib.sh
     chmod 0644 ${D}${libdir}/boat-ab/lib.sh
 
@@ -69,7 +71,8 @@ do_install() {
         ${D}${sbindir}/boat-bootmode-guard ${D}${sbindir}/boat-grubenv-guard \
         ${D}${sbindir}/boat-ab-commit
 }
-do_install[vardeps] += "BOAT_AB_DISK BOAT_AB_PARTNUM_APP_A BOAT_AB_PARTNUM_APP_B BOAT_AB_PARTNUM_ESP BOAT_AB_ESP_UNIT"
+do_install[vardeps] += "BOAT_AB_DISK BOAT_AB_PARTNUM_APP_A BOAT_AB_PARTNUM_APP_B BOAT_AB_PARTNUM_ESP \
+    BOAT_AB_PARTNUM_SWAP BOAT_AB_PARTNUM_DATA BOAT_AB_ESP_UNIT"
 
 SYSTEMD_SERVICE:${PN} = "boat-bootmode-guard.service boat-grubenv-guard.service boat-ab-commit.service"
 

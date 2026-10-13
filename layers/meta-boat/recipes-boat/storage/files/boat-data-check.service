@@ -1,0 +1,21 @@
+# A/B layout: vet DATA before data.mount mounts it - the right partition
+# (GPT name), the filesystem the flash put there (ext4 "boat-data"), and a
+# clean e2fsck -p. Failing here fails data.mount, and with it everything that
+# needs /data (docker, boat-compose, the homes kept there), but not the boot.
+[Unit]
+Description=Check the A/B layout's DATA partition before mounting it
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
+DefaultDependencies=no
+Before=data.mount shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/boat-storage check-data
+# e2fsck replaying a journal, or preening after a power cut, can take a
+# while on a large drive; being killed half way helps nobody, so - as for
+# systemd-fsck@ - there is no time limit. Nothing early in the boot waits
+# for this: only /data, the homes kept there and the journal's move onto it
+# (boat-journal-flush.service) do.
+TimeoutStartSec=infinity
