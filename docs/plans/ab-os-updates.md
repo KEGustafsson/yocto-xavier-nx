@@ -1,7 +1,7 @@
 # Plan: A/B OS updates with automatic fallback
 
 **Status: v4, being implemented phase by phase (section 6).** Every
-decision in section 10 was taken at its recommendation. Phases 0 to 5 are
+decision in section 10 was taken at its recommendation. Phases 0 to 6 are
 in the repository, behind `AB_LAYOUT` (off by default); their exit tests
 need the bench board. Section 11 records what each review pass found and how
 the plan answers it.
@@ -598,7 +598,11 @@ The order matches RAUC 1.13's `install.c`:
     downloading. The index is signed by its own key (5.10), and the board
     checks its `channel`, a monotonic `serial` (no replay), the version
     against both slots and the failed list, `size` and SHA-256. Downloads
-    are size-capped, redirect-free and limited in re-fetches.
+    are size-capped, redirect-free and limited in re-fetches. A streamed
+    install cannot be checked first (RAUC reads the bundle as it writes
+    it, and follows redirects), so it is checked straight after: the
+    slot must hold the release the index named, or it is marked bad
+    before anything boots it (Phase 6).
   - **learn the board's version** from its requests. TLS keeps this from
     passive observers; a client certificate (D15) keeps it from the public.
 - **Index verification is pinned to our CA only.** OpenSSL's default store
@@ -910,12 +914,15 @@ headers (review M3).
   sets `RAUC_SLOT_rootfs[adaptive] = "block-hash-index"`, a manifest flag.
   The index adds about 0.8% of the *uncompressed* image and is harmless
   for stage 1.
-- **`boat-update install --stream`** calls RAUC's D-Bus `InstallBundle`
-  directly, not the CLI, so nothing sensitive shows in `ps`.
-  - The client certificate goes in the `tls-cert`/`tls-key` arguments.
-  - `tls-no-verify` is never set.
-  - The bundle URL is the final, redirect-free one taken from the verified
-    index.
+- **`boat-update install --stream`** runs `rauc install` with the
+  client certificate's and key's *file names* (`--tls-cert`/`--tls-key`),
+  so `ps` shows file names and the URL and nothing credential-bearing.
+  `rauc install` waits for RAUC's `Completed` signal and fails if the
+  service goes away mid-install.
+  - `--tls-no-verify` and `-H` header credentials are never used.
+  - The bundle URL is the one from the verified index. RAUC's streaming
+    client follows redirects (`nbd.c`), so the installed release is
+    checked against the index afterwards (5.7).
   - RAUC reads only the blocks it cannot find locally in either slot.
     RAUC's documentation reports **about 10% of the bundle** crossing the
     link for a small ext4 change.
@@ -1194,14 +1201,21 @@ exit criteria wait for the bench board.*
   - README.
 
 **Phase 6: OTA stage 2 (streaming + adaptive installs).** Effort: S–M.
+*Implemented; the measurements and exit criteria wait for the bench board.*
 
-- **`boat-update install --stream`:** RAUC's D-Bus `InstallBundle` with the
-  final, redirect-free bundle URL from the verified index. The client
-  certificate, if any, goes in `tls-cert`/`tls-key`; never `tls-no-verify`,
-  and never a header credential (5.10).
+- **`boat-update install --stream`:** `rauc install` with the bundle URL
+  from the verified index. The client certificate, if any, goes in
+  `--tls-cert`/`--tls-key` as file names; never `--tls-no-verify`, and
+  never a header credential (5.10). Only an offer a download would take is
+  streamed (newer than the running release, not failed here), and
+  afterwards the slot must hold the release the index named, or it is
+  marked bad.
 - **The `rauc-stream` sandbox user** and group-readable client key.
 - **Optional:** `rauc info <URL>` as a second, RAUC-native authenticity
-  check before a streamed install.
+  check before a streamed install. Not taken: it would check a different
+  fetch than the install's. RAUC checks the bundle's signature before it
+  writes a block, and the release check after the install ties the slot
+  to the index.
 - **Measure on the bench** the bytes transferred for:
   - a one-package change;
   - a kernel bump;
@@ -1210,7 +1224,9 @@ exit criteria wait for the bench board.*
 
   Put the numbers in docs/07, so choosing stream versus download is based
   on data rather than on RAUC's ~10% rule of thumb.
-- **`status`** shows the estimated transfer for each path.
+- **`status`** shows the estimated transfer for each path. Until the bench
+  numbers exist, it gives the download's remaining size and says a stream
+  fetches only the blocks neither slot has.
 - **Exit:**
   - from a cold boot with no manual `modprobe`, `rauc info https://…` and a
     streamed, adaptive install both work, with and without a client
@@ -1556,6 +1572,17 @@ Claims the review checked and confirmed:
 | index fields shown to the operator could carry control characters | refused (notes are filtered of C0, C1 and DEL) |
 | the accepted index's hash was kept once for all channels: back on a channel whose index had not changed, the board cried replay, and dropped that channel's given-up and re-fetch state (CodeRabbit) | the hash is kept per channel, like the serial |
 | `push-update.sh` ignored the install's exit status, so a refused install surfaced as "did not reboot within 5 minutes" (CodeRabbit) | only ssh's 255 - the connection dropped by the reboot - is the expected end; any other failure stops with the install's error |
+
+### Review pass 9 (findings while implementing Phase 6)
+
+| finding | resolution |
+|---|---|
+| `InstallBundle` returns as soon as the install starts, so its exit status says nothing about the result | `rauc install`, which waits for RAUC's `Completed` signal (below) |
+| RAUC's streaming client drops to `rauc-stream` before it opens the client certificate and key, so root-only files fail the stream, not the check | the install gives both to the `rauc-stream` group (mode 0640) first; only file names reach RAUC |
+| following `Operation` and `LastError` over `busctl` read a failed property read, and a RAUC that died mid-install (D-Bus activation restarts it idle, with no error), as a finished install - recorded, rebooted into, then recorded as a failed trial | `rauc install --tls-cert --tls-key`: it subscribes to `Completed` before the call and fails when the service disappears |
+| a stream installed whatever signed bundle the channel served: RAUC checks the signature, not that it is the release the index offered, and its streaming client follows redirects - an older, vulnerable release could be installed | after the stream, the slot must hold the index's release (RAUC's slot status), or it is marked bad (`ORDER` back, `OK=0`) before any reboot |
+| a stream skipped the download path's checks: a failed release, or one no newer than the running slot (overwriting the rollback), was streamed; a streamed release's offer outlived its commit | a stream takes only an offer that is newer and not failed; housekeeping drops an offer that is neither |
+| an install that failed left the previous install's record in place, so the slot it had marked bad was recorded as that release failing a trial | each install forgets the previous record before RAUC writes the slot |
 
 ### Your review
 

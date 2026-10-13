@@ -260,16 +260,38 @@ def main():
         write(binp + "/nmcli", "#!/bin/sh\nprintf '%%s\\nloopback\\n' \"$(cat %s/metered)\"\n" % board, 0o755)
         write(binp + "/chronyc", "#!/bin/sh\necho 'Leap status     : Normal'\n", 0o755)
         write(binp + "/blkid", "#!/bin/sh\nexit 2\n", 0o755)
-        # RAUC: slot B holds 1.0.0; "info" accepts the test bundle.
-        rauc_status = json.dumps({"slots": [
-            {"rootfs.0": {"bootname": "A", "slot_status": {"bundle": {"version": "1.0.0"}}}},
-            {"rootfs.1": {"bootname": "B", "slot_status": {"bundle": {"version": "1.0.0"}}}}]})
+        # RAUC: slot B holds 1.0.0; "info" accepts the test bundle. A
+        # streamed "install" logs its arguments; then it fails with
+        # rauc-error (LastError), or exits with rauc-exit as a RAUC that
+        # went away does, or puts the release in rauc-serves into slot B
+        # and activates it, as RAUC would.
+        def rauc_status(b_version):
+            return json.dumps({"slots": [
+                {"rootfs.0": {"bootname": "A", "slot_status": {"bundle": {"version": "1.0.0"}}}},
+                {"rootfs.1": {"bootname": "B", "slot_status": {"bundle": {"version": b_version}}}}]})
+        write(board + "/rauc-status", rauc_status("1.0.0"))
+        write(board + "/rauc-error", "")
+        write(board + "/rauc-exit", "0")
         write(binp + "/rauc", """#!/bin/sh
 case "$1" in
-    status) echo '%s' ;;
-    info) echo '{"compatible": "%s", "version": "1.1.0"}' ;;
+    status) cat %(b)s/rauc-status ;;
+    info) echo '{"compatible": "%(c)s", "version": "1.1.0"}' ;;
+    install)
+        echo "rauc $*" >> %(b)s/rauc.log
+        echo "  0%% Installing"
+        if [ -s %(b)s/rauc-error ]; then
+            echo "LastError: $(cat %(b)s/rauc-error)"; echo "Installing failed" >&2; exit 1
+        fi
+        rc=$(cat %(b)s/rauc-exit)
+        if [ "$rc" != 0 ]; then
+            echo "RAUC service disappeared" >&2; exit "$rc"
+        fi
+        sed "s/B_VERSION/$(cat %(b)s/rauc-serves)/" %(b)s/rauc-status.in > %(b)s/rauc-status
+        grub-editenv %(e)s set "ORDER=B A" B_OK=1 B_TRY=0 B_COMMITTED=0
+        echo "100%% Installing done." ;;
 esac
-""" % (rauc_status, COMPATIBLE), 0o755)
+""" % dict(b=board, c=COMPATIBLE, e=board + "/boot/efi/EFI/BOOT/grubenv"), 0o755)
+        write(board + "/rauc-status.in", rauc_status("B_VERSION"))
         os.environ["PATH"] = binp + ":" + os.environ["PATH"]
         bu.PATHS.update({
             "cmdline": board + "/proc/cmdline", "mounts": board + "/proc/mounts",
@@ -482,6 +504,84 @@ esac
         bu.housekeeping(bu.load_state())
         check("a trial that ended before boat-commit (a panic, a power cut) is recorded as failed",
               "1.4.0" in bu.failed_versions() and "installed" not in bu.load_state(), str(bu.load_state()))
+
+        # --- streaming (Phase 6): what RAUC is handed, and its failure paths -
+        write(board + "/etc/boat-release", "1.0.0\n")
+        subprocess.run(["grub-editenv", env, "set", "ORDER=A B", "B_OK=1", "B_TRY=0", "B_COMMITTED=1"],
+                       check=True)
+        publish(13, version="1.2.0")
+        with open(board + "/data/boat-update/failed-versions", "w"):
+            pass
+        offer, err = run_check()
+        write(board + "/data/boat-update/client.key", "not a real key\n", 0o600)
+        write(board + "/data/boat-update/client.crt", "not a real cert\n", 0o600)
+        write(binp + "/chgrp", "#!/bin/sh\necho \"chgrp $*\" >> %s/chgrp.log\n" % board, 0o755)
+        write(board + "/rauc-serves", "1.2.0")
+        conf = bu.load_conf()
+        os.environ["BOAT_UPDATE_INNER"] = "1"
+
+        def stream():
+            try:
+                bu.do_install(conf, bu.load_state(), stream=True)
+                return None
+            except bu.UpdateError as e:
+                return str(e)
+
+        def envvar(name):
+            return subprocess.run(["grub-editenv", env, "list"], capture_output=True, text=True,
+                                  check=True).stdout.count("%s\n" % name) == 1
+
+        err = stream()
+        log = open(board + "/rauc.log").read()
+        want_url = "%s/stable/%s" % (url, bundle_name)
+        check("a streamed install hands RAUC the verified URL and only file names",
+              err is None and "rauc install --tls-cert=%s/data/boat-update/client.crt --tls-key=%s"
+              "/data/boat-update/client.key %s" % (board, board, want_url) in log
+              and "not a real" not in log, "%s\n%s" % (err, log))
+        chg = open(board + "/chgrp.log").read()
+        check("the client certificate and key are both handed to RAUC's streaming sandbox group",
+              all("chgrp rauc-stream %s/data/boat-update/client.%s" % (board, f) in chg
+                  and oct(os.stat(board + "/data/boat-update/client." + f).st_mode & 0o777) == "0o640"
+                  for f in ("crt", "key")), chg)
+        check("a streamed install is remembered for its trial",
+              bu.load_state().get("installed") == {"version": "1.2.0", "slot": "B"}, str(bu.load_state()))
+        write(board + "/rauc-error", "HTTP range request not supported")
+        err = stream()
+        check("a failed stream says so, and points at download-then-install",
+              err is not None and "range request" in err and "boat-update download" in err, str(err))
+        check("... and the release it replaced is no longer waiting for a trial",
+              "installed" not in bu.load_state() and "1.2.0" not in bu.failed_versions(), str(bu.load_state()))
+        write(board + "/rauc-error", "")
+        write(board + "/rauc-exit", "2")
+        err = stream()
+        check("RAUC going away mid-install is a failure, not an install",
+              err is not None and "rauc exit 2" in err and "installed" not in bu.load_state(), str(err))
+        write(board + "/rauc-exit", "0")
+        write(board + "/rauc-serves", "1.1.0")
+        err = stream()
+        check("a channel that streams another (signed) release than the index offered: refused, "
+              "and that slot never boots",
+              err is not None and "index offered 1.2.0" in err and envvar("B_OK=0") and envvar("ORDER=A B")
+              and "installed" not in bu.load_state(), str(err))
+        write(board + "/rauc-serves", "1.2.0")
+        with open(board + "/rauc.log", "w"):
+            pass
+        bu.mark_failed("1.2.0")
+        err = stream()
+        check("a version that failed a trial here is not streamed",
+              err is not None and "nothing newer" in err and not open(board + "/rauc.log").read(), str(err))
+        with open(board + "/data/boat-update/failed-versions", "w"):
+            pass
+        offer, err = run_check()
+        write(board + "/etc/boat-release", "1.2.0\n")
+        err = stream()
+        check("an offer no newer than the running release is not streamed (it would overwrite the rollback)",
+              err is not None and "nothing newer" in err and not open(board + "/rauc.log").read()
+              and "offer" not in bu.load_state(), str(err))
+        write(board + "/etc/boat-release", "1.0.0\n")
+        del os.environ["BOAT_UPDATE_INNER"]
+        check("rauc install options are built without the key itself",
+              bu.stream_options({"BOAT_UPDATE_CLIENT_CERT": "", "BOAT_UPDATE_CLIENT_KEY": ""}) == [])
         httpd.shutdown()
     finally:
         shutil.rmtree(work, ignore_errors=True)

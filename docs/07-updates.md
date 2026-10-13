@@ -112,6 +112,7 @@ boat-update                  # status: slots, versions, last result, OTA state
 sudo boat-update check       # ask the channel now
 sudo boat-update download    # fetch the offered bundle now (resumable)
 sudo boat-update install --reboot     # write it to the other slot, reboot into it
+sudo boat-update install --stream --reboot   # same, streamed from the channel
 boat-update history          # installs, trials and what became of them
 sudo boat-update rollback    # switch to the other slot (if it is usable) and reboot
 sudo boat-update debug-hold on|off    # after a failure, stop for inspection instead of resetting
@@ -244,6 +245,51 @@ secret: the image's password hash is already in this repository. To restrict
 it, use a TLS client certificate: put `client.crt` and `client.key` in
 `/data/boat-update/`. Basic auth and bearer tokens are not supported, because
 they leak across redirects and into logs.
+
+### Streaming instead of downloading
+
+```bash
+sudo boat-update check
+sudo boat-update install --stream --reboot
+```
+
+`--stream` has RAUC read the offered bundle straight from the channel into
+the other slot. Every bundle is built **adaptive**, so RAUC fetches only
+the blocks that neither slot already has. On a small change that is a
+fraction of the bundle; RAUC's own documentation suggests about a tenth.
+It starts from the same verified URL from the index and uses the same
+client certificate (RAUC is handed file names only, never key material).
+Unlike `boat-update`'s own downloads, RAUC's streaming client follows
+redirects, and it checks only the bundle's signature. So after the stream,
+the other slot must hold exactly the release the index offered; otherwise
+it is marked bad before anything boots it, and the install fails. A stream
+is offered only what a download would be: newer than the running release,
+and not a release that failed a trial here.
+
+| | download, then install | `install --stream` |
+|---|---|---|
+| link | any - resumes across drops, sleeps and reboots | must stay up for the whole install |
+| bytes over the link | the whole bundle | the changed blocks |
+| a drop half way | the next window resumes | RAUC aborts, the board stays on its slot, run it again (a retry reuses what it already has) |
+| use it | on shore Wi-Fi, cellular, anything flaky | at anchor on a decent link |
+
+Measured transfers on this board are filled in by the bench validation
+(plan Phase 6):
+
+| change | bundle | streamed |
+|---|---|---|
+| one package | not yet measured | not yet measured |
+| kernel | not yet measured | not yet measured |
+| CUDA | not yet measured | not yet measured |
+
+To measure: note the default-route interface's RX bytes
+(`/sys/class/net/<dev>/statistics/rx_bytes`) before and after an `install
+--stream`.
+
+Streaming needs the channel's Range support (the same check as above) and
+kernel NBD support, which the A/B image builds in. A server without Range
+support makes the install fail with a message saying so; download-then-
+install is the fallback.
 
 ## Storage on the A/B layout
 
