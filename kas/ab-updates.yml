@@ -13,6 +13,21 @@
 header:
   version: 14
 
+# RAUC installs the update bundles.
+repos:
+  meta-rauc:
+    url: https://github.com/rauc/meta-rauc.git
+    branch: kirkstone
+
+# Passed through from the calling environment; scripts/build-kas.sh sets both
+# from scripts/env.sh (BOAT_KEYS_DIR defaults to
+# ~/.local/share/boat-update-keys there). Left empty, the build stops at the
+# first recipe that needs the keys and says so, and BOAT_RELEASE falls back
+# to 0.0.0-dev.
+env:
+  BOAT_KEYS_DIR: ""
+  BOAT_RELEASE: ""
+
 local_conf_header:
   # kas writes these entries sorted by key, and this one has to come AFTER
   # the main config's "nvme-boot": TEGRA_EXTERNAL_DEVICE_SECTORS below
@@ -37,3 +52,5 @@ local_conf_header:
     # network link. The maximum fails a build that would not fit a slot.
     IMAGE_ROOTFS_SIZE = "1048576"
     IMAGE_ROOTFS_MAXSIZE = "${@int(d.getVar('ROOTFSPART_SIZE')) // 1024}"
+    # RAUC (meta-rauc, above) installs the update bundles.
+    DISTRO_FEATURES:append = " rauc"

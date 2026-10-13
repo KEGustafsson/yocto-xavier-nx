@@ -34,3 +34,7 @@ BBLAYERS ?= " \
 # own nvidia-container-toolkit overlay when meta-virtualization is present.
 # Without them boat-image fails to resolve with "Nothing PROVIDES ...". They
 # can be dropped for a Phase-1 core-image-base build.
+#
+# A/B OS updates (BOAT_AB_LAYOUT = "1" in local.conf, docs/plans/ab-os-updates.md)
+# also need meta-rauc - add this line above meta-boat:
+#   ${TOPDIR}/../layers/meta-rauc \

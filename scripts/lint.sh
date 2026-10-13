@@ -349,6 +349,38 @@ else
     fi
 fi
 
+# --- 6. No private key is ever committed -------------------------------------
+# The update CA and signing keys (scripts/gen-update-keys.sh) live outside the
+# repository on purpose; a key that slips in here is in every clone and every
+# fork for good. Checks the files git tracks (or, outside a git checkout,
+# everything), for the PEM marker every private key format shares.
+log "Private keys ..."
+if git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    key_files="$(git -C "${REPO_ROOT}" grep -l -I -E -e '-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----' -- . ':!scripts/lint.sh' 2>/dev/null || true)"
+else
+    key_files="$(grep -r -l -I -E --exclude=lint.sh -e '-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----' . 2>/dev/null || true)"
+fi
+if [[ -z "${key_files}" ]]; then
+    log "  private keys: none"
+else
+    printf '%s\n' "${key_files}" | sed 's/^/  /' >&2
+    fail_check "a tracked file contains a private key - remove it, and treat the key as compromised"
+fi
+
+# --- 6b. The bundle's carry-over hook, run between two fake slots -----------
+# boat-bundle-hook.sh copies this board's identity, keys and password hashes
+# into the slot an update has just written; a mistake there locks people out
+# of it. scripts/test-bundle-hook.py runs it as shipped and checks what the
+# new slot ends up with.
+log "Bundle carry-over hook ..."
+if [[ "${HAVE_PYTHON}" == "0" ]]; then
+    skip_check "python3 not installed - bundle hook not run"
+elif python3 scripts/test-bundle-hook.py; then
+    log "  bundle hook: clean"
+else
+    fail_check "the bundle's carry-over hook failed a case"
+fi
+
 # --- Result ----------------------------------------------------------------
 echo
 [[ "${SKIPPED}" -gt 0 ]] && warn "${SKIPPED} check(s) skipped - install the tools above, or set LINT_STRICT=1 to treat this as failure"

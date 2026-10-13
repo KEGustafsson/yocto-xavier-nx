@@ -34,6 +34,12 @@ python () {
     import re
     if not re.match(r'^/dev/[a-z0-9]+$', d.getVar('BOAT_AB_DISK')):
         bb.fatal("BOAT_AB_DISK must look like /dev/nvme0n1, got %r" % d.getVar('BOAT_AB_DISK'))
+    # Said here, at parse time, rather than as "Nothing RPROVIDES rauc"
+    # half way into an image build.
+    if d.getVar('BOAT_AB_LAYOUT') == '1' and \
+            'rauc' not in (d.getVar('BBFILE_COLLECTIONS') or '').split():
+        bb.fatal("BOAT_AB_LAYOUT = \"1\" needs meta-rauc in bblayers.conf "
+                 "(scripts/02-configure-build.sh with AB_LAYOUT=1, or kas/ab-updates.yml, adds it)")
 }
 
 do_install() {

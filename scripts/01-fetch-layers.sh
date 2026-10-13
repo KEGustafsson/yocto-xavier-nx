@@ -16,6 +16,9 @@
 #                            meta-tegra's external/virtualization-layer overlay
 #                            (nvidia-container-toolkit, libnvidia-container-*)
 #   meta-tegra-community  -> extra Jetson userspace tools (python3-jetson-stats)
+#   meta-rauc             -> RAUC, the update client behind the A/B layout
+#                            (AB_LAYOUT=1 only - 02-configure-build.sh adds it
+#                            to bblayers then, and leaves it out otherwise)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -33,6 +36,7 @@ LAYERS=(
   "meta-tegra|https://github.com/OE4T/meta-tegra.git"
   "meta-virtualization|https://git.yoctoproject.org/meta-virtualization"
   "meta-tegra-community|https://github.com/OE4T/meta-tegra-community.git"
+  "meta-rauc|https://github.com/rauc/meta-rauc.git"
 )
 
 clone_or_update() {

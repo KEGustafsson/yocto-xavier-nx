@@ -12,3 +12,6 @@ SRC_URI += "file://boat-docker.cfg"
 # assuming it, and adds the PM debug knobs worth having on a board that has
 # to come back from sleep unattended.
 SRC_URI += "file://boat-power.cfg"
+
+# A/B OS updates only: what RAUC needs to mount and stream bundles.
+SRC_URI += "${@'file://boat-rauc.cfg' if d.getVar('BOAT_AB_LAYOUT') == '1' else ''}"

@@ -1,7 +1,7 @@
 # Plan: A/B OS updates with automatic fallback
 
 **Status: v4, being implemented phase by phase (section 6).** Every
-decision in section 10 was taken at its recommendation. Phases 0 to 2 are
+decision in section 10 was taken at its recommendation. Phases 0 to 3 are
 in the repository, behind `AB_LAYOUT` (off by default); their exit tests
 need the bench board. Section 11 records what each review pass found and how
 the plan answers it.
@@ -498,14 +498,15 @@ The order matches RAUC 1.13's `install.c`:
 
 | step | who | if power is lost here |
 |---|---|---|
-| 1. verify signature, verity format, `compatible`, version | RAUC (`min-bundle-version`, see 5.7) | nothing changed |
-| 2. system `pre-install` handler: BSP/L4T and Docker-version checks from the bundle's `[meta.boat]` manifest section; set target `COMMITTED=0` | ours | target merely marked not-committed |
-| 3. set target `OK=0` | RAUC grub backend | target unbootable; stay on current |
-| 4. write image into the target slot, `resize=true` | RAUC (`type=ext4`) | target half-written, `OK=0` |
-| 5. slot `post-install` hook: carry-over into the new slot (5.8) | ours | target still `OK=0` |
-| 6. activate: `ORDER=target first`, `OK=1`, `TRY=0` | RAUC | new slot boots **as a trial** (COMMITTED=0 since step 2). If `grubenv` is torn, see 5.3 integrity. |
-| 7. system `post-install` handler: append history on `/data` | ours, best effort | none |
-| 8. reboot (operator or `--reboot`) → trial → commit or fallback | 5.3 / 5.4 | TRY counted → fallback |
+| 1. verify signature and verity format | RAUC | nothing changed |
+| 2. system `pre-install` handler: BSP/L4T and Docker-version checks from the bundle's `[meta.boat]` manifest section; set target `COMMITTED=0` (and nothing else: step 3 can still refuse the bundle, and the target must then stay a usable fallback) | ours | target merely marked not-committed |
+| 3. check `compatible` and `min-bundle-version` (5.7) | RAUC | target not-committed; a refused bundle leaves it bootable, as a trial |
+| 4. set target `OK=0` | RAUC grub backend | target unbootable; stay on current |
+| 5. write image into the target slot, `resize=true` | RAUC (`type=ext4`) | target half-written, `OK=0` |
+| 6. slot `post-install` hook: carry-over into the new slot (5.8) | ours | target still `OK=0` |
+| 7. activate: `ORDER=target first`, `OK=1`, `TRY=0` | RAUC | new slot boots **as a trial** (COMMITTED=0 since step 2). If `grubenv` is torn, see 5.3 integrity. |
+| 8. system `post-install` handler: append history on `/data` | ours, best effort | none |
+| 9. reboot (operator or `--reboot`) → trial → commit or fallback | 5.3 / 5.4 | TRY counted → fallback |
 
 - **No post-write read-back hash.** RAUC resizes the filesystem before slot
   hooks run, so a hash taken in the hook would never match.
@@ -518,7 +519,7 @@ The order matches RAUC 1.13's `install.c`:
   - a USB stick. A bundle of several GB exceeds FAT32's 4 GiB file limit,
     so the stick must be exFAT or ext4.
 - **A stream that fails mid-install is safe.** RAUC aborts, and the target
-  is still `OK=0` from step 3, so the board stays on the current slot. A
+  is still `OK=0` from step 4, so the board stays on the current slot. A
   retry starts the install again.
 
 ### 5.7 Security model
@@ -536,7 +537,9 @@ The order matches RAUC 1.13's `install.c`:
   including `Install` with `ignore-compatible` and `Mark`, and Signal K's
   compose example mounts the system bus into a container. Ship a
   **root-only** policy (bbappend) and test it from an unprivileged user and
-  from a container.
+  from a container. The policy goes by uid, so a container running as root
+  (Docker's default, with no user-namespace remapping) passes it: a
+  container that is given the system bus must run as an unprivileged user.
 - **Clock.** There is no RTC, so the clock may read 1970.
   `use-bundle-signing-time=true` makes RAUC check certificates at the
   bundle's signed signing time. The trade-off:
@@ -558,7 +561,7 @@ The order matches RAUC 1.13's `install.c`:
     `RAUC_KEYRING_FILE` there, and **the build fails if they are missing**.
     meta-rauc's placeholder CA is a comment-only dummy, so it fails closed,
     but the error should name our variable.
-  - `lint.sh` fails if any tracked file contains `PRIVATE KEY-----`.
+  - `lint.sh` fails if any tracked file contains a PEM private-key header (`-----BEGIN ... PRIVATE KEY-----`).
 - **Fault-injection bundles** (section 7) are signed by a **separate bench
   CA**, trusted only by images built with `BOAT_BENCH=1`. A boat image
   never trusts it.
@@ -609,13 +612,15 @@ The order matches RAUC 1.13's `install.c`:
 
 `/etc` and `/var` belong to the slot, and an update replaces them.
 
-- **Carry-over at install** (the slot post-install hook copies these from
-  the running slot into the new one; early-boot safe, and each slot stays
+- **Carry-over at install** (a `slot-post-install` hook inside the bundle
+  copies these from the running slot into the new one, so the new
+  release's list is the one that runs; early-boot safe, and each slot stays
   self-contained for rollback):
   - `/etc/machine-id`;
   - `/etc/ssh/ssh_host_*`;
-  - `/root/.ssh/` (authorized keys: docs/05 recommends key-only SSH, so
-    losing them locks you out, review M8);
+  - `root`'s `~/.ssh/`, `/home/root/.ssh` on this distro (authorized keys:
+    docs/05 recommends key-only SSH, so losing them locks you out, review
+    M8);
   - `/etc/boat-sleep.key`;
   - `/etc/NetworkManager/system-connections/`;
   - `/var/lib/bluetooth/`;
@@ -1049,7 +1054,8 @@ criteria wait for the bench board.*
   - pulling the `DATA` partition (deleting the GPT entry on a bench unit)
     still boots to a working desktop.
 
-**Phase 3: RAUC.** Effort: M.
+**Phase 3: RAUC.** Effort: M. *Implemented; the exit criteria and the
+bundle sizes wait for the bench board.*
 
 - **Layer plumbing:**
   - `01-fetch-layers.sh` + kas: add `meta-rauc` (kirkstone ships RAUC
@@ -1084,7 +1090,7 @@ criteria wait for the bench board.*
   - A `[streaming] sandbox-user` (`rauc-stream`) in `system.conf`.
 - **Handlers:**
   - system `pre-install` (BSP/Docker checks, `COMMITTED=0` for the target);
-  - slot `post-install` (carry-over);
+  - the carry-over, as a `slot-post-install` hook inside the bundle (5.8);
   - system `post-install` (history).
 - **Exit:**
   - `rauc install` writes B, the reboot is a trial, and it commits;
@@ -1258,7 +1264,7 @@ Both run from `lint.sh`, so they cover every PR.
 | 22 | `L4TDefaultBootMode` reset to 1 (UEFI defaults) | the guard restores it; that boot is flagged "outside GRUB"; install refused until rebooted via GRUB |
 | 23 | `grubaa64.efi` missing | DIRECT boots A; flagged |
 | 24 | a JetPack SD card in the module slot, and a USB stick with `APP`/`esp` labels | ignored: root, ESP and RAUC slots resolve to NVMe partition numbers whose GPT names are checked |
-| 25 | unprivileged user, and a container with the system bus mounted, call RAUC `Install`/`Mark` | denied |
+| 25 | unprivileged user, and a container running as a non-root user with the system bus mounted, call RAUC `Install`/`Mark` | denied |
 | 26 | `boat-update rollback` after commit | other slot boots and commits |
 | 27 | `boat-sleep` (and the UDP sleep listener) during install and during a trial | refused |
 | 28 | both slots broken | A, A, B, then UEFI stop (sticky recovery) is the documented end state; the documented recovery works |
@@ -1469,6 +1475,23 @@ Claims the review checked and confirmed:
 | with the seed in every flash, a USB reflash also empties `/data` | stated in 5.9 and docs; a flash that keeps `DATA` is Phase 8 |
 | a power cut just after seeding `/home/boat` could leave a home of empty files that is never seeded again | `sync` before and after the rename that makes it final |
 | `scripts/test-ab-scripts.py` did not cover `boat-storage` | `scripts/test-boat-storage.py` runs it against a fake board: swap, the `DATA` check, seeding, `format-data`, `status` |
+
+### Review pass 6 (findings while implementing Phase 3)
+
+| finding | resolution |
+|---|---|
+| a build-date default for `BOAT_RELEASE` breaks bitbake: `DATE` is outside the parse-cache hash, so a task signature that depends on it fails on the first build of a day | an empty `BOAT_RELEASE` means `0.0.0-dev`; every development build reports that, so OTA never offers one over another |
+| a carry-over in a system handler runs the *old* release's list, so a new release could never add a path to carry | the carry-over is a hook inside the bundle |
+| `AB_LAYOUT=1` without `meta-rauc` in bblayers parses fine and builds an image that cannot be updated | the build stops with a fatal error naming the missing layer |
+| a signing key generated into the repository or the work tree is one `git add` away from being published | `02-configure-build.sh` refuses such a `BOAT_KEYS_DIR`, and `lint.sh` fails on any tracked PEM private key |
+| RAUC 1.13 runs the system `pre-install` handler *before* it checks `compatible` and `min-bundle-version`, so marking the target `OK=0` there disabled the fallback slot for a bundle RAUC then refused | the handler sets only `COMMITTED=0`; RAUC itself sets `OK=0` just before it writes (5.6) |
+| system handlers get the `[meta.*]` keys but no `RAUC_MF_*`, so the history never had the version | the bundle carries its release as `[meta.boat] release` too |
+| the password merge's `NR == FNR` treats an empty running `/etc/shadow` as the image's, and installed an empty one | the merge tells the files apart by name, and the hook refuses (failing the install) a result that lost lines or `root` |
+| a carry-over copy that failed half way left the new slot with neither version | it copies beside the target and renames |
+| `debugfs` is in the native sysroot's `/sbin`, not `/usr/sbin`, so the bundle could not build | found on `PATH` |
+| `do_bundle`'s signature had the key's path, not its contents | `file-checksums` on the key, certificate and keyring |
+| RAUC splits a version at its last `-`, so `1.0.0-rc-1` would not parse | `BOAT_RELEASE` allows no `-` inside the pre-release part |
+| dbus-daemon's policy goes by uid, so a container running as root with the system bus passes the root-only policy | stated in the policy and 5.7: such a container must run as an unprivileged user |
 
 ### Your review
 
