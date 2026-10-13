@@ -59,8 +59,14 @@ if (( REBOOT == 0 )); then
 fi
 
 log "installing and rebooting ..."
-# The connection drops when the board reboots; that is the expected end.
-ssh_b "boat-update install '${REMOTE}' --reboot" || true
+# The connection drops when the board reboots (ssh exits 255); that is the
+# expected end. Any other failure is boat-update refusing or failing the
+# install - the board is not going to reboot, so say why now.
+rc=0
+ssh_b "boat-update install '${REMOTE}' --reboot" || rc=$?
+if (( rc != 0 && rc != 255 )); then
+  die "the install failed on ${TARGET} (exit ${rc}, see above) - the board stays on slot ${BEFORE}"
+fi
 
 log "waiting for ${BOAT_HOST} to go down ..."
 wait_for_state down 300 || die "the board did not reboot within 5 minutes - check 'boat-update status' on it"

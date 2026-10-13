@@ -226,12 +226,16 @@ def main():
         url = "https://localhost:%d/boat-xavier-nx" % httpd.server_address[1]
         os.environ["CURL_CA_BUNDLE"] = keys + "/tlsca.pem"   # test only
 
-        def publish(serial, channel="stable", signer="index", version="1.1.0", **extra):
+        def publish(serial, channel="stable", signer="index", version="1.1.0", where="stable", **extra):
             doc = dict(channel=channel, serial=serial, compatible=COMPATIBLE, version=version,
                        l4t="35.6.4", bundle=bundle_name, size=len(bundle_bytes), sha256=sha,
                        published="2026-10-13T00:00:00Z", notes="test release\x07")
             doc.update(extra)
-            sign_index(keys, doc, signer, os.path.join(chan, "index.p7"))
+            # where: the channel directory it is served from - normally
+            # stable, which is what the board follows unless told otherwise.
+            d = os.path.join(www, "boat-xavier-nx", where)
+            os.makedirs(d, exist_ok=True)
+            sign_index(keys, doc, signer, os.path.join(d, "index.p7"))
 
         # --- the board -------------------------------------------------
         board = os.path.join(work, "board")
@@ -445,6 +449,16 @@ esac
         idx = dict(base, channel="testing", serial=3, version="1.3.0", sha256=sha)
         offer, msg = bu.decide(idx, conf_t, st, "1.0.0", "1.0.0", COMPATIBLE, "35.6.4", set())
         check("switching to a channel that last published earlier is not a replay", offer is not None, msg)
+        # stable -> testing -> stable, with stable's index unchanged throughout
+        publish(11, version="1.2.0")
+        offer, err = run_check()
+        publish(3, channel="testing", version="1.3.0", where="testing")
+        write(board + "/data/boat-update/channel.conf", "BOAT_UPDATE_CHANNEL=testing\n")
+        offer_t, err_t = run_check()
+        os.unlink(board + "/data/boat-update/channel.conf")
+        offer, err = run_check()
+        check("coming back to a channel whose index has not changed is not a replay",
+              err_t is None and offer_t is not None and err is None, "%s / %s" % (err_t, err))
 
         # --- a downloaded bundle no longer worth installing ----------------
         st = bu.load_state()

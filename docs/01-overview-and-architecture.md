@@ -47,8 +47,9 @@ separate from the OS storage. That is the key to NVMe boot:
 
 With the **A/B layout** (`AB_LAYOUT=1`, experimental), the SSD carries two
 rootfs slots, and UEFI's L4TLauncher hands over to **GRUB** on the ESP, which
-picks the slot, counts boot attempts and falls back to the other slot by
-itself - see [`07-updates.md`](07-updates.md).
+picks the slot, counts boot attempts and, when a slot fails to boot, falls
+back to the other one on the next boot by itself - see
+[`07-updates.md`](07-updates.md).
 
 > Some early L4T releases required a *blank* SD card to be present in the slot
 > even when booting from NVMe. On the L4T R35 UEFI firmware this is normally

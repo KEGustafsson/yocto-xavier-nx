@@ -549,7 +549,7 @@ def decide(idx, conf, state, booted_version, other_version, compatible, l4t, fai
     seen = (state.get("serials") or {}).get(idx["channel"], -1)
     # The same index again (a re-check while a download is under way) is
     # fine; anything else must be newer than everything accepted so far.
-    same = idx["serial"] == seen and index_hash(idx) == state.get("index_hash")
+    same = idx["serial"] == seen and index_hash(idx) == (state.get("index_hashes") or {}).get(idx["channel"])
     if idx["serial"] <= seen and not same:
         raise UpdateError("the index's serial %d is not above %d, the highest accepted - "
                           "a replayed or rolled-back index" % (idx["serial"], seen))
@@ -628,13 +628,17 @@ def do_check(conf, state, quiet=False):
     offer, message = decide(idx, conf, state, running_release(),
                             slot_version(other(slot), slots, may_mount=True), system_compatible(),
                             running_l4t(), failed_versions())
-    if index_hash(idx) != state.get("index_hash"):
+    # Like the serial, the index last accepted is kept per channel: coming
+    # back to a channel whose index has not changed is the same index.
+    h = index_hash(idx)
+    if h != (state.get("index_hashes") or {}).get(idx["channel"]):
         # A new index: what was given up under the old one is tried again.
         state.pop("given_up", None)
         state.pop("refetch", None)
     state.setdefault("serials", {})[idx["channel"]] = idx["serial"]
+    state.setdefault("index_hashes", {})[idx["channel"]] = h
     state.pop("serial", None)
-    state["index_hash"] = index_hash(idx)
+    state.pop("index_hash", None)
     state["last_check"] = int(time.time())
     state["published"] = idx["published"]
     state["channel"] = conf["BOAT_UPDATE_CHANNEL"]

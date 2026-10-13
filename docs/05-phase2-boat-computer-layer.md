@@ -1154,8 +1154,9 @@ file regardless, as the power-on above demonstrates.
 **OS updates** are the A/B layout's job: two rootfs slots, signed RAUC
 bundles delivered over the air or pushed over SSH, a health-gated trial and
 automatic fallback. It is experimental and off by default (`AB_LAYOUT=1`
-turns it on); see [`07-updates.md`](07-updates.md). Without it, the options
-are the ones below.
+turns it on); see [`07-updates.md`](07-updates.md). Without it, only the
+development package feed below applies: the field tier is what `AB_LAYOUT=1`
+builds.
 
 Two tiers:
 

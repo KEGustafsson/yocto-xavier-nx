@@ -1554,6 +1554,8 @@ Claims the review checked and confirmed:
 | `debug-hold` wrote `grubenv` through the same temporary name as `boat-commit`, without its lock | it takes `boat-commit`'s lock and a unique temporary file, and writes durably on vfat |
 | `-purpose smimesign` accepts a signer with no extended key usage | the signer must name emailProtection; serials are capped |
 | index fields shown to the operator could carry control characters | refused (notes are filtered of C0, C1 and DEL) |
+| the accepted index's hash was kept once for all channels: back on a channel whose index had not changed, the board cried replay, and dropped that channel's given-up and re-fetch state (CodeRabbit) | the hash is kept per channel, like the serial |
+| `push-update.sh` ignored the install's exit status, so a refused install surfaced as "did not reboot within 5 minutes" (CodeRabbit) | only ssh's 255 - the connection dropped by the reboot - is the expected end; any other failure stops with the install's error |
 
 ### Your review
 
