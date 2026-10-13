@@ -765,9 +765,13 @@ headers (review M3).
      - `compatible` matches;
      - `version` is newer than the booted slot (RAUC's relaxed-semver
        comparison, `reference.rst` "min-bundle-version");
-     - `version` is not already in the other slot (`rauc status --output-format=json`;
-       slot A as flashed reports `/etc/boat-release`, the same
-       `BOAT_RELEASE` string the bundle carries);
+     - `version` is not already in the other slot. Only
+       `rauc status --detailed --output-format=json` reports it, as the
+       slot's `slot_status.bundle.version`; plain `--output-format=json`
+       leaves `slot_status` out. A slot that was flashed rather than
+       installed has no bundle version, so for slot A as flashed the check
+       reads the `/etc/boat-release` inside it (mounted read-only) - the
+       same `BOAT_RELEASE` string a bundle carries;
      - `version` is not on the board's list of versions that **failed a
        trial here**.
   5. **Then the L4T check.** `l4t` must match the running
