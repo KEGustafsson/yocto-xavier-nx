@@ -261,10 +261,12 @@ RAUC never talks to the channel itself: it streams from a relay inside
 `boat-update` on `127.0.0.1`, which fetches each block from the verified
 URL the way `boat-update`'s own downloads do - `https` only, no redirect
 ever followed, with the client certificate (which RAUC never sees, so the
-key stays root-only), and only over the link that was checked as not
-metered. It passes on only an answer for exactly the range RAUC asked for.
-If that link goes away mid-stream, the stream fails and the board stays on
-its slot; it never moves to another route. On top of that:
+key stays root-only), and only over the link that was checked when the
+stream started. That link must not be metered unless `--allow-metered` is
+given (or `BOAT_UPDATE_METERED=yes`); either way the stream stays bound to
+it. The relay passes on only an answer for exactly the range RAUC asked
+for. If that link goes away mid-stream, the stream fails and the board
+stays on its slot; it never moves to another route. On top of that:
 
 - before RAUC starts, `boat-update` asks for the bundle's first byte and
   refuses to stream from a channel that redirects it or ignores Range

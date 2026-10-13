@@ -923,11 +923,13 @@ headers (review M3).
     relay fetches each of RAUC's Range requests from the verified URL the
     way `boat-update`'s downloads do: `https` only, no redirect followed,
     with the client certificate, and bound (`SO_BINDTODEVICE`) to the link
-    that was checked as not metered. Anything but a 206 of exactly the
-    range asked for (same `Content-Range` offsets, that many bytes) is a
-    502 to RAUC, which fails the install; RAUC checks `Content-Range` only
-    on its first request. A link that goes away fails it too. RAUC gets no TLS options, so the key stays root-only and
-    nothing credential-bearing is on any command line.
+    checked when the stream started - not metered, unless `--allow-metered`
+    or `BOAT_UPDATE_METERED=yes` allows it. Anything but a 206 of exactly
+    the range asked for (same `Content-Range` offsets, that many bytes) is
+    a 502 to RAUC, which fails the install; RAUC checks `Content-Range`
+    only on its first request. A link that goes away fails it too. RAUC
+    gets no TLS options, so the key stays root-only and nothing
+    credential-bearing is on any command line.
   - The bundle URL is the one from the verified index, on the channel the
     offer was checked on. A preflight request for the first byte refuses a
     redirecting or Range-less channel before RAUC marks the slot

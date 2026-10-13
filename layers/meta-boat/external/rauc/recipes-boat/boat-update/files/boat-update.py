@@ -1062,8 +1062,8 @@ def start_relay(conf, url, dev):
     the channel itself. Each of RAUC's Range requests is fetched from the
     verified URL the way boat-update's own transfers are made: https only,
     no redirect followed (RAUC's own client would follow one, to http too),
-    over the link that was checked as not metered and nothing else, with
-    the client certificate - which RAUC never sees, so the key stays
+    over the link checked when the stream started and nothing else (not
+    metered unless that was allowed), with the client certificate - which RAUC never sees, so the key stays
     root-only. Anything but a 206 of exactly the range asked for (its
     Content-Range naming the same offsets, its body that long) is a 502 to
     RAUC, which then fails the install: RAUC checks Content-Range only on
