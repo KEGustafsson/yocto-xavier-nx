@@ -82,6 +82,20 @@ itself only behave like the real thing on the real thing.
 
 ## The soak
 
+`scripts/ab-soak.sh` alternates good and faulty installs, and refuses to
+start on a board that is not running a bench image. Every cycle must
+really reboot the board (a new boot ID). Each good bundle must come back on
+the other slot and commit; each faulty one must come back on the slot it
+started from, with the other slot marked bad - so a bundle that was
+refused before anything was written fails the cycle. A power-cut cycle
+waits for the cut to have happened, then only has to end committed on
+either slot; a cut command that fails fails the cycle. The results go to a
+CSV with a `delivery` column, and the exit status is the number of failed
+cycles. It runs two ways; record each run as its own result.
+
+**Over SSH** - quick, and needs no new versions: the same bundles are
+copied to the board and installed again and again.
+
 ```bash
 scripts/ab-soak.sh --good ~/bench/good.raucb \
   --faulty ~/bench/faulty-panic.raucb --faulty ~/bench/faulty-emergency.raucb \
@@ -89,17 +103,38 @@ scripts/ab-soak.sh --good ~/bench/good.raucb \
   --cycles 50 [--power-cut-every 5]
 ```
 
-It alternates good and faulty installs, and refuses to start on a board
-that is not running a bench image. Every cycle must really reboot the
-board (a new boot ID). Each good bundle must come back on the other slot
-and commit; each faulty one must come back on the slot it started from,
-with the other slot marked bad - so a bundle that was refused before
-anything was written fails the cycle. A power-cut cycle only has to reboot
-and end committed on either slot. The results go to a CSV, and the exit
-status is the number of failed cycles. The plan's Phase 7 target is 50
-cycles **delivered over the air**. For that, publish a fresh
-`BOAT_RELEASE` to `bench` for each good cycle; `ab-soak.sh` pushes over
-SSH, which needs no new version.
+**Over the air** - the plan's Phase 7 target: 50 cycles delivered from the
+`bench` channel. A board takes only a release newer than the one it runs
+(and never one that failed a trial), so every cycle needs its own bundle,
+with versions growing in cycle order and above anything the board has run.
+Build them once, named so that name order is cycle order:
+
+```bash
+(
+  export AB_LAYOUT=1 BOAT_BENCH=1
+  source scripts/env.sh
+  deploy="${BUILD_DIR}/tmp/deploy/images/${MACHINE}"
+  mkdir -p ~/bench/ota
+  faults=(panic emergency tier2 hang)
+  for i in $(seq 1 25); do
+    g=$((2 * i - 1)); f=$((2 * i)); kind=${faults[$(( (i - 1) % 4 ))]}
+    BOAT_RELEASE=1.1.$g scripts/02-configure-build.sh && scripts/03-build.sh boat-bundle
+    cp -L "$deploy/boat-bundle-${MACHINE}.raucb" ~/bench/ota/$(printf %02d $g)-good.raucb
+    BOAT_RELEASE=1.1.$f BOAT_FAULT=$kind scripts/02-configure-build.sh \
+      && scripts/03-build.sh boat-bundle-faulty
+    cp -L "$deploy/boat-bundle-faulty-$kind-${MACHINE}.raucb" \
+      ~/bench/ota/$(printf %02d $f)-faulty-$kind.raucb
+  done
+)
+BOAT_PUBLISH_DEST=<the bench channel root> \
+  scripts/ab-soak.sh --ota ~/bench/ota [--stream] [--power-cut-every 5]
+```
+
+Cycle N publishes the Nth bundle to `bench` with `publish-update.sh`; the
+board then runs `boat-update check`, `download` and `install --reboot`
+(with `--stream`: `check` and `install --stream --reboot`). A name with
+`-faulty` in it is a faulty bundle. A run with `--stream` is a third
+result of its own.
 
 ## The matrix, row by row
 
@@ -154,7 +189,9 @@ manual step on the bench board. The expected results are the plan's.
 
 ## Results
 
-*(Filled in on the bench, in the PR that turns `AB_LAYOUT` on by default.)*
+*(Filled in on the bench, in the PR that turns `AB_LAYOUT` on by default.
+The soak gets one line per delivery - `ssh`, `ota`, and `ota-stream` if
+run - from its CSV.)*
 
 | # | date | release | result | notes |
 |---|---|---|---|---|

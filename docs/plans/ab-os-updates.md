@@ -1255,8 +1255,8 @@ implemented (fault bundles, `scripts/ab-soak.sh`, and the runbook in
 
 - Run the section 7 matrix.
 - Soak: 50 update cycles **delivered over the air** from the `bench`
-  channel, alternating good and faulty bundles, plus random power cuts if a
-  USB relay on the barrel jack is available.
+  channel (`ab-soak.sh --ota`), alternating good and faulty bundles, plus
+  random power cuts if a USB relay on the barrel jack is available.
 - Then flip `AB_LAYOUT` to default-on and move the boat to `stable`.
 
 **Phase 8 (later, separate plans):**
@@ -1614,6 +1614,9 @@ Claims the review checked and confirmed:
 | `ab-soak.sh` passed a faulty cycle whose bundle was refused before anything was written (same slot, committed), and stopped dead when SSH was down at the start of a cycle | every cycle must change the boot ID, a faulty one must leave the other slot `OK=0`; the bench image is required up front; an unreachable board fails that cycle, not the run; the copy goes over `ssh` (`BOAT_SSH_OPTS` is written for it) |
 | each fault-bundle build replaced the previous one in the deploy directory, and the soak's globs matched every bundle | the runbook copies each bundle out under its own name as it is built |
 | overwriting the start of a slot breaks its superblock, so GRUB fails the slot before the initramfs is ever reached (row 14 tested row 19's path) | row 14 damages the journal, which only the kernel reads; row 12 corrupts the kernel past its header |
+| `ab-soak.sh` only installed over SSH, so the Phase 7 target - 50 cycles delivered over the air - had no runnable procedure (CodeRabbit) | `ab-soak.sh --ota DIR [--stream]` publishes each cycle's bundle to `bench` and has the board check, download (or stream) and install it; the runbook builds the versioned bundles it needs; the CSV records the delivery, and each soak is its own result |
+| a power cut mid-copy or mid-install left `ab-soak.sh` waiting on a dead SSH session for TCP's timeout (CodeRabbit) | SSH sessions send keepalives and end a minute after the board stops answering |
+| a power-cut cycle could pass on the board's state from before a late cut, and a cut command that failed still passed (CodeRabbit) | the cycle waits for the cut first and judges the board after it; a failed cut command fails the cycle |
 
 ### Your review
 
