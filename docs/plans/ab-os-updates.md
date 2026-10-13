@@ -200,10 +200,10 @@ boot this kernel correctly.
         v
    \EFI\BOOT\grubaa64.efi + grub.cfg + grubenv      <- slot choice + attempt counting
         | linux  ($disk,gptN)/boot/Image  ${cbootargs} <KERNEL_ARGS>
-        |        root=PARTUUID=<slot> rauc.slot=<A|B> panic=10 [boat.trial=1]
+        |        root=/dev/nvme0n1p<N> rauc.slot=<A|B> panic=10 [boat.trial=1]
         | initrd ($disk,gptN)/boot/initrd
         v
-   tegra-minimal-initramfs (patched: root=PARTUUID only, bounded retry, reboot)
+   tegra-minimal-initramfs (patched: that slot only, GPT name checked, bounded retry, reboot)
         v
    systemd -> boat-commit.service (health gate) -> rauc mark-good + COMMITTED=1
                                                  or mark-bad + reboot (trial only)
@@ -254,28 +254,43 @@ boot this kernel correctly.
 This is NVIDIA's `flash_l4t_nvme_rootfs_ab.xml` with these changes:
 
 - `APP_b` has no filename (not written at flash).
-- **Fixed `<unique_guid>` PARTUUIDs** on `APP`, `APP_b`, `esp`, `SWAP` and
-  `DATA`.
-- `SWAP` and `DATA` are added at the end.
+- `SWAP` and `DATA` are added at the end, with explicit GPT ids.
+- **Pinned GPT entry numbers** for `APP`, `APP_b`, `esp`, `SWAP` and `DATA`
+  (`BOAT_AB_PARTNUM_*` in `meta-boat`'s `layer.conf`). The build fails if
+  NVIDIA's template ever moves one of them.
+- It is **generated at build time** from NVIDIA's file, by a script in the
+  `tegra-bootfiles` bbappend, rather than committed. No copy of NVIDIA's
+  layout lives in this repository, and a BSP update's changes flow through.
 
 | # (GPT id) | name | size | written at flash? | notes |
 |---|---|---|---|---|
-| … | kernel, kernel-dtb, kernel_b, kernel-dtb_b, recovery, `esp`, `esp_alt`, UDA, … | as NVIDIA | as NVIDIA | unchanged, except that `esp` gains GRUB |
+| … | kernel, kernel-dtb, kernel_b, kernel-dtb_b, recovery, `esp_alt`, UDA, … | as NVIDIA | as NVIDIA | unchanged |
 | 1 | `APP` | `ROOTFS_SIZE_BYTES` (16 GiB) | yes, a **smaller** ext4 image (below) | slot A |
 | 2 | `APP_b` | same | **no** | slot B. `B_OK=0` until the first update writes it. |
-| n | `SWAP` | 8 GiB | no | `mkswap` on first boot |
-| n+1 | `DATA` | min 2 GiB, **fill-to-end** (`0x808`) | small ext4 seed image via `DATAFILE` | online `resize2fs` on first boot |
+| 12 | `esp` | as NVIDIA | yes | GRUB, `grub.cfg`, `grubenv` |
+| 17 | `SWAP` | 8 GiB | no | `mkswap` on first boot |
+| 18 | `DATA` | min 2 GiB, **fill-to-end** (`0x808`) | small ext4 seed image via `DATAFILE` (Phase 2) | online `resize2fs` on first boot |
 
 Points that need care:
 
-- **Address partitions by PARTUUID only, never by label** (review M5). A
-  JetPack SD card in the module's slot, or a USB stick, can carry
-  `APP`/`esp` labels too. With the module's own SD slot, a label lookup
-  could mount someone else's rootfs or write `grubenv` to the wrong ESP.
-  - RAUC slots and mount units use `/dev/disk/by-partuuid/…`.
+- **Address partitions by NVMe device and GPT entry number, never by
+  label** (review M5). A JetPack SD card in the module's slot, or a USB
+  stick, can carry `APP`/`esp` labels too. With the module's own SD slot, a
+  label lookup could mount someone else's rootfs or write `grubenv` to the
+  wrong ESP.
+  - Fixed PARTUUIDs were the v4 answer, but they do not survive a flash:
+    meta-tegra's `make-sdcard` parses `<unique_guid>` and never passes it to
+    `sgdisk`, so every flash gets random ones (found in Phase 1).
+  - The devkit has exactly one NVMe drive, always `nvme0n1`; SD cards are
+    `mmcblk*` and USB media `sd*`. So `/dev/nvme0n1p<N>` cannot name foreign
+    media.
+  - Everything that acts on a partition **first checks the GPT name at
+    that number** (`APP`, `APP_b`, `esp`, …) and refuses on a mismatch, so a
+    re-partitioned or foreign drive in the M.2 slot is not written to.
+  - RAUC slots and mount units use `/dev/nvme0n1p<N>`.
   - meta-tegra's `boot-efi.mount` (`by-partlabel/esp`) gets a drop-in.
-  - The initramfs patch makes `root=PARTUUID=` authoritative and removes
-    the `mmcblk0p1` fallback.
+  - The initramfs patch accepts only `root=/dev/nvme0n1p1` or `p2`, checks
+    the GPT name, and removes the label search and the `mmcblk0p1` fallback.
   - GRUB addresses slots as `($disk,gpt1)` / `($disk,gpt2)`, with `$disk`
     taken from the ESP's own `$root` (needs `regexp` in `GRUB_BUILDIN`;
     GRUB 2.06 has no part-label search).
@@ -309,7 +324,8 @@ Points that need care:
 - **`boat-grow-rootfs` must not run on this layout.** It is removed from the
   A/B image and refuses if `APP_b` exists. `boat-storage` only ever grows
   filesystems inside their partitions; it never edits the partition table.
-- **Mounts ship in the image** as mount units by PARTUUID, all `nofail`
+- **Mounts ship in the image** as mount units by partition number (name
+  checked), all `nofail`
   apart from the slot's own rootfs. A runtime edit to `/etc/fstab` would be
   lost on update. A broken *shared* resource (ESP, `DATA`, `SWAP`) must
   never drop a slot into emergency mode (5.5).
@@ -396,8 +412,8 @@ There are two tiers, so that a broken *data* partition or an app problem can
 never flip the OS back to an older slot.
 
 - **Tier 1 (every boot):**
-  - the kernel booted the slot named by `rauc.slot`, from the PARTUUID that
-    slot is configured for;
+  - the kernel booted the slot named by `rauc.slot`, from the partition
+    that slot is configured for, and its GPT name matches;
   - the rootfs is read-write;
   - the ESP is mounted;
   - `grubenv` is valid;
@@ -452,7 +468,7 @@ in a reset. The exception is a deliberate stay on a committed slot.
 | GRUB itself hangs | **the UEFI watchdog, kept armed through GRUB** (300 s; 5.1). The Tegra hardware WDT is a second layer if Phase 0 shows it runs this early. | `grub-efi` bbappend: re-arm instead of cancel. **Phase 1 exit test.** If firmware ignores the re-arm, this row narrows to "power cycle to recover" and goal 4 says so. |
 | kernel panic | `panic=10` | cmdline |
 | kernel hard hang | Tegra WDT running from early kernel | Phase 0: armed before userspace? If not, enable it at probe |
-| initramfs can't mount root | today: **hangs forever** | `tegra-minimal-init` bbappend: `root=PARTUUID` only, bounded retries, then `reboot -f` (`boat.stay=1` keeps the shell) |
+| initramfs can't mount root | today: **hangs forever** | `tegra-minimal-init` bbappend: only the two slot partitions, GPT name checked, bounded retries, then `reboot -f` (`boat.stay=1` keeps the shell) |
 | systemd emergency/rescue | today: waits forever | drop-ins: reboot after 60 s unless `boat.stay=1`. Shared mounts are `nofail`, so only slot-local faults get here. |
 | PID 1 wedged | `RuntimeWatchdogSec=60s`, `RebootWatchdogSec=10min` | **decision D8**: one `/dev/watchdog` opener |
 | commit/health hangs on a trial | `boat-trial-deadline.timer` | add |
@@ -952,15 +968,16 @@ A "no" on any of these re-opens section 4.
   - `PARTITION_LAYOUT_EXTERNAL`;
   - the new sector expression;
   - `UBOOT_EXTLINUX = "1"`;
-  - `IMAGE_ROOTFS_SIZE`;
-  - `IMAGE_TEGRAFLASH_DATA`/`DATAFILE`.
+  - `IMAGE_ROOTFS_SIZE`.
 - **`meta-boat` additions:**
-  - a `tegra-bootfiles` bbappend for `boat-nvme-ab.xml` (fixed PARTUUIDs);
+  - a `tegra-bootfiles` bbappend that generates `boat-nvme-ab.xml` (pinned
+    GPT numbers);
   - the `L4TConfiguration` overlay with GRUB mode;
   - `boat-bootmode-guard`;
   - `boat-grub-esp`: `grubaa64.efi` with `GRUB_BUILDIN` +=
-    `regexp loadenv test echo sleep reboot halt`, `grub.cfg` (generated and
-    script-checked), and a pre-sized 1 KiB `grubenv`;
+    `regexp echo sleep reboot` (`loadenv` and `test` are already in
+    OE-core's list), `grub.cfg` (generated and script-checked), and a
+    pre-sized 1 KiB `grubenv`;
   - a `tegra-espimage` bbappend;
   - a `tegra-minimal-init` bbappend;
   - `grub-editenv` on the target;
@@ -969,7 +986,10 @@ A "no" on any of these re-opens section 4.
   - `boat-grubenv-guard`;
   - **a stub commit unit** that runs `grub-editenv … TRY=0 COMMITTED=1`.
     Without it, slot A would be marked bad on its second boot (review M10).
-  - kernel fragment `boat-rauc.cfg` for whatever Phase 0 shows missing.
+  - kernel fragment `boat-rauc.cfg` for whatever Phase 0 shows missing;
+  - `boat-grow-rootfs` dropped from the A/B image, and refusing to run if
+    `APP_b` exists (moved here from Phase 2: a Phase 1 board must not be
+    able to run it).
 - **Exit criteria:**
   - a fresh flash boots A through GRUB;
   - a test image `dd`'d into B boots via `grub-editenv`;
@@ -984,16 +1004,16 @@ A "no" on any of these re-opens section 4.
 - **`boat-storage`** (first boot, idempotent):
   - grows `DATA` and the flashed `APP` ext4 online;
   - runs `mkswap` on `SWAP` unless it already holds swap;
-  - acts on PARTUUIDs only, so stale data under `SWAP` from an older layout
-    is fine.
+  - acts only on partition numbers whose GPT name matches, so stale data
+    under `SWAP` from an older layout is fine.
 - **Mount units**, `nofail`:
   - `DATA` → `/data`;
   - `SWAP`;
   - the bind mounts `/home` and `/var/log/journal`.
-- **The ESP mount drop-in** (PARTUUID; verify its failure doesn't drop to
-  emergency).
-- **`boat-grow-rootfs`:** refuses on A/B layouts and is dropped from the A/B
-  image.
+- **The `DATA` seed image** (`IMAGE_TEGRAFLASH_DATA`/`DATAFILE`), moved
+  here from Phase 1 with the rest of `DATA`.
+- **The ESP mount drop-in** (partition number, from Phase 1): verify its
+  failure doesn't drop to emergency.
 - **Exit:**
   - the first boot after a flash has `/data` filling the SSD, 8 GiB of
     swap, and `APP`'s filesystem filling its partition;
@@ -1011,7 +1031,7 @@ A "no" on any of these re-opens section 4.
   - `DISTRO_FEATURES += "rauc"`.
 - **`rauc` bbappend:**
   - `system.conf`: `bootloader=grub`, `grubenv=` on the ESP, slots
-    `rootfs.0`/`.1` by PARTUUID with `bootname=A`/`B`, `type=ext4`,
+    `rootfs.0`/`.1` as `/dev/nvme0n1p1`/`p2` with `bootname=A`/`B`, `type=ext4`,
     `resize=true`, `data-directory=/data/rauc`, keyring options from 5.7,
     `min-bundle-version`;
   - the root-only D-Bus policy;
@@ -1197,7 +1217,7 @@ Both run from `lint.sh`, so they cover every PR.
 | 21 | ESP `grubenv` corrupted | boots by defaults; the guard rebuilds the file and alerts; next install works |
 | 22 | `L4TDefaultBootMode` reset to 1 (UEFI defaults) | the guard restores it; that boot is flagged "outside GRUB"; install refused until rebooted via GRUB |
 | 23 | `grubaa64.efi` missing | DIRECT boots A; flagged |
-| 24 | a JetPack SD card in the module slot, and a USB stick with `APP`/`esp` labels | ignored: root, ESP and RAUC slots resolve to NVMe PARTUUIDs |
+| 24 | a JetPack SD card in the module slot, and a USB stick with `APP`/`esp` labels | ignored: root, ESP and RAUC slots resolve to NVMe partition numbers whose GPT names are checked |
 | 25 | unprivileged user, and a container with the system bus mounted, call RAUC `Install`/`Mark` | denied |
 | 26 | `boat-update rollback` after commit | other slot boots and commits |
 | 27 | `boat-sleep` (and the UDP sleep listener) during install and during a trial | refused |
@@ -1317,7 +1337,7 @@ written.
 | M2 | major | A torn `grubenv` is not "one wasted boot": `grub-editenv` truncates then writes, `save_env` refuses a bad file, RAUC fails on missing variables | `boat-grubenv-guard`, `.bak`, defaults (5.3); test 21 |
 | M3 | major | meta-rauc's mark-good is `WantedBy=multi-user.target`, so a "multi-user reached" check deadlocks; Tier 1 failure behaviour was undefined | single `boat-commit` unit with `DefaultDependencies=no`; trial fails → reboot, committed fails → alert only (5.4) |
 | M4 | major | NVIDIA's counter trip is sticky (non-volatile) and stops the board in UEFI; shared faults (ESP mount) can cause it | attempt budget, `nofail` shared mounts, emergency reboot only for slot-local faults, documented recovery; Phase 1 ≥4-reboot test; test 28 |
-| M5 | major | Partition labels collide with JetPack SD cards and USB media (initramfs `blkid -l`, `boot-efi.mount`, RAUC) | fixed PARTUUIDs everywhere; initramfs uses `root=PARTUUID` only and drops the `mmcblk0p1` fallback (5.2); test 24 |
+| M5 | major | Partition labels collide with JetPack SD cards and USB media (initramfs `blkid -l`, `boot-efi.mount`, RAUC) | NVMe partition numbers with a GPT-name check everywhere (fixed PARTUUIDs in v4; see pass 4); initramfs accepts only the two slots and drops the `mmcblk0p1` fallback (5.2); test 24 |
 | M6 | major | RAUC's stock D-Bus policy lets anyone install or mark slots, and containers get the system bus | root-only policy (5.7); test 25 |
 | M7 | major | The trial marker was written after RAUC activates the slot | inverted: `COMMITTED=0` is set in **pre-install**, so a fresh slot is a trial by default (5.3, 5.6); test 9 |
 | M8 | major | Carry-over missed `/root/.ssh` and `/home`, so key-only SSH would lock you out after an update | `/root/.ssh` carried; `/home` on `/data` (D11) |
@@ -1379,6 +1399,15 @@ Claims the review checked and confirmed:
 | M6 | major | a carried-over `channel.conf` goes stale after a credential change and blocks image defaults | image defaults in `/etc`, operator overrides on `/data`; dropped from carry-over (5.8, 5.10) |
 | — | minor | metered detection (per-device, `--interface`, 4G router over Ethernet, VPN); no OTA during a trial; `rauc info` checks only the signature; streaming limits (no HTTP/2); index field validation; inhibitor tied to the SSH session | all in 5.10 and the tests |
 | — | nit | Range probe must be a GET with `Content-Range` total; adaptive is a manifest flag; clock gate on chrony sync only; `openssl` already on the image | fixed |
+
+### Review pass 4 (findings while implementing Phase 1)
+
+| finding | resolution |
+|---|---|
+| meta-tegra's `make-sdcard` reads `<unique_guid>` but never hands it to `sgdisk`, so fixed PARTUUIDs are random after every flash | partitions are addressed as `/dev/nvme0n1p<N>` with pinned GPT numbers, and every user checks the GPT name first (5.2, M5) |
+| an entry appended after `APP_b` without an explicit id is numbered "previous id + 1" by `nvflashxmlparse`, colliding with the kernel partition | `SWAP`/`DATA` get explicit ids; the build verifies every pinned number (5.2) |
+| `boat-grow-rootfs` on an A/B board would wreck `APP_b` | dropped from the A/B image and guarded in Phase 1, not Phase 2 |
+| `loadenv`/`test` are already in OE-core's `GRUB_BUILDIN`; `halt` is never used | `GRUB_BUILDIN` += `regexp echo sleep reboot` |
 
 ### Your review
 
