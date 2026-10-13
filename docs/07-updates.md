@@ -1,0 +1,316 @@
+# 07 — OS updates: A/B slots, over the air
+
+> **Experimental.** The A/B layout is off by default (`AB_LAYOUT=0`) until the
+> bench validation in [the plan](plans/ab-os-updates.md) (Phase 7) has passed
+> on hardware. Everything below describes `AB_LAYOUT=1` builds.
+
+The A/B layout keeps **two complete root filesystems** ("slots") on the SSD.
+An update is written into the slot that is *not* running, and the board then
+tries it **once**. If the new slot does not come up healthy, the board goes
+back to the slot it came from by itself, with nobody at the console. Signed
+update bundles reach the board over the air, from a plain HTTPS server.
+
+What it does **not** do:
+
+- **Install or reboot on its own.** A check and a background download can
+  be automatic; writing the other slot, and the reboot into it, always takes
+  `boat-update install`, typed by a person.
+- **Update firmware.** QSPI firmware, the kernel DTB and anything else that
+  changes with a new L4T release still need a USB reflash at the dock. A
+  bundle built on another L4T release is refused.
+
+The design, and why it is shaped this way, is in
+[`plans/ab-os-updates.md`](plans/ab-os-updates.md).
+
+## How a boot picks its slot
+
+```text
+UEFI -> L4TLauncher -> GRUB (NVMe ESP) -> kernel + initrd of slot A or B
+                         |
+                         grubenv: ORDER, A_OK/A_TRY/A_COMMITTED, B_...
+```
+
+- GRUB boots the first usable slot in `ORDER`, and **counts the attempt
+  before the kernel loads**.
+- A committed slot gets two attempts, so one power cut during boot never
+  moves the boat to an older OS. A slot **on trial** — a fresh update —
+  gets one.
+- **`boat-commit`** decides whether a boot worked. On a trial it checks
+  that the critical services are up
+  (`/etc/boat-update/health.conf`). If they are, the slot is committed. If
+  not, it is marked bad and the board reboots into the other slot.
+- Every other way of failing also ends in a reset:
+  - a kernel panic;
+  - an initramfs that cannot find its root;
+  - systemd's emergency mode;
+  - a wedged PID 1 (the hardware watchdog);
+  - a trial still not committed after 15 minutes;
+  - a GRUB that hangs (the UEFI watchdog).
+
+  The reset is what lets GRUB count the attempt and fall back.
+
+## Turning it on
+
+### 1. Make the signing keys — once, ever
+
+```bash
+scripts/gen-update-keys.sh            # into ~/.local/share/boat-update-keys
+```
+
+This makes an update CA and two signing keys under it:
+
+- one for bundles;
+- one for the channel index.
+
+Every image trusts exactly that CA.
+
+> **Back the directory up now, somewhere other than this machine.** Without
+> `ca.key.pem` and `ca.cert.pem`, no board will trust a new bundle until it
+> has been reflashed over USB. Once the backup exists, keep `ca.key.pem`
+> offline: it is only needed to issue new signing certificates.
+
+`BOAT_KEYS_DIR` points elsewhere if you keep the keys on a removable drive.
+The build refuses a key directory inside the repository or the work tree,
+and `scripts/lint.sh` fails if a private key is ever committed.
+
+### 2. Build
+
+```bash
+export AB_LAYOUT=1
+export BOAT_RELEASE=1.0.0            # what /etc/boat-release and the bundle say
+scripts/01-fetch-layers.sh           # also fetches meta-rauc
+scripts/02-configure-build.sh
+IMAGE=boat-image scripts/03-build.sh
+scripts/03-build.sh boat-bundle      # the update bundle (and the image in it)
+```
+
+With kas: `AB_LAYOUT=1 BOAT_RELEASE=1.0.0 scripts/build-kas.sh`.
+
+**`BOAT_RELEASE` must grow with every release you ship.** It is compared as
+a version: `1.0.0 < 1.0.1 < 1.1.0-rc.1 < 1.1.0`, and `2026.10.1` works too.
+Left empty, a build reports `0.0.0-dev`. That is fine on the bench, but such
+a build is never offered over the air.
+
+### 3. Flash — this erases the SSD
+
+The A/B layout is a different partition table. The first flash after
+switching `AB_LAYOUT` on (or off) is a full `scripts/05-flash-nvme.sh` in
+recovery mode, and **it erases everything on the SSD**, `/data` included.
+Copy off what you need first.
+
+Use the default `initrd-flash` path. `--host-drive` relies on a
+`doexternal.sh` that meta-tegra's kirkstone branch does not ship, and the DATA
+partition's first filesystem is written by `initrd-flash`.
+
+After the first boot, slot A runs, slot B is empty, and `/data` fills the
+rest of the SSD (`boat-storage status`).
+
+## Day to day: `boat-update`
+
+```bash
+boat-update                  # status: slots, versions, last result, OTA state
+sudo boat-update check       # ask the channel now
+sudo boat-update download    # fetch the offered bundle now (resumable)
+sudo boat-update install --reboot     # write it to the other slot, reboot into it
+boat-update history          # installs, trials and what became of them
+sudo boat-update rollback    # switch to the other slot (if it is usable) and reboot
+sudo boat-update debug-hold on|off    # after a failure, stop for inspection instead of resetting
+```
+
+`install` runs as its own systemd unit, so losing the SSH session half way
+does not stop it; it still exits non-zero if the install fails. After the reboot the new slot is **on trial**. `boat-update
+status` says so, and sleep is held off until `boat-commit` has decided.
+That takes a minute or two.
+
+- **It committed:** the old slot stays as the rollback. The downloaded
+  bundle is deleted, because the old slot, not the file, is what you go back
+  to.
+- **It failed:** the board is back on the old slot.
+  - `boat-update history` and `/data/boat-update/last-result` say why.
+  - `journalctl -b -1` shows the failed boot itself; the journal lives on
+    `/data`.
+  - That version is never offered to this board again - also when the
+    trial ended before `boat-commit` could say so (a kernel panic, a power
+    cut): `boat-update` notices the uncommitted slot it installed into.
+
+**Without internet**, from a laptop on the boat's network:
+
+```bash
+scripts/push-update.sh tmp/deploy/images/jetson-xavier-nx-devkit/boat-bundle-*.raucb
+```
+
+It copies the bundle to the board, installs it, reboots, waits, and tells you
+which slot came back. From a USB stick, use exFAT or ext4 (a bundle over
+4 GiB does not fit on FAT32), then `sudo boat-update install /media/<stick>/<bundle>.raucb --reboot`.
+
+## Over the air: the update channel
+
+A channel is **static files on any HTTPS server that supports Range
+requests**: nginx, Caddy, or object storage. Range support is what lets a
+download resume after the link drops. Check a host before you rely on it:
+
+```bash
+scripts/ab-phase0-capture.sh --channel-url https://updates.example/boat-xavier-nx/stable/index.p7
+```
+
+GitHub Releases is a poor fit: bundles that carry CUDA can exceed its per-file
+size limit.
+
+```text
+https://updates.example/boat-xavier-nx/
+    stable/index.p7                 the signed index the boat follows
+    stable/boat-bundle-<version>-<sha256[:12]>.raucb
+    testing/...                     the bench's channel
+```
+
+### Publishing
+
+```bash
+BOAT_PUBLISH_DEST=user@updates.example:/srv/www/boat-xavier-nx \
+  scripts/publish-update.sh testing tmp/deploy/images/jetson-xavier-nx-devkit/boat-bundle-jetson-xavier-nx-devkit.raucb
+```
+
+The script:
+
+1. reads the version and L4T release from the bundle itself;
+2. names it by its SHA-256;
+3. writes and signs the index with the index key and the next serial (at
+   least the time in seconds, so a restored key directory or a second
+   publishing machine never goes backwards);
+4. uploads the bundle **first** and the index **last**.
+
+To promote a release that passed on the bench, publish the same bundle to
+`stable`. `--reflash` marks a BSP bump: boards are told to reflash at the
+dock instead of downloading it. `--notes FILE` attaches release notes.
+
+### What the board accepts
+
+`boat-update check` fetches `index.p7` (https only, no redirects, at most
+64 KiB, enforced as it arrives). It verifies it against the update CA in
+`/etc/rauc`, **never** against the system's public CAs, and only from the
+index-signing certificate (the emailProtection key usage). It then accepts
+it only if all of these hold:
+
+- the index is for this channel;
+- its serial is above the last one accepted on this channel — so an old
+  index cannot be replayed;
+- it is for this board and this L4T release;
+- it offers a version that is newer than the running one, not already in
+  the other slot, and not one that failed a trial here.
+
+RAUC checks the bundle's own signature again before it is installed. The
+channel host is not trusted for anything but availability: the worst it can
+do is withhold updates. A download never grows past the size the signed
+index gives. A bundle that will not download intact - three re-fetches - or
+that RAUC refuses is **given up**, not counted as a failed trial: a new
+index (the next publish) tries it again. `status` shows when the channel
+last published.
+
+### On the board: `/data/boat-update/channel.conf`
+
+The image ships defaults in `/etc/boat-update/channel.conf`. Put your
+settings in **`/data/boat-update/channel.conf`**. That file is shared by both
+slots, so it stays right across updates and rollbacks.
+
+```bash
+BOAT_UPDATE_URL="https://updates.example/boat-xavier-nx"   # the final URL - redirects are not followed
+BOAT_UPDATE_CHANNEL=stable          # or testing
+BOAT_UPDATE_AUTO=download           # off | check | download - never installs
+BOAT_UPDATE_METERED=no              # download over a metered link?
+BOAT_UPDATE_RATE_LIMIT=""           # e.g. 200k
+```
+
+- **Schedule.** The timer looks for updates four times a day, after every
+  network change, and after waking from sleep.
+- **Downloads.** They run in ten-minute windows. Each one resumes where the
+  last stopped, whether that was a dropped link, a sleep or a reboot.
+- **Disk space.** A download needs the bundle's size plus 2 GiB free on
+  `/data`.
+
+**Metered links.** A download waits while the link the boat is using is
+metered: cellular, or anything NetworkManager guesses is. **A 4G router
+reached over Wi-Fi or Ethernet looks unmetered.** Mark that connection:
+
+```bash
+nmcli connection modify "<the router's connection>" connection.metered yes
+```
+
+With a VPN as the default route, the board counts as metered if any of its
+links is. `status` shows "waiting for an unmetered link", and `sudo
+boat-update download --allow-metered` overrides it once.
+
+**Access control.** A public channel is the default. Bundles hold nothing
+secret: the image's password hash is already in this repository. To restrict
+it, use a TLS client certificate: put `client.crt` and `client.key` in
+`/data/boat-update/`. Basic auth and bearer tokens are not supported, because
+they leak across redirects and into logs.
+
+## Storage on the A/B layout
+
+| partition | what it holds |
+|---|---|
+| `APP`, `APP_b` | slot A and slot B, 16 GiB each (`ROOTFS_SIZE_BYTES`) |
+| `SWAP` | 8 GiB of swap |
+| `DATA` | everything else, on `/data`, shared by both slots |
+
+`/data` holds:
+
+- Docker (`/data/docker`) and the compose files;
+- `/home/boat`;
+- the persistent journal (capped at 256 MiB);
+- RAUC's state and `boat-update`'s state.
+
+`root`'s home stays in the slot, so its SSH keys still work if DATA is what
+broke.
+
+Settings that belong to the board rather than the image are copied into the
+new slot at every install:
+
+- host keys and machine ID;
+- the Wi-Fi and network connections;
+- Bluetooth pairings;
+- hostname and time zone;
+- the `root` and `boat` passwords;
+- `/etc/default/boat-*`;
+- `/etc/docker/daemon.json`.
+
+**Any other edit under `/etc` does not survive an update.** Put it in
+`meta-boat`, or on `/data`.
+
+`boat-storage status` shows the partitions. If `/data` will not mount, the
+boat still boots without it — the shared mounts are all optional — and
+`journalctl -b -u boat-data-check` says why. `sudo boat-storage format-data`
+makes a new, empty DATA filesystem. It asks first, and only you can run it:
+nothing formats DATA on its own.
+
+`boat-grow-rootfs` is not part of an A/B image; the layout already uses the
+whole SSD.
+
+## When something goes wrong
+
+- **"booted OUTSIDE GRUB"** in `status`. GRUB did not run, and L4TLauncher's
+  own fallback booted slot A. Usually the UEFI setting was reset to its
+  default. `boat-bootmode-guard` puts it back, so reboot once. Updates are
+  refused until the board comes up through GRUB.
+- **"grubenv was torn and rebuilt."** A power cut hit a write of the boot
+  state. The running slot was kept. The other slot is marked unusable until
+  the next update, unless this boot was a trial — then the slot you updated
+  from stays the fallback.
+- **It keeps falling back after an update.** Read `boat-update history`
+  and `journalctl -b -1 -u boat-commit`.
+  - A health check that fails for reasons outside the OS — an app that
+    needs the internet, say — belongs out of
+    `BOAT_HEALTH_UNITS`/`health.d`.
+  - On the bench, `sudo boat-update debug-hold on` keeps a failing slot up
+    for inspection.
+- **The board stops in the UEFI menu, or will not boot at all.** Both
+  slots failed repeatedly, and NVIDIA's own boot counter has marked the
+  drive unbootable. That marker is sticky. Recover with a USB reflash
+  (`scripts/05-flash-nvme.sh`); this keeps nothing on the SSD. The UEFI-menu
+  path that clears the marker without a reflash is captured by Phase 0 (see
+  [`plans/ab-phase0-runbook.md`](plans/ab-phase0-runbook.md)).
+- **"BSP bump: reflash at the dock."** The new release is built on another
+  L4T. Flash it over USB. Like the first flash, **a USB flash empties
+  `/data`**: copy off what you need first.
+
+See also [`06-troubleshooting.md`](06-troubleshooting.md).

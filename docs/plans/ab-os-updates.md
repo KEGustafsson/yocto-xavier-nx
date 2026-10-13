@@ -1,7 +1,7 @@
 # Plan: A/B OS updates with automatic fallback
 
 **Status: v4, being implemented phase by phase (section 6).** Every
-decision in section 10 was taken at its recommendation. Phases 0 to 4 are
+decision in section 10 was taken at its recommendation. Phases 0 to 5 are
 in the repository, behind `AB_LAYOUT` (off by default); their exit tests
 need the bench board. Section 11 records what each review pass found and how
 the plan answers it.
@@ -718,7 +718,7 @@ expose a new index next to an old signature. Fields:
 | field | purpose |
 |---|---|
 | `channel` | must equal the channel the board follows, so a `testing` index served at the `stable` URL is rejected |
-| `serial` | increases with every publish. The board stores the highest serial it has accepted (on `/data`) and rejects lower ones, which stops a replayed or pulled old index. |
+| `serial` | increases with every publish (at least the time in seconds, below 2^32). The board stores the highest serial it has accepted on each channel (on `/data`) and rejects lower ones, which stops a replayed or pulled old index. |
 | `compatible`, `version`, `l4t` | checked before any download (below) |
 | `bundle` | a bare file name: no `/`, no `..`, no scheme |
 | `size`, `sha256` | transport integrity of the download |
@@ -743,8 +743,10 @@ certificate sits under the same CA as the bundle signer:
   ```
 
   It uploads the **bundle first and `index.p7` last**, so the index never
-  points at a file that isn't there yet. `serial` comes from a counter kept
-  next to the keys.
+  points at a file that isn't there yet. `serial` is the larger of a
+  counter kept next to the keys (plus one) and the time in seconds, and is
+  recorded before anything is uploaded; an unreadable counter stops the
+  publish.
 - **Verify on the board.** Every flag below is load-bearing:
 
   ```text
@@ -824,14 +826,18 @@ headers (review M3).
     - Between windows it re-checks the gates, the metered state and the
       policy.
   - **Size bounds:**
-    - It requires a `Content-Length`, and passes `--max-filesize` = the
-      index's `size`.
+    - curl writes to a pipe and `boat-update` copies at most the index's
+      `size` (64 KiB for the index) to disk, killing curl the moment a
+      server sends more. curl 7.82 applies `--max-filesize` only to a
+      `Content-Length`, which a chunked body does not have.
     - It treats a `.part` larger than `size`, or a resume answered with
-      416, as corrupt and deletes it.
+      416, as corrupt and deletes it. A resume answered with the whole
+      file (the server ignores Range) starts again from zero, uncounted.
     - It keeps a `/data` free-space floor (bundle size + 2 GiB, because
       Docker shares `/data`) and re-checks it every window.
-    - A version is **re-fetched from scratch at most 3 times**, then marked
-      failed.
+    - A bundle is **re-fetched from scratch at most 3 times**, then
+      **given up** (by its SHA-256) until the channel publishes a new
+      index. A transfer fault is never recorded as a failed trial.
   - **Redirects:** none (`--max-redirs 0`). If the host redirects, the URL
     in `channel.conf` must name the final location.
   - **Finish:**
@@ -1124,6 +1130,7 @@ exit criteria wait for the bench board.*
 - **Exit:** every row of 5.5 except firmware has been exercised once.
 
 **Phase 5: OTA stage 1 (check, download, install) and operator tooling.** Effort: M.
+*Implemented; the exit criteria wait for the bench board.*
 
 - **`boat-update` (on the board).** `status` is the default and read-only.
   It shows:
@@ -1146,11 +1153,16 @@ exit criteria wait for the bench board.*
 - **Configuration:** the policy knobs in `/etc/boat-update/channel.conf`
   (image defaults) and `/data/boat-update/channel.conf` (operator
   overrides) (5.10).
-- **Board-side state on `/data`:** the highest accepted index `serial`; the
-  versions that failed a trial here; the per-version re-fetch counter.
+- **Board-side state on `/data`:** the highest accepted index `serial` per
+  channel; the versions that failed a trial here; the per-bundle re-fetch
+  counter and the bundles given up.
 - **Tools** (`openssl` and `curl`) are already on the image: `openssl-bin`
   comes in via `ca-certificates`, and `curl` is in
   `packagegroup-boat-nettools`.
+- **`boat-update` is Python 3**, like `boat-sleep-listener`, so it adds no
+  interpreter to the image. The index rules, version comparison and
+  download bounds are clearer, and testable on the host, there than in
+  `sh`; `openssl` and `curl` still do the cryptography and the transfer.
 - **Keys:** `scripts/gen-update-keys.sh` also creates the index-signing
   leaf (emailProtection EKU only), and keeps the `serial` counter next to
   the keys.
@@ -1245,7 +1257,8 @@ pieces also run off-target:
   `blkid` and `nmcli` mocked. `scripts/test-ab-scripts.py` runs
   `boat-grubenv-guard` and the commit step as shipped, against a scratch
   directory standing in for the board (`/proc`, an ESP with a real
-  `grubenv`, the GPT names).
+  `grubenv`, the GPT names). `scripts/test-boat-update.py` runs
+  `boat-update` against a local HTTPS channel.
   The OTA `check`/`download` logic also runs against a local Range-capable
   HTTP server, with cut-offs injected mid-transfer and a tampered index.
   `scripts/test-boat-storage.py` runs `boat-storage` against a fake board
@@ -1524,6 +1537,23 @@ Claims the review checked and confirmed:
 | the deadline took `COMMITTED=1` in `grubenv` as a commit, though a commit whose write failed after the rename (the flush, or `grubenv.bak`) reports "NOT committed" and may never be durable (CodeRabbit) | the commit records itself in `/run/boat-ab/committed` only once the whole write succeeded; the deadline requires that record and fails the trial without it |
 | with `/data` missing, `last-result` and `failed-versions` went onto the slot's own rootfs under the bare mount point | written only when `/data` is the `DATA` partition |
 | an operator's `health.conf` was replaced by the image's at every update | carried over (5.8) |
+
+### Review pass 8 (findings while implementing Phase 5)
+
+| finding | resolution |
+|---|---|
+| `install` re-runs itself as a systemd unit, so an outer run that held the update lock blocked its own inner run | only the inner run, the one that calls RAUC, takes the lock |
+| the timer re-checks while a download is under way; a strict "serial must grow" rule rejected the unchanged index as a replay | the same serial is accepted when the index is byte-for-byte the one accepted before (its hash is stored); anything else must be newer |
+| a downloaded bundle that RAUC refuses (wrong `compatible` or version) would be offered and fetched again forever | it is deleted and given up until the next index (a publishing fault is not a failed trial) |
+| curl 7.82 applies `--max-filesize` only to a `Content-Length`: a chunked body from a hostile host filled `/tmp` with the "64 KiB" index and `/data` with a "3 MiB" bundle | `boat-update` copies curl's output itself, at most the signed size, and kills curl past it |
+| transfer faults - a server ignoring Range, a 416, an oversize body - recorded the release as failing a trial, for good | they give up that bundle until a new index; a server that ignores Range restarts from zero, uncounted; re-fetches really are 3 |
+| `install` exited 0 when the install unit failed (the lock was busy, or RAUC refused), so `push-update.sh` reported success | the unit keeps its result, the wrapper reads it, and it takes the lock first to fail fast |
+| a missing or restored serial counter restarted at 1, so every board rejected every index as a replay; a channel switch could too | the serial is at least the time in seconds and recorded before the upload; boards keep one serial per channel |
+| a ready bundle stayed installable after something newer arrived by push, or after a trial that died before `boat-commit` | only the current offer, newer than the running release and not failed, is installed; a trial that ended without a commit is recorded as failed |
+| `status` mounted the other slot when RAUC was busy writing it | only `check`, under the update lock, mounts a slot |
+| `debug-hold` wrote `grubenv` through the same temporary name as `boat-commit`, without its lock | it takes `boat-commit`'s lock and a unique temporary file, and writes durably on vfat |
+| `-purpose smimesign` accepts a signer with no extended key usage | the signer must name emailProtection; serials are capped |
+| index fields shown to the operator could carry control characters | refused (notes are filtered of C0, C1 and DEL) |
 
 ### Your review
 

@@ -111,6 +111,22 @@ there. See
 | `sfdisk` prints `Re-reading the partition table failed.: Device or resource busy` | Expected, not an error. The kernel cannot re-read the table of a disk with a mounted partition; `partx` is what actually updates its view, and the script checks that separately. |
 | Swap is not back after a reboot | Check the `/etc/fstab` line the script added (`UUID=...` for a partition, `/swapfile` for a file) and `systemctl status swap.target`. With systemd, fstab swap entries become `.swap` units via `systemd-fstab-generator`, so a typo shows up as a failed unit rather than a mount error. |
 
+## A/B updates (`AB_LAYOUT=1`)
+
+Start with `boat-update` (status) and `boat-update history`; the full guide is
+[`07-updates.md`](07-updates.md) "When something goes wrong".
+
+| Symptom | Fix |
+|---------|-----|
+| An update installed, the board rebooted, and it is back on the old version | The trial failed and GRUB fell back - working as designed. `boat-update history` and `/data/boat-update/last-result` give the reason; `journalctl -b -1 -u boat-commit` shows the failed boot. That version is not offered again. |
+| `status` says "booted OUTSIDE GRUB" | UEFI's `L4TDefaultBootMode` was reset (e.g. "load defaults" in the UEFI menu), so L4TLauncher booted slot A directly. `boat-bootmode-guard` has already set it back: reboot once. Updates are refused until then. |
+| `status` says "grubenv was torn and rebuilt" | A power cut hit a write of GRUB's boot state; the board kept the slot it booted. The other slot is marked unusable until the next update (unless this boot was a trial). Nothing to do. |
+| `/data` is not mounted | `journalctl -b -u boat-data-check -u data.mount` says why; `boat-storage status` shows the partitions. The board runs without `/data` (no Docker, no OTA) rather than refusing to boot. A DATA that holds no filesystem (e.g. after `--host-drive`) needs `sudo boat-storage format-data`, which asks first. |
+| Stops in the UEFI menu / boots nothing after repeated failures | Both slots failed often enough that NVIDIA's boot counter marked the drive unbootable, which is sticky. Reflash over USB (`scripts/05-flash-nvme.sh`); the UEFI-menu path that clears it without a reflash is in [`plans/ab-phase0-runbook.md`](plans/ab-phase0-runbook.md). |
+| `boat-update check`: "the index's signature does not verify" | The channel's `index.p7` was not signed with this fleet's index key (`scripts/gen-update-keys.sh`, `publish-update.sh`) - or someone else's server is answering. |
+| `boat-update check`: "serial ... is not above" | The channel served an older index than one this board already accepted (a replay, or a server restored from an old backup). Publish again: `publish-update.sh` always uses the next serial. |
+| A download never starts: "waiting for an unmetered link" | The link the boat uses is metered (or NetworkManager guesses so). Allow it in `/data/boat-update/channel.conf` (`BOAT_UPDATE_METERED=yes`), or once with `sudo boat-update download --allow-metered`. |
+
 ## Remote development (VS Code Remote-SSH)
 
 | Symptom | Fix |

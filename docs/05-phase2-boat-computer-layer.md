@@ -1149,7 +1149,13 @@ One unrelated line shows up in `journalctl -u bluetooth` either way and is
 755, so systemd notes the mismatch and carries on. `bluetoothd` reads the
 file regardless, as the power-on above demonstrates.
 
-## Updates (not implemented — future direction)
+## Updates
+
+**OS updates** are the A/B layout's job: two rootfs slots, signed RAUC
+bundles delivered over the air or pushed over SSH, a health-gated trial and
+automatic fallback. It is experimental and off by default (`AB_LAYOUT=1`
+turns it on); see [`07-updates.md`](07-updates.md). Without it, the options
+are the ones below.
 
 Two tiers:
 
@@ -1165,10 +1171,15 @@ Two tiers:
   health-check after `up`, and roll back to the prior digest on failure.
   Avoid deploying floating `latest` tags to the boat.
 
-RAUC needs the `meta-rauc` layer, not yet fetched by this project — a
-deliberate follow-up, not started.
+RAUC and `meta-rauc` come with the A/B layout (`07-updates.md`); BUP firmware
+updates are still not implemented.
 
 ## Reclaiming the rest of the SSD
+
+> On the **A/B layout** this section does not apply: the layout already uses
+> the whole SSD - two rootfs slots, an 8 GiB swap partition and `/data` on
+> the rest - and `boat-grow-rootfs` refuses to run there. See
+> [`07-updates.md`](07-updates.md) "Storage on the A/B layout".
 
 The image is flashed with a **fixed-size** root filesystem —
 `ROOTFS_SIZE_BYTES` in [`../scripts/env.sh`](../scripts/env.sh), 16 GiB by
@@ -1453,8 +1464,11 @@ UI" above.)
   still the biggest open risk (see above).
 - ❌ `fake-hwclock`, `fail2ban`, `wavemon`, `bind-utils` — not
   packaged in this project's fetched kirkstone-era layers.
-- ❌ RAUC A/B updates, the `/data` partition itself, and the interactive
-  build-time user/SSH-key provisioning flow — later hardening, not started.
+- 🧪 RAUC A/B updates and the `/data` partition: implemented behind
+  `AB_LAYOUT=1` ([`07-updates.md`](07-updates.md)), not yet validated on
+  hardware.
+- ❌ The interactive build-time user/SSH-key provisioning flow — later
+  hardening, not started.
 - ⚠️ **Credentials.** Root and `boat` share the password `Xavier`
   (`BOAT_PASSWORD_HASH` in `boat-image.bb`; override in `local.conf` with
   `openssl passwd -6`). sshd accepts root logins; it no longer accepts empty

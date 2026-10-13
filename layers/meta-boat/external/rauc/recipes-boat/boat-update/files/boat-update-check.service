@@ -1,0 +1,15 @@
+[Unit]
+Description=Check for, and download, boat OS updates
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/07-updates.md
+After=network-online.target time-sync.target
+Wants=network-online.target
+RequiresMountsFor=/data
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/boat-update auto
+# A background download runs in bounded windows; this only stops one that
+# is somehow stuck for good.
+TimeoutStartSec=6h
+Nice=10
+IOSchedulingClass=idle

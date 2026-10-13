@@ -1,0 +1,16 @@
+# Look for updates four times a day. OnCalendar + Persistent, not a
+# monotonic timer: those pause while the board sleeps, and a board that
+# sleeps most of the day would hardly ever check. Also started by the
+# NetworkManager dispatcher (a link came up) and after resume; boat-update
+# rate-limits itself, so the extra starts cost nothing.
+[Unit]
+Description=Check for boat OS updates
+Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/07-updates.md
+
+[Timer]
+OnCalendar=*-*-* 00/6:00
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target
