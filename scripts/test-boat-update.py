@@ -33,6 +33,7 @@ import http.server
 import importlib.util
 import json
 import os
+import re
 import shutil
 import ssl
 import subprocess
@@ -135,24 +136,27 @@ class Channel(http.server.SimpleHTTPRequestHandler):
             self.flood()
             return
         size = os.path.getsize(fpath)
-        start = 0
+        start, end = 0, size - 1
         rng = self.headers.get("Range")
         if rng and Channel.mode != "ignore-range":
-            start = int(rng.split("=")[1].split("-")[0])
+            first, last = rng.split("=")[1].split("-")
+            start = int(first)
+            if last:
+                end = min(int(last), size - 1)
             if start >= size:
                 self.send_response(416)
                 self.send_header("Content-Range", "bytes */%d" % size)
                 self.end_headers()
                 return
             self.send_response(206)
-            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, size - 1, size))
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
         else:
             self.send_response(200)
-        self.send_header("Content-Length", str(size - start))
+        self.send_header("Content-Length", str(end + 1 - start))
         self.end_headers()
         with open(fpath, "rb") as f:
             f.seek(start)
-            data = f.read()
+            data = f.read(end + 1 - start)
         if fpath.endswith(".raucb") and Channel.cut_after is not None:
             data = data[:Channel.cut_after]
             Channel.cut_after = None
@@ -232,6 +236,7 @@ def main():
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         url = "https://localhost:%d/boat-xavier-nx" % httpd.server_address[1]
         os.environ["CURL_CA_BUNDLE"] = keys + "/tlsca.pem"   # test only
+        os.environ["SSL_CERT_FILE"] = keys + "/tlsca.pem"    # the stream relay's Python TLS
 
         def publish(serial, channel="stable", signer="index", version="1.1.0", where="stable", **extra):
             doc = dict(channel=channel, serial=serial, compatible=COMPATIBLE, version=version,
@@ -292,6 +297,13 @@ case "$1" in
         rc=$(cat %(b)s/rauc-exit)
         if [ "$rc" != 0 ]; then
             echo "RAUC service disappeared" >&2; exit "$rc"
+        fi
+        # RAUC's NBD client: the "sqsh" magic first, then blocks further in.
+        a=$(curl --noproxy '*' -s -o /dev/null -w '%%{http_code}' -r 0-3 "$2")
+        b=$(curl --noproxy '*' -s -o /dev/null -w '%%{http_code}' -r 1048576-1179647 "$2")
+        echo "fetched $a $b" >> %(b)s/rauc.log
+        if [ "$a" != 206 ] || [ "$b" != 206 ]; then
+            echo "LastError: unexpected HTTP response code $a/$b"; exit 1
         fi
         sed "s/B_VERSION/$(cat %(b)s/rauc-serves)/" %(b)s/rauc-status.in > %(b)s/rauc-status
         grub-editenv %(e)s set "ORDER=B A" B_OK=1 B_TRY=0 B_COMMITTED=0
@@ -526,7 +538,6 @@ esac
         write(board + "/data/boat-update/client.key", key_pem, 0o600)
         write(board + "/data/boat-update/client.crt", open(keys + "/client.pem").read(), 0o600)
         key_line = key_pem.splitlines()[1]
-        write(binp + "/chgrp", "#!/bin/sh\necho \"chgrp $*\" >> %s/chgrp.log\n" % board, 0o755)
         write(board + "/rauc-serves", "1.2.0")
         conf = bu.load_conf()
         os.environ["BOAT_UPDATE_INNER"] = "1"
@@ -545,15 +556,14 @@ esac
         err = stream()
         log = open(board + "/rauc.log").read()
         want_url = "%s/stable/%s" % (url, bundle_name)
-        check("a streamed install hands RAUC the verified URL and only file names",
-              err is None and "rauc install --tls-cert=%s/data/boat-update/client.crt --tls-key=%s"
-              "/data/boat-update/client.key %s" % (board, board, want_url) in log
-              and key_line not in log, "%s\n%s" % (err, log))
-        chg = open(board + "/chgrp.log").read()
-        check("the client certificate and key are both handed to RAUC's streaming sandbox group",
-              all("chgrp rauc-stream %s/data/boat-update/client.%s" % (board, f) in chg
-                  and oct(os.stat(board + "/data/boat-update/client." + f).st_mode & 0o777) == "0o640"
-                  for f in ("crt", "key")), chg)
+        check("a streamed install hands RAUC only the local relay's URL - no certificate, no key",
+              err is None and re.search(r"rauc install http://127\.0\.0\.1:\d+/boat-xavier-nx/stable/%s\n"
+                                        % re.escape(bundle_name), log)
+              and "--tls" not in log and key_line not in log, "%s\n%s" % (err, log))
+        check("... and RAUC's Range requests are answered through it, from the channel",
+              "fetched 206 206" in log, log)
+        check("the client key stays root-only (RAUC never opens it)",
+              oct(os.stat(board + "/data/boat-update/client.key").st_mode & 0o777) == "0o600")
         check("a streamed install is remembered for its trial",
               bu.load_state().get("installed") == {"version": "1.2.0", "slot": "B"}, str(bu.load_state()))
         write(board + "/rauc-error", "HTTP range request not supported")
@@ -606,8 +616,25 @@ esac
         check("an offer checked on another channel is not streamed from this one",
               err is not None and "channel has changed" in err and not open(board + "/rauc.log").read(), str(err))
         del os.environ["BOAT_UPDATE_INNER"]
-        check("rauc install options are built without the key itself",
-              bu.stream_options({"BOAT_UPDATE_CLIENT_CERT": "", "BOAT_UPDATE_CLIENT_KEY": ""}) == [])
+
+        # --- the relay itself: what it will not pass on to RAUC -------------
+        def through_relay(dev="lo"):
+            relay, local_url = bu.start_relay(conf, want_url, dev)
+            try:
+                return subprocess.run(["curl", "--noproxy", "*", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                       "-r", "0-3", local_url], capture_output=True, text=True).stdout
+            finally:
+                relay.shutdown()
+                relay.server_close()
+        check("the relay answers a Range request from the channel", through_relay() == "206")
+        for mode, what in (("redirect", "a redirect the channel sends later"),
+                           ("ignore-range", "a full body instead of the range")):
+            Channel.mode = mode
+            got = through_relay()
+            Channel.mode = None
+            check("the relay never passes on %s" % what, got == "502", got)
+        check("the relay never leaves the link that was checked",
+              through_relay(dev="boatnodev0") == "502")
         httpd.shutdown()
     finally:
         shutil.rmtree(work, ignore_errors=True)

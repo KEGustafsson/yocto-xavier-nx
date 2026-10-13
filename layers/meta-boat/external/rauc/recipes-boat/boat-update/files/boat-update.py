@@ -39,15 +39,21 @@ import configparser
 import contextlib
 import fcntl
 import hashlib
+import http.client
+import http.server
 import json
 import os
 import re
 import shlex
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.parse
 
 # Filled in at build time by the recipe: the A/B layout's disk and
 # partition numbers (BOAT_AB_* in meta-boat's layer.conf).
@@ -1020,26 +1026,98 @@ def do_install(conf, state, bundle=None, reboot=False, stream=False, allow_meter
         run(["systemctl", "reboot"])
 
 
-def stream_options(conf):
-    """'rauc install' options for the client certificate: file names only -
-    the key itself never passes through a command line."""
-    opts = []
+class BoundHTTPS(http.client.HTTPSConnection):
+    """An HTTPS connection that can only go out through one network device:
+    when that link goes away, it fails - it never moves to another route."""
+
+    def __init__(self, host, port, context, dev, timeout=60):
+        super().__init__(host, port, context=context, timeout=timeout)
+        self.dev = dev
+
+    def connect(self):
+        err = OSError("cannot resolve %s" % self.host)
+        for family, kind, proto, _, addr in socket.getaddrinfo(self.host, self.port, 0, socket.SOCK_STREAM):
+            sock = socket.socket(family, kind, proto)
+            try:
+                if self.dev:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, self.dev.encode())
+                sock.settimeout(self.timeout)
+                sock.connect(addr)
+            except OSError as e:
+                sock.close()
+                err = e
+                continue
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+            return
+        raise err
+
+
+RANGE_RE = re.compile(r"bytes=(\d+)-(\d+)$")
+RELAY_MAX = 64 << 20      # far above any one request RAUC's streaming client makes
+
+
+def start_relay(conf, url, dev):
+    """RAUC streams from a relay inside boat-update on 127.0.0.1, never from
+    the channel itself. Each of RAUC's Range requests is fetched from the
+    verified URL the way boat-update's own transfers are made: https only,
+    no redirect followed (RAUC's own client would follow one, to http too),
+    over the link that was checked as not metered and nothing else, with
+    the client certificate - which RAUC never sees, so the key stays
+    root-only. Anything but a 206 of the size asked for is a 502 to RAUC,
+    which then fails the install. Returns (server, the URL to hand RAUC)."""
+    u = urllib.parse.urlsplit(url)
+    ctx = ssl.create_default_context()
     if conf["BOAT_UPDATE_CLIENT_CERT"]:
-        opts.append("--tls-cert=" + conf["BOAT_UPDATE_CLIENT_CERT"])
-    if conf["BOAT_UPDATE_CLIENT_KEY"]:
-        opts.append("--tls-key=" + conf["BOAT_UPDATE_CLIENT_KEY"])
-    return opts
+        ctx.load_cert_chain(conf["BOAT_UPDATE_CLIENT_CERT"], conf["BOAT_UPDATE_CLIENT_KEY"] or None)
+    local = threading.local()
 
+    class Relay(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
 
-def sandbox_can_read(conf):
-    """RAUC's streaming client drops to the rauc-stream user before it opens
-    the client certificate and key, so both have to be readable by that
-    group."""
-    for f in sorted({conf["BOAT_UPDATE_CLIENT_CERT"], conf["BOAT_UPDATE_CLIENT_KEY"]} - {""}):
-        if run(["chgrp", "rauc-stream", f]).returncode != 0:
-            raise UpdateError("cannot give %s to the rauc-stream group - is this image's RAUC built "
-                              "with the streaming sandbox?" % f)
-        os.chmod(f, 0o640)
+        def log_message(self, *args):
+            pass
+
+        def refuse(self, code, why):
+            self.send_response_only(code)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            warn("stream relay: %s" % why)
+
+        def do_GET(self):
+            m = RANGE_RE.match(self.headers.get("Range", ""))
+            if not m or self.path != u.path or int(m.group(2)) - int(m.group(1)) >= RELAY_MAX:
+                return self.refuse(400, "unexpected request %s %r" % (self.path, self.headers.get("Range")))
+            want = int(m.group(2)) - int(m.group(1)) + 1
+            for attempt in (1, 2):           # a kept-alive connection may have been closed
+                conn = getattr(local, "conn", None) or BoundHTTPS(u.hostname, u.port or 443, ctx, dev)
+                local.conn = conn
+                try:
+                    conn.request("GET", u.path, headers={"Range": m.group(0)})
+                    resp = conn.getresponse()
+                    body = resp.read(want + 1)
+                    break
+                except (OSError, http.client.HTTPException) as e:
+                    conn.close()
+                    local.conn = None
+                    if attempt == 2:
+                        return self.refuse(502, "the channel did not answer: %s" % e)
+            if resp.status != 206 or len(body) > want:
+                conn.close()
+                local.conn = None
+                return self.refuse(502, "the channel answered HTTP %d%s - not passed on to RAUC"
+                                   % (resp.status, " (a redirect)" if 300 <= resp.status < 400 else ""))
+            self.send_response_only(206)
+            for name in ("Content-Range", "Date", "Last-Modified"):
+                if resp.getheader(name):
+                    self.send_header(name, resp.getheader(name))
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Relay)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, "http://127.0.0.1:%d%s" % (server.server_address[1], u.path)
 
 
 def stream_preflight(conf, url, dev):
@@ -1068,30 +1146,34 @@ def stream_install(conf, state, slot, dev):
     Returns that release."""
     offer = offer_to_stream(state, conf)
     url = channel_url(conf, offer["bundle"])
-    sandbox_can_read(conf)
     stream_preflight(conf, url, dev)
     forget_installed(state)
     say("streaming %s into the other slot (only the blocks it does not already have)" % offer["version"])
-    # 'rauc install', not a bare D-Bus call: it waits for RAUC's Completed
-    # signal and fails if the service goes away mid-install, so a RAUC that
-    # died is never read as one that finished.
-    p = subprocess.Popen(["rauc", "install"] + stream_options(conf) + [url],
-                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    error = ""
-    for line in p.stdout:
-        line = line.rstrip("\n")
-        print(line, flush=True)
-        if "LastError:" in line:
-            error = line.split("LastError:", 1)[1].strip()
-    rc = p.wait()
+    relay, local_url = start_relay(conf, url, dev)
+    try:
+        # 'rauc install', not a bare D-Bus call: it waits for RAUC's
+        # Completed signal and fails if the service goes away mid-install,
+        # so a RAUC that died is never read as one that finished.
+        p = subprocess.Popen(["rauc", "install", local_url],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        error = ""
+        for line in p.stdout:
+            line = line.rstrip("\n")
+            print(line, flush=True)
+            if "LastError:" in line:
+                error = line.split("LastError:", 1)[1].strip()
+        rc = p.wait()
+    finally:
+        relay.shutdown()
+        relay.server_close()
     if rc != 0:
         raise UpdateError("the streamed install failed - the board stays on this slot: %s. Streaming needs "
                           "a link that stays up and a channel with Range support; 'boat-update download' "
                           "and then 'install' is the robust path." % (error or "rauc exit %d" % rc))
     # RAUC checks the bundle's signature and compatible, not that it is the
-    # release the index offered - and its streaming client follows
-    # redirects. An older signed bundle served at this URL would install,
-    # so the slot is checked now, before anything boots it (plan 5.7).
+    # release the index offered: an older signed bundle served at this URL
+    # would install. So the slot is checked now, before anything boots it
+    # (plan 5.7).
     t = other(slot)
     got = slot_version(t, rauc_slots())
     if got != offer["version"]:

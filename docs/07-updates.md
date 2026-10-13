@@ -257,29 +257,24 @@ sudo boat-update install --stream --reboot
 the other slot. Every bundle is built **adaptive**, so RAUC fetches only
 the blocks that neither slot already has. On a small change that is a
 fraction of the bundle; RAUC's own documentation suggests about a tenth.
-It starts from the same verified URL from the index and uses the same
-client certificate (RAUC is handed file names only, never key material).
-Unlike `boat-update`'s own downloads, RAUC's streaming client follows
-redirects (to `http` too), and it checks only the bundle's signature. So:
+RAUC never talks to the channel itself: it streams from a relay inside
+`boat-update` on `127.0.0.1`, which fetches each block from the verified
+URL the way `boat-update`'s own downloads do - `https` only, no redirect
+ever followed, with the client certificate (which RAUC never sees, so the
+key stays root-only), and only over the link that was checked as not
+metered. If that link goes away mid-stream, the stream fails and the board
+stays on its slot; it never moves to another route. On top of that:
 
-- before RAUC starts, `boat-update` asks for the bundle's first byte the
-  way a download does - no redirects, the same client certificate, over the
-  link it checked - and refuses to stream from a channel that redirects it
-  or ignores Range requests;
+- before RAUC starts, `boat-update` asks for the bundle's first byte and
+  refuses to stream from a channel that redirects it or ignores Range
+  requests;
 - after the stream, the other slot must hold exactly the release the index
-  offered; otherwise it is marked bad before anything boots it, and the
-  install fails.
+  offered (RAUC itself checks only the bundle's signature); otherwise it is
+  marked bad before anything boots it, and the install fails.
 
 A stream is offered only what a download would be: newer than the running
 release, not a release that failed a trial here, and checked on the channel
 that is configured now (after changing channels, `check` again).
-
-One limit: the metered-link check happens when the stream starts. RAUC's
-streaming client cannot be tied to that link, and RAUC 1.13 cannot cancel an
-install once it has started - so if the default route moves to a metered
-link mid-stream, the stream carries on over it. On a boat whose router fails
-over to cellular by itself, download-then-install (bound to the link it
-checked, and resumable) is the safe choice.
 
 | | download, then install | `install --stream` |
 |---|---|---|
