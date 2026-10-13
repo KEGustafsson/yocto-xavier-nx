@@ -461,6 +461,10 @@ a "multi-user reached" check would deadlock):
   `OnBootSec=15min`): if the trial still isn't committed, mark-bad and
   reboot. This catches a commit unit that hangs. The gate and the deadline
   take one lock, so only one of them decides, and a commit stops the timer.
+  The deadline goes by this boot's own record of a commit that fully
+  succeeded (`/run/boat-ab/committed`), not by `COMMITTED=1` in `grubenv`:
+  a write that failed after its rename can show `COMMITTED=1` that was never
+  flushed, or that `grubenv.bak` does not have.
 - **The sleep inhibitor** is held from install until the trial is committed,
   not just during the write.
 - `nv_update_verifier.service` keeps running unconditionally. It only feeds
@@ -1517,6 +1521,7 @@ Claims the review checked and confirmed:
 | `systemctl suspend` as root ignores block inhibitors unless asked to check them, so `boat-sleep` ignored the trial's inhibitor (and every other one) | `--check-inhibitors=yes`; and `boat-sleep` refuses during a trial even with `--force` |
 | RAUC's mark-good rewrites `grubenv` in place: a torn write leaves GRUB the `.bak` copy, where the passed trial still looks used up | commit and fail with one atomic `grubenv` write |
 | the gate and the deadline could decide at the same time, and through the same temporary file | one lock; a commit stops the deadline timer; `BOAT_HEALTH_DEADLINE` is held within the unit's limit |
+| the deadline took `COMMITTED=1` in `grubenv` as a commit, though a commit whose write failed after the rename (the flush, or `grubenv.bak`) reports "NOT committed" and may never be durable (CodeRabbit) | the commit records itself in `/run/boat-ab/committed` only once the whole write succeeded; the deadline requires that record and fails the trial without it |
 | with `/data` missing, `last-result` and `failed-versions` went onto the slot's own rootfs under the bare mount point | written only when `/data` is the `DATA` partition |
 | an operator's `health.conf` was replaced by the image's at every update | carried over (5.8) |
 

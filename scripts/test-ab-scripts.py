@@ -58,7 +58,7 @@ class Board:
     def __init__(self, root, cmdline, env=None, bak=None, torn=False,
                  parts=None, mounts=None, mountpoints=None, active=None,
                  failed=(), rauc="ok", release="1.1.0", health_deadline=0,
-                 late=(), editenv_fails=False):
+                 late=(), editenv_fails=False, committed_mark=False):
         self.root = root
         for d in ("bin", "proc", "run", "etc", "data", "boot/efi/EFI/BOOT"):
             os.makedirs(os.path.join(root, d), exist_ok=True)
@@ -75,6 +75,10 @@ class Board:
         # Units that are not active the first time they are asked about.
         self.write("late", "".join(u + "\n" for u in late))
         self.editenv_fails = editenv_fails
+        if committed_mark:
+            # boat-commit's own record that this boot's commit succeeded.
+            os.makedirs(os.path.join(root, "run/boat-ab"), exist_ok=True)
+            self.write("run/boat-ab/committed", "")
         self.write("proc/uptime", "100.00 100.00\n")
         if active is None:
             active = ["NetworkManager.service", "systemd-logind.service",
@@ -282,13 +286,13 @@ CASES = [
          log=["systemctl stop boat-trial-deadline.timer",
               "systemctl stop boat-trial-inhibit.service"],
          not_log=["mark-good", "systemctl reboot"],
-         files={"data/boat-update/last-result": "committed slot B"}),
+         files={"data/boat-update/last-result": "committed slot B", "run/boat-ab/committed": ""}),
     case("commit: a grubenv that will not take the write is NOT reported committed",
          "boat-commit.sh",
          dict(cmdline="rauc.slot=B boat.trial=1",
               env=env_with(ORDER="B A", B_TRY=1, B_COMMITTED=0), editenv_fails=True),
          1, unchanged=True, says=["NOT committed"],
-         not_log=["boat-trial-inhibit", "boat-trial-deadline"]),
+         not_log=["boat-trial-inhibit", "boat-trial-deadline"], absent=["run/boat-ab/committed"]),
     case("commit: a unit that comes up late is waited for",
          "boat-commit.sh",
          dict(cmdline="rauc.slot=B boat.trial=1",
@@ -378,8 +382,14 @@ CASES = [
     case("deadline: a trial that has committed is left alone",
          "boat-commit.sh",
          dict(cmdline="rauc.slot=B boat.trial=1",
-              env=env_with(ORDER="B A", B_TRY=0, B_COMMITTED=1)),
+              env=env_with(ORDER="B A", B_TRY=0, B_COMMITTED=1), committed_mark=True),
          0, unchanged=True, not_log=["systemctl reboot"], args=["--deadline"]),
+    case("deadline: COMMITTED=1 from a commit whose write failed part-way is not a commit",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1",
+              env=env_with(ORDER="B A", B_TRY=0, B_COMMITTED=1)),
+         1, want_env=env_with(ORDER="B A", B_OK=0, B_TRY=0, B_COMMITTED=1),
+         log=["systemctl reboot"], says=["never confirmed"], args=["--deadline"]),
     # --- RAUC pre-install handler -----------------------------------------
     # RAUC can still refuse the bundle after this handler, so it may only
     # mark the target not committed - never unusable.

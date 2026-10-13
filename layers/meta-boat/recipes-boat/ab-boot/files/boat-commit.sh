@@ -24,7 +24,8 @@
 #
 #   trial, all pass      commit: OK=1 TRY=0 COMMITTED=1 in one atomic
 #                        grubenv write (not RAUC's mark-good, which rewrites
-#                        grubenv in place), and the deadline is disarmed
+#                        grubenv in place), and the deadline is disarmed -
+#                        only once every step of that write succeeded
 #   trial, a check fails mark the slot bad (OK=0, the same way), record why
 #                        on /data, reboot - GRUB then boots the other slot
 #                        (boat.stay=1: no reboot, for bench work)
@@ -158,13 +159,20 @@ record() {
 
 release() { cat /etc/boat-release 2>/dev/null || echo unknown; }
 
+# This boot's commit, written only once grubenv_set has succeeded. The
+# deadline goes by it, not by COMMITTED=1 in grubenv: a write that failed
+# after its rename shows COMMITTED=1 that was never flushed, or that
+# grubenv.bak - GRUB's fallback - does not have.
+COMMITTED_MARK="$BOAT_AB_RUNDIR/committed"
+
 commit() {
     lock
     [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_OK")" = 1 ] \
         || die "slot $slot was failed meanwhile (the trial deadline) - not committing it"
     grubenv_set "${slot}_OK=1" "${slot}_TRY=0" "${slot}_COMMITTED=1" \
         && [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_COMMITTED")" = 1 ] \
-        || die "could not write grubenv - slot $slot is NOT committed"
+        || die "could not write grubenv - slot $slot is NOT committed (the trial deadline fails it)"
+    : > "$COMMITTED_MARK" || warn "could not write $COMMITTED_MARK - the trial deadline will fail this slot"
     systemctl stop boat-trial-deadline.timer 2>/dev/null || true
     systemctl stop boat-trial-inhibit.service 2>/dev/null || true
     say "slot $slot ($(release)) passed its trial: committed"
@@ -204,7 +212,10 @@ booted_on_trial && trial=1
 if [ "${1:-}" = "--deadline" ]; then
     [ "$trial" = 1 ] || exit 0
     lock
-    [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_COMMITTED")" = 1 ] && exit 0
+    [ -e "$COMMITTED_MARK" ] && exit 0
+    if [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_COMMITTED")" = 1 ]; then
+        fail_trial "its commit was never confirmed (the grubenv write failed part-way)"
+    fi
     fail_trial "not committed within the trial deadline"
 fi
 
