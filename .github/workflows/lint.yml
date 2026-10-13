@@ -42,7 +42,10 @@ jobs:
       - name: Install check tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends shellcheck python3-yaml
+          # grub-emu and the disk-image tools run the A/B GRUB state machine
+          # (scripts/test-grub-ab.py) in GRUB itself.
+          sudo apt-get install -y --no-install-recommends shellcheck python3-yaml \
+            grub-emu gdisk dosfstools mtools
 
       # LINT_STRICT=1 turns "tool not installed" into a failure. Without it a
       # missing tool is only a warning, which is right for a developer laptop

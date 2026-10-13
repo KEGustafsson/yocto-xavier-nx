@@ -74,6 +74,21 @@ TEGRA_EXTERNAL_DEVICE_SECTORS = "${@(int(d.getVar('ROOTFSPART_SIZE')) + 10737418
 # the correct external/NVMe template by itself.
 PARTITION_LAYOUT_TEMPLATE_DEFAULT = "flash_l4t_t194_qspi_p3668.xml"
 
+# ---- A/B OS updates (EXPERIMENTAL, off) ----
+# Two rootfs slots with GRUB picking one and falling back automatically, plus
+# SWAP and DATA partitions - docs/plans/ab-os-updates.md. Uncomment ALL of
+# these together (AB_LAYOUT=1 for scripts/02-configure-build.sh, or
+# kas/ab-updates.yml, writes the same lines). It changes the partition
+# layout: the first flash afterwards is a full one, and it ERASES the SSD.
+# The TEGRA_EXTERNAL_DEVICE_SECTORS here replaces the single-slot one above;
+# boat-grow-rootfs refuses to run on this layout.
+# BOAT_AB_LAYOUT = "1"
+# PARTITION_LAYOUT_EXTERNAL = "boat-nvme-ab.xml"
+# TEGRA_EXTERNAL_DEVICE_SECTORS = "${@(2 * int(d.getVar('ROOTFSPART_SIZE')) + int(d.getVar('BOAT_AB_SWAP_SIZE')) + int(d.getVar('BOAT_AB_DATA_MIN_SIZE')) + 2147483648) // 512}"
+# UBOOT_EXTLINUX = "1"
+# IMAGE_ROOTFS_SIZE = "1048576"
+# IMAGE_ROOTFS_MAXSIZE = "${@int(d.getVar('ROOTFSPART_SIZE')) // 1024}"
+
 # ---- Optional but recommended ----
 # Keep downloads and shared state outside the build dir.
 # DL_DIR = "${TOPDIR}/../downloads"

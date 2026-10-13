@@ -63,6 +63,14 @@ IMAGE_INSTALL:append = " \
     kernel-modules \
     "
 
+# A/B OS updates (docs/plans/ab-os-updates.md), only when the build is
+# configured for them (BOAT_AB_LAYOUT, see conf/layer.conf, which also puts
+# boat-ab-boot into every image):
+#   - boat-grow-rootfs  the rootfs slots have a fixed size there, and swap and
+#                       /data are partitions of their own - the script also
+#                       refuses outright on a disk that has APP_b
+IMAGE_INSTALL:remove = "${@'boat-grow-rootfs' if d.getVar('BOAT_AB_LAYOUT') == '1' else ''}"
+
 # boat-sleep-listener opens ONE UDP port (9099 by default) on which a packet
 # signed with this board's own /etc/boat-sleep.key - generated per board on
 # first boot, never baked into the image - runs `boat-sleep`. That is a

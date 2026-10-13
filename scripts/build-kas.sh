@@ -6,6 +6,7 @@
 #          scripts/build-kas.sh -- --target core-image-base
 #          scripts/build-kas.sh shell                # configured bitbake shell
 #          KAS_CONFIG=kas/other.yml scripts/build-kas.sh
+#          AB_LAYOUT=1 scripts/build-kas.sh          # A/B slots (adds kas/ab-updates.yml)
 #
 # This is the kas equivalent of 01-fetch-layers + 02-configure-build +
 # 03-build: kas clones the layers, writes conf/, and builds the `target:`
@@ -40,7 +41,7 @@ while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --share)   SHARE=1 ;;
     --no-share) SHARE=0 ;;
-    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --)        shift; KAS_ARGS+=("$@"); break ;;
     *)         KAS_ARGS+=("$1") ;;
   esac
@@ -72,6 +73,16 @@ else
   # by design.
   warn "no /usr/bin/gcc-12: if -native recipes fail to compile, install it"
   warn "  (sudo apt-get install gcc-12 g++-12) and re-run"
+fi
+
+# A/B OS updates (EXPERIMENTAL, docs/plans/ab-os-updates.md): the same
+# AB_LAYOUT switch scripts/02-configure-build.sh reads, so one exported
+# variable selects the layout for both flows.
+[[ "${AB_LAYOUT}" == 0 || "${AB_LAYOUT}" == 1 ]] \
+  || die "AB_LAYOUT must be 0 or 1, got '${AB_LAYOUT}'"
+if [[ "${AB_LAYOUT}" == 1 ]]; then
+  KAS_CONFIGS="${KAS_CONFIGS}:${REPO_ROOT}/kas/ab-updates.yml"
+  log "AB_LAYOUT=1 - adding kas/ab-updates.yml (A/B slots; the first flash erases the SSD)"
 fi
 
 # First non-flag argument is the kas subcommand; default to "build".

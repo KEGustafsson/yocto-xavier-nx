@@ -15,3 +15,21 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 # clang-compat fallbacks (dead code for our GCC-only build) hit that
 # and fail do_compile with "missing binary operator before token '('".
 SRC_URI += "file://0001-Base.h-guard-has_feature-has_builtin-for-assembler-.patch"
+
+# A/B OS updates (docs/plans/ab-os-updates.md 5.1). L4TLauncher only hands
+# off to GRUB (\EFI\BOOT\grubaa64.efi) when the UEFI variable
+# L4TDefaultBootMode is 0; NVIDIA's L4TConfiguration overlay seeds it as 1,
+# DIRECT (extlinux). With BOAT_AB_LAYOUT on, rewrite that one property in the
+# built overlay. The overlay only SEEDS a variable that does not exist yet,
+# so a board that already carries 1 is put right at runtime by
+# boat-bootmode-guard (recipes-boat/ab-boot).
+BOAT_AB_BOOTMODE_NODE = "/fragment@0/__overlay__/firmware/uefi/variables/gNVIDIAPublicVariableGuid/L4TDefaultBootMode"
+
+do_compile:append() {
+    if [ "${BOAT_AB_LAYOUT}" = "1" ]; then
+        fdtput -t bx ${B}/images/L4TConfiguration.dtbo ${BOAT_AB_BOOTMODE_NODE} data 00 00 00 00
+        mode="$(fdtget -t bx ${B}/images/L4TConfiguration.dtbo ${BOAT_AB_BOOTMODE_NODE} data)"
+        [ "$mode" = "0 0 0 0" ] || bbfatal "L4TDefaultBootMode is '$mode' after fdtput, expected 0 (GRUB)"
+    fi
+}
+do_compile[vardeps] += "BOAT_AB_LAYOUT"

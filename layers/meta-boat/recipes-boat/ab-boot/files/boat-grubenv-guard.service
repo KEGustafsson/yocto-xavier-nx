@@ -1,0 +1,12 @@
+[Unit]
+Description=Validate the A/B boot state on the ESP (grubenv)
+RequiresMountsFor=/boot/efi
+After=boot-efi.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/boat-grubenv-guard
+
+[Install]
+WantedBy=multi-user.target

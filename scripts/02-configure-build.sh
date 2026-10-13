@@ -17,6 +17,13 @@ source "${HERE}/env.sh"
 # and no end marker.
 [[ "${ROOTFS_SIZE_BYTES}" =~ ^[0-9]+$ ]] \
   || die "ROOTFS_SIZE_BYTES must be a plain byte count, got '${ROOTFS_SIZE_BYTES}'"
+# The A/B layout is an NVMe layout (two slots, SWAP and DATA on the SSD); it
+# has no meaning for the stock SD-card one.
+[[ "${AB_LAYOUT}" == 0 || "${AB_LAYOUT}" == 1 ]] \
+  || die "AB_LAYOUT must be 0 or 1, got '${AB_LAYOUT}'"
+if [[ "${AB_LAYOUT}" == 1 && "${BOOTDEV}" != nvme* ]]; then
+  die "AB_LAYOUT=1 needs the rootfs on NVMe (BOOTDEV=nvme0n1p1), got BOOTDEV='${BOOTDEV}'"
+fi
 # BBLAYERS is a whitespace-separated list, so a checkout under "~/My Projects"
 # produces a bblayers.conf bitbake splits into layer paths that do not exist -
 # and the error names those fragments, never the space that caused them.
@@ -253,7 +260,17 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
     # The '\''...'\'' sequences are single quotes embedded in this single-quoted
     # shell string; what reaches local.conf is d.getVar('ROOTFSPART_SIZE'),
     # matching config/local.conf.sample and the kas profile exactly.
-    echo 'TEGRA_EXTERNAL_DEVICE_SECTORS = "${@(int(d.getVar('\''ROOTFSPART_SIZE'\'')) + 1073741824) // 512}"'
+    if [[ "${AB_LAYOUT}" == 1 ]]; then
+      # A/B: TWO rootfs slots plus the SWAP and DATA partitions (DATA at its
+      # minimum - it fills the rest of the real SSD at flash time), plus 2 GiB
+      # for the fixed partitions: NVIDIA's NVMe A/B template already needs
+      # about 1.1 GiB for kernel/recovery/esp/UDA, more than the 1 GiB the
+      # single-slot line below allows. Sizes: BOAT_AB_* in meta-boat's
+      # conf/layer.conf.
+      echo 'TEGRA_EXTERNAL_DEVICE_SECTORS = "${@(2 * int(d.getVar('\''ROOTFSPART_SIZE'\'')) + int(d.getVar('\''BOAT_AB_SWAP_SIZE'\'')) + int(d.getVar('\''BOAT_AB_DATA_MIN_SIZE'\'')) + 2147483648) // 512}"'
+    else
+      echo 'TEGRA_EXTERNAL_DEVICE_SECTORS = "${@(int(d.getVar('\''ROOTFSPART_SIZE'\'')) + 1073741824) // 512}"'
+    fi
     # jetson-xavier-nx-devkit's default PARTITION_LAYOUT_TEMPLATE_DEFAULT
     # (flash_l4t_t194_spi_sd_p3668.xml) still carries an internal "APP"
     # partition sized from ROOTFSPART_SIZE, even though TNSPEC_BOOTDEV
@@ -268,6 +285,30 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
     # partition at all (matching Orin Nano's -nvme.conf pattern, which
     # pairs a QSPI-only internal template with its own external one).
     echo 'PARTITION_LAYOUT_TEMPLATE_DEFAULT = "flash_l4t_t194_qspi_p3668.xml"'
+    if [[ "${AB_LAYOUT}" == 1 ]]; then
+      echo ""
+      echo "# --- A/B OS updates (docs/plans/ab-os-updates.md) ---"
+      # The switch every meta-boat A/B change is gated on (conf/layer.conf).
+      echo 'BOAT_AB_LAYOUT = "1"'
+      # The NVMe layout meta-boat GENERATES from NVIDIA's
+      # flash_l4t_nvme_rootfs_ab.xml (APP_b unwritten at flash, SWAP and a
+      # fill-to-end DATA appended, GPT entry numbers pinned) - see
+      # recipes-bsp/tegra-binaries/tegra-bootfiles_%.bbappend. Deliberately
+      # NOT USE_REDUNDANT_FLASH_LAYOUT, which would tie the rootfs slot to the
+      # firmware boot chain (plan section 3).
+      echo 'PARTITION_LAYOUT_EXTERNAL = "boat-nvme-ab.xml"'
+      # Puts /boot/Image and /boot/initrd into the rootfs, so every slot
+      # carries its own kernel; GRUB loads them from the slot it picks.
+      echo 'UBOOT_EXTLINUX = "1"'
+      # Build the ext4 image at its content size (+30% overhead, + the
+      # image's extra space) instead of meta-tegra's default, which fills the
+      # whole 16 GiB partition. Only the image's bytes cross the flasher's
+      # USB 2.0 link and an update's network link; the filesystem is grown
+      # into its partition on the board. The maximum stops an image that
+      # would no longer fit a slot at build time.
+      echo 'IMAGE_ROOTFS_SIZE = "1048576"'
+      echo 'IMAGE_ROOTFS_MAXSIZE = "${@int(d.getVar('\''ROOTFSPART_SIZE'\'')) // 1024}"'
+    fi
   fi
   echo "${MARKER_END}"
 } >> "${CONF}/local.conf"
@@ -276,5 +317,6 @@ log "Configured:"
 log "  MACHINE          = ${MACHINE}"
 log "  BOOTDEV          = ${BOOTDEV:-<stock SD layout>}"
 log "  ROOTFSPART_SIZE  = ${ROOTFS_SIZE_BYTES} bytes"
+log "  AB_LAYOUT        = ${AB_LAYOUT}$([[ "${AB_LAYOUT}" == 1 ]] && echo '  (A/B slots - EXPERIMENTAL; the first flash erases the SSD)')"
 log "  BUILD_DIR        = ${BUILD_DIR}"
 log "Next: scripts/03-build.sh  (builds IMAGE=${IMAGE})"
