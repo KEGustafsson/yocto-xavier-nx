@@ -33,7 +33,7 @@ CHANNEL_URL=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --channel-url) CHANNEL_URL="${2:-}"; [[ -n "$CHANNEL_URL" ]] || die "--channel-url needs a URL"; shift ;;
-        -h|--help)     sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)     awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
         -*)            die "unknown option '$1'" ;;
         *)             TARGET="$1" ;;
     esac
@@ -68,19 +68,33 @@ if [[ -n "$CHANNEL_URL" ]]; then
     # the first 4 bytes. It needs 206 Partial Content AND a Content-Range
     # whose total is a number - "bytes 0-3/*" (size unknown) is refused, and
     # so is a 200 that ignores the Range header and sends the whole file.
-    hdrs="$(curl -s -o /dev/null -D - -r 0-3 "$CHANNEL_URL" || true)"
+    # No -L: boat-update never follows a redirect (plan 5.10), so a URL that
+    # redirects is not one a board can use, and is reported as such.
+    curl_err="$(mktemp)"
+    trap 'rm -f "$curl_err"' EXIT
+    curl_rc=0
+    hdrs="$(curl -sS --max-time 30 -o /dev/null -D - -r 0-3 "$CHANNEL_URL" 2>"$curl_err")" || curl_rc=$?
     code="$(printf '%s\n' "$hdrs" | awk 'toupper($1) ~ /^HTTP\// {c=$2} END {print c}')"
     crange="$(printf '%s\n' "$hdrs" | tr -d '\r' | awk 'tolower($1)=="content-range:" {print $2, $3}' | tail -n 1)"
+    location="$(printf '%s\n' "$hdrs" | tr -d '\r' | awk 'tolower($1)=="location:" {print $2}' | tail -n 1)"
     {
         printf '\n=== OTA channel Range support (from this host)\n'
         printf 'url: %s\n' "$CHANNEL_URL"
-        printf 'GET Range: bytes=0-3 -> HTTP %s, Content-Range: %s\n' "${code:-none}" "${crange:-none}"
-        if [[ "$code" == 206 && "$crange" =~ /[0-9]+$ ]]; then
+        if [[ "$curl_rc" -ne 0 ]]; then
+            printf 'GET Range: bytes=0-3 -> curl failed (exit %s): %s\n' "$curl_rc" "$(tr '\n' ' ' <"$curl_err")"
+        else
+            printf 'GET Range: bytes=0-3 -> HTTP %s, Content-Range: %s\n' "${code:-none}" "${crange:-none}"
+        fi
+        if [[ "$curl_rc" -ne 0 ]]; then
+            printf 'Q9 channel host supports Range the way RAUC needs: unknown - the request itself failed (DNS, TLS, timeout?)\n'
+        elif [[ "$code" == 206 && "$crange" =~ /[0-9]+$ ]]; then
             printf 'Q9 channel host supports Range the way RAUC needs: yes\n'
         elif [[ "$code" == 200 ]]; then
             printf 'Q9 channel host supports Range the way RAUC needs: NO - it returned the whole file (200)\n'
         elif [[ "$code" == 206 ]]; then
             printf 'Q9 channel host supports Range the way RAUC needs: NO - total size not given (%s)\n' "${crange:-no Content-Range}"
+        elif [[ "$code" =~ ^3[0-9][0-9]$ ]]; then
+            printf 'Q9 channel host supports Range the way RAUC needs: unknown - it redirects (HTTP %s to %s), and boat-update follows no redirects: use the final URL\n' "$code" "${location:-?}"
         else
             printf 'Q9 channel host supports Range the way RAUC needs: unknown (HTTP %s) - point --channel-url at an existing file\n' "${code:-none}"
         fi

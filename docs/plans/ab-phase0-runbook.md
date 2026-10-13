@@ -113,10 +113,12 @@ them. On an older image, copy `Image` and the `tegra-minimal-initramfs`
 find /proc/device-tree -type f | sort | xargs sha256sum > /root/dt-before.txt
 
 cp grubaa64.efi grub.cfg /boot/efi/EFI/BOOT/
+V=/sys/firmware/efi/efivars/L4TDefaultBootMode-781e084c-a330-417c-b678-38e696380cb9
+# Keep the variable exactly as it is now (the capture's Q4), so the revert
+# puts back that value - or removes the variable if it was absent.
+if [ -e "$V" ]; then cp "$V" /root/L4TDefaultBootMode.orig; chattr -i "$V"; else rm -f /root/L4TDefaultBootMode.orig; fi
 # L4TDefaultBootMode = 0 (GRUB). efivarfs data is a 4-byte attribute word
 # (0x7 = non-volatile + boot + runtime) followed by the u32 value.
-V=/sys/firmware/efi/efivars/L4TDefaultBootMode-781e084c-a330-417c-b678-38e696380cb9
-chattr -i "$V"
 printf '\x07\x00\x00\x00\x00\x00\x00\x00' > "$V"
 reboot
 ```
@@ -135,11 +137,18 @@ After the reboot, check:
 Revert, so the board goes back to its normal boot path:
 
 ```bash
+V=/sys/firmware/efi/efivars/L4TDefaultBootMode-781e084c-a330-417c-b678-38e696380cb9
 chattr -i "$V"
-printf '\x07\x00\x00\x00\x01\x00\x00\x00' > "$V"
+if [ -e /root/L4TDefaultBootMode.orig ]; then
+    cat /root/L4TDefaultBootMode.orig > "$V"   # the value Q4 reported
+else
+    rm "$V"                                    # Q4 said absent: absent again
+fi
 rm /boot/efi/EFI/BOOT/grubaa64.efi /boot/efi/EFI/BOOT/grub.cfg
 reboot
 ```
+
+After that reboot, the capture's Q4 must read what it read before.
 
 **If any box stays unchecked, option A is in question.** Bring the
 findings back to the plan (section 4, option C).
