@@ -24,6 +24,10 @@
 #
 # Promote a release from testing to stable by publishing the same bundle to
 # stable: names are content-addressed, so the file is never renamed.
+#
+# A bundle from a BOAT_BENCH build (its compatible ends in -bench) goes to
+# the 'bench' channel only, and nothing else does: its rootfs trusts the
+# bench CA (docs/plans/ab-validation.md).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -107,6 +111,11 @@ doc = {
 }
 if not doc["l4t"]:
     sys.exit("the bundle has no [meta.boat] l4t= - it was not built by meta-boat's boat-bundle")
+if doc["compatible"].endswith("-bench") and channel != "bench":
+    sys.exit("%r is a BOAT_BENCH build (its rootfs trusts the bench CA) - it goes to the 'bench' "
+             "channel only, never to %r" % (doc["compatible"], channel))
+if channel == "bench" and not doc["compatible"].endswith("-bench"):
+    sys.exit("the 'bench' channel is for BOAT_BENCH builds; this bundle is %r" % doc["compatible"])
 if notes:
     with open(notes) as f:
         doc["notes"] = f.read()[:2000]

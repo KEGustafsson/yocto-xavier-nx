@@ -45,12 +45,13 @@ DEPENDS += "e2fsprogs-native"
 
 python boat_check_bundle_keys() {
     import os
-    keys = d.getVar('BOAT_KEYS_DIR')
-    for name in ('rauc-signing.key.pem', 'rauc-signing.cert.pem', 'ca.cert.pem'):
-        if not keys or not os.path.isfile(os.path.join(keys, name)):
-            bb.fatal("boat-bundle needs the update signing keys: BOAT_KEYS_DIR (%r) has no "
-                     "%s. Run scripts/gen-update-keys.sh once, keep the directory "
-                     "safe, and point BOAT_KEYS_DIR at it (scripts/env.sh)." % (keys, name))
+    for var in ('RAUC_KEY_FILE', 'RAUC_CERT_FILE', 'RAUC_KEYRING_FILE'):
+        f = d.getVar(var)
+        if not f or not os.path.isfile(f):
+            bb.fatal("%s needs the update signing keys: %s (%r) does not exist. Run "
+                     "scripts/gen-update-keys.sh once (--bench for the bench keys), keep the "
+                     "directory safe, and point BOAT_KEYS_DIR (BOAT_BENCH_KEYS_DIR) at it "
+                     "(scripts/env.sh)." % (d.getVar('PN'), var, f))
 }
 
 # Read what the bundle says about itself from the image it carries, so it

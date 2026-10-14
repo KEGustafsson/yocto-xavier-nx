@@ -66,6 +66,14 @@
 # the repository AND outside WORKROOT on purpose: yocto/ gets deleted, and
 # losing the CA means reflashing every board over USB.
 : "${BOAT_KEYS_DIR:=${HOME}/.local/share/boat-update-keys}"
+# Bench images only (docs/plans/ab-validation.md): BOAT_BENCH=1 makes an A/B
+# image also trust the bench CA (scripts/gen-update-keys.sh --bench), which
+# signs the fault-injection bundles; BOAT_FAULT picks the fault
+# boat-bundle-faulty carries (panic, emergency, tier2, hang). Never set
+# BOAT_BENCH for an image that goes on a boat.
+: "${BOAT_BENCH:=0}"
+: "${BOAT_BENCH_KEYS_DIR:=${HOME}/.local/share/boat-update-bench-keys}"
+: "${BOAT_FAULT:=}"
 
 # --- Image to build -------------------------------------------------------
 # Phase 1 (first bootable): core-image-base
@@ -80,5 +88,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${BUILD_DIR:=${WORKROOT}/build}"
 : "${FLASH_DIR:=${WORKROOT}/flash}"     # unpacked tegraflash tarball
 
-export YOCTO_BRANCH MACHINE BOOTDEV ROOTFS_SIZE_BYTES AB_LAYOUT BOAT_RELEASE BOAT_KEYS_DIR IMAGE
+export YOCTO_BRANCH MACHINE BOOTDEV ROOTFS_SIZE_BYTES AB_LAYOUT BOAT_RELEASE BOAT_KEYS_DIR \
+  BOAT_BENCH BOAT_BENCH_KEYS_DIR BOAT_FAULT IMAGE
 export REPO_ROOT WORKROOT LAYERS_DIR BUILD_DIR FLASH_DIR

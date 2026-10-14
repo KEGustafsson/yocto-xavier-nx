@@ -2,9 +2,9 @@
 
 **Status: v4, being implemented phase by phase (section 6).** Every
 decision in section 10 was taken at its recommendation. Phases 0 to 6 are
-in the repository, behind `AB_LAYOUT` (off by default); their exit tests
-need the bench board. Section 11 records what each review pass found and how
-the plan answers it.
+in the repository, behind `AB_LAYOUT` (off by default), and so is Phase 7's
+tooling. Their exit tests, and Phase 7's bench runs, need the bench board.
+Section 11 records what each review pass found and how the plan answers it.
 
 Scope: signed, power-fail-safe OS updates for the boat computer (Xavier NX
 devkit, SD-slot module P3668-0000, rootfs on NVMe, no SD card), delivered
@@ -1249,12 +1249,14 @@ exit criteria wait for the bench board.*
   - a server without Range support fails cleanly, with a message pointing
     at the download path.
 
-**Phase 7: validation.** Effort: M, mostly bench time.
+**Phase 7: validation.** Effort: M, mostly bench time. *The tooling is
+implemented (fault bundles, `scripts/ab-soak.sh`, and the runbook in
+[`ab-validation.md`](ab-validation.md)); the bench runs remain.*
 
 - Run the section 7 matrix.
-- Soak: 50 update cycles **delivered over the air** from the `testing`
-  channel, alternating good and faulty bundles, plus random power cuts if a
-  USB relay on the barrel jack is available.
+- Soak: 50 update cycles **delivered over the air** from the `bench`
+  channel (`ab-soak.sh --ota`), alternating good and faulty bundles, plus
+  random power cuts if a USB relay on the barrel jack is available.
 - Then flip `AB_LAYOUT` to default-on and move the boat to `stable`.
 
 **Phase 8 (later, separate plans):**
@@ -1311,7 +1313,7 @@ Both run from `lint.sh`, so they cover every PR.
 | 13 | trial: kernel panic | `panic=10` → old slot |
 | 14 | trial: rootfs won't mount | initramfs reboots → old slot |
 | 15 | trial: emergency mode | reboot after 60 s → old slot |
-| 16 | trial: Tier 2 failure (`docker` masked) | mark-bad + reboot → old slot, reason recorded |
+| 16 | trial: Tier 2 failure (`NetworkManager` masked) | mark-bad + reboot → old slot, reason recorded |
 | 17 | trial: hard hang | WDT reset → old slot |
 | 18 | trial: commit unit hangs | deadline timer → old slot |
 | 19 | bundle whose rootfs lacks `/boot/Image` | rejected at bundle build; if forced, GRUB marks the slot and reboots |
@@ -1349,8 +1351,12 @@ Both run from `lint.sh`, so they cover every PR.
 | 51 | OTA: a 4G router on Ethernet marked metered in NetworkManager | treated as metered |
 | 52 | OTA stream after a cold boot, with no manual `modprobe` | works (NBD built in) |
 
-The fault bundles for 12–19 come from a `boat-image-faulty` variant
-(`BOAT_FAULT=<kind>`), signed by the bench CA (5.7).
+The fault bundles for 13, 15, 16 and 18 come from a `boat-image-faulty`
+variant (`BOAT_FAULT=<kind>`), signed by the bench CA (5.7); 12, 14, 17 and
+19 are manual steps (`docs/plans/ab-validation.md`). A `BOAT_BENCH` build
+has its own `compatible` (`…-bench`), so nothing built with the bench CA in
+its keyring installs on a boat, and `publish-update.sh` sends it only to a
+`bench` channel.
 
 ---
 
@@ -1494,7 +1500,7 @@ Claims the review checked and confirmed:
 |---|---|---|---|
 | B1 | blocker | `openssl cms -verify` with the codeSigning certificate never passes (default purpose `smime_sign`, no codesign purpose in OpenSSL 3.0). The obvious `-purpose any` also trusts `/etc/ssl/certs`, so any public certificate could sign an index. `-binary` mismatch, time checks and non-atomic `.sig` too. | separate index-signing leaf (emailProtection EKU), one attached `index.p7`, verify flags pinned (`-no-CApath -no-CAstore -purpose smimesign -binary -no_check_time`) (5.10) |
 | M1 | major | replay and version holes: no `channel` or `serial`; re-offers the version in the other slot or one that just failed; reflash evaluated for old versions | signed `channel` + monotonic `serial`; compare against both slots and the failed list; reflash only for newer versions; `/etc/boat-release` = `BOAT_RELEASE` (5.10, Phase 3) |
-| M2 | major | NBD is a module nothing loads; the streaming sandbox can't read a root-only TLS key | `CONFIG_BLK_DEV_NBD=y`; `rauc-stream` sandbox user with a group-readable key; cold-boot exit test (5.10, Phases 3/6) |
+| M2 | major | NBD is a module nothing loads; the streaming sandbox can't read a root-only TLS key | `CONFIG_BLK_DEV_NBD=y`; `rauc-stream` sandbox user with a group-readable key (superseded in Phase 6: RAUC streams through `boat-update`'s relay, which holds the credentials, so the key stays root-only and the sandbox needs none); cold-boot exit test (5.10, Phases 3/6) |
 | M3 | major | credentials leak via redirects (also to `http`), RAUC's header logging and `ps` | client certificate only; no redirects; D-Bus `InstallBundle` (5.7, 5.10, D15) |
 | M4 | major | resume splices a republished same-name file; 416 exits 0; unbounded body; endless re-fetch; no lock | content-addressed names; size and free-space bounds every window; 3 re-fetches max; `flock` (5.10) |
 | M5 | major | monotonic timers pause in suspend; `Persistent=` needs `OnCalendar=` | `OnCalendar` + `Persistent`; triggers from sleep `post` and NM dispatcher; stamp-file rate limit (5.10) |
@@ -1599,6 +1605,20 @@ Claims the review checked and confirmed:
 | RAUC's streaming client follows redirects, to `http` too, so a channel could send the board's requests elsewhere - its client certificate to another host, or GETs into the boat's own network (CodeRabbit) | RAUC streams from `boat-update`'s relay on `127.0.0.1`, which follows no redirect and passes on nothing but a 206 of exactly the range asked for; a preflight also refuses a redirecting or Range-less channel before RAUC marks the slot unbootable |
 | the metered-link check was made once, when a stream starts, and RAUC's client cannot be bound to a link: a route that moved to cellular mid-stream would be used (CodeRabbit) | the relay's connections are bound to the checked link (`SO_BINDTODEVICE`); if it goes away, the stream fails and the board stays on its slot |
 | the relay passed on any 206 no longer than the range asked for, and RAUC checks `Content-Range` only on its first request: bytes from elsewhere in the bundle would be written at the offset RAUC asked for (CodeRabbit) | the relay passes on only a 206 whose `Content-Range` names the offsets asked for and whose body is exactly that long; anything else is a 502 |
+
+### Review pass 10 (findings while implementing Phase 7)
+
+| finding | resolution |
+|---|---|
+| a good bundle from a `BOAT_BENCH` build is fleet-signed but its rootfs trusts the bench CA (bundles and indexes), and nothing stopped it from being published to `testing` and promoted to `stable` | a bench build has its own `compatible` (`…-bench`), so boats refuse it in RAUC and in the index check; `publish-update.sh` sends bench bundles only to the `bench` channel; the build stops if the bench CA is the fleet CA |
+| `ab-soak.sh` passed a faulty cycle whose bundle was refused before anything was written (same slot, committed), and stopped dead when SSH was down at the start of a cycle | every cycle must change the boot ID, a faulty one must leave the other slot `OK=0`; the bench image is required up front; an unreachable board fails that cycle, not the run; the copy goes over `ssh` (`BOAT_SSH_OPTS` is written for it) |
+| each fault-bundle build replaced the previous one in the deploy directory, and the soak's globs matched every bundle | the runbook copies each bundle out under its own name as it is built |
+| overwriting the start of a slot breaks its superblock, so GRUB fails the slot before the initramfs is ever reached (row 14 tested row 19's path) | row 14 damages the journal, which only the kernel reads; row 12 corrupts the kernel past its header |
+| `ab-soak.sh` only installed over SSH, so the Phase 7 target - 50 cycles delivered over the air - had no runnable procedure (CodeRabbit) | `ab-soak.sh --ota DIR [--stream]` publishes each cycle's bundle to `bench` and has the board check, download (or stream) and install it; the runbook builds the versioned bundles it needs; the CSV records the delivery, and each soak is its own result |
+| a power cut mid-copy or mid-install left `ab-soak.sh` waiting on a dead SSH session for TCP's timeout (CodeRabbit) | SSH sessions send keepalives and end a minute after the board stops answering |
+| a power-cut cycle could pass on the board's state from before a late cut, and a cut command that failed still passed (CodeRabbit) | the cycle waits for the cut first and judges the board after it; a failed cut command fails the cycle |
+| a power-cut cycle passed when the update failed before the cut - the cut alone rebooted the board onto a committed slot; over the air, most cuts landed in the download (CodeRabbit) | `boat-update`'s own failure (exit 1-127) fails the cycle, unlike a session the board dropped (255, or a signal); over the air the check and download run first, and the cut is timed from the install |
+| after a cut the board could already be back up, so the wait to see it go down ran its full ten minutes (CodeRabbit) | a cut cycle does not wait for the board to go down; its uptime must be shorter than the time since the cut, which proves it booted after it |
 
 ### Your review
 

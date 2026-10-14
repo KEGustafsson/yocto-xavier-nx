@@ -3,6 +3,10 @@
 #
 #   scripts/gen-update-keys.sh                 # into BOAT_KEYS_DIR (scripts/env.sh)
 #   BOAT_KEYS_DIR=/secure/place scripts/gen-update-keys.sh
+#   scripts/gen-update-keys.sh --bench         # a SEPARATE bench CA, into
+#                                              # BOAT_BENCH_KEYS_DIR: it signs the
+#                                              # fault-injection bundles that only
+#                                              # BOAT_BENCH images trust
 #
 # Writes, all EC P-256, into BOAT_KEYS_DIR (default
 # ~/.local/share/boat-update-keys):
@@ -31,14 +35,16 @@ source "${HERE}/lib.sh"
 # shellcheck source=env.sh
 source "${HERE}/env.sh"
 
+LABEL="boat update"
+DIR="${BOAT_KEYS_DIR}"
 case "${1:-}" in
   -h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
+  --bench) DIR="${BOAT_BENCH_KEYS_DIR}"; LABEL="boat BENCH update" ;;
   "") ;;
   *) die "unexpected argument '$1' (see --help)" ;;
 esac
 
 need openssl
-DIR="${BOAT_KEYS_DIR}"
 [[ "${DIR}" == /* ]] || die "BOAT_KEYS_DIR must be an absolute path, got '${DIR}'"
 case "${DIR}/" in
   "${REPO_ROOT}/"*|"${WORKROOT}/"*)
@@ -67,7 +73,7 @@ newkey() { openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "
 log "Creating the update CA ..."
 newkey "${WORK}/ca.key.pem"
 openssl req -new -x509 -key "${WORK}/ca.key.pem" -out "${WORK}/ca.cert.pem" \
-  -days "${DAYS}" -subj "/O=boat/CN=boat update CA" \
+  -days "${DAYS}" -subj "/O=boat/CN=${LABEL} CA" \
   -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
   -addext "keyUsage=critical,keyCertSign,cRLSign" \
   -addext "subjectKeyIdentifier=hash"
@@ -92,8 +98,8 @@ EOF
   openssl verify -CAfile "${WORK}/ca.cert.pem" "${WORK}/${name}.cert.pem" >/dev/null \
     || die "${name}.cert.pem does not verify against the new CA"
 }
-leaf rauc-signing "boat update bundle signing" codeSigning
-leaf index-signing "boat update channel index signing" emailProtection
+leaf rauc-signing "${LABEL} bundle signing" codeSigning
+leaf index-signing "${LABEL} channel index signing" emailProtection
 
 for f in "${FILES[@]}"; do
   case "${f}" in
