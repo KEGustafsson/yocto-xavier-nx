@@ -261,10 +261,17 @@ else
     find layers scripts -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
     if [[ "${target_rc}" -ne 0 ]]; then
         fail_check "  the boat's Python does not compile under 3.10"
-    elif "${TARGET_PY}" scripts/test-boat-update.py >/dev/null 2>&1; then
-        log "  ${#TARGET_PY_FILES[@]} Python file(s), and boat-update's tests, clean under $("${TARGET_PY}" -V)"
     else
-        fail_check "  boat-update's tests fail under 3.10 (${TARGET_PY} scripts/test-boat-update.py)"
+        # 77: a tool the test needs is missing - a skip, as in section 5.
+        test_rc=0
+        "${TARGET_PY}" scripts/test-boat-update.py >/dev/null 2>&1 || test_rc=$?
+        if [[ "${test_rc}" -eq 0 ]]; then
+            log "  ${#TARGET_PY_FILES[@]} Python file(s), and boat-update's tests, clean under $("${TARGET_PY}" -V)"
+        elif [[ "${test_rc}" -eq 77 ]]; then
+            skip_check "openssl, curl or grub-editenv is missing - boat-update's tests not run under 3.10 (${#TARGET_PY_FILES[@]} file(s) compiled)"
+        else
+            fail_check "  boat-update's tests fail under 3.10 (${TARGET_PY} scripts/test-boat-update.py)"
+        fi
     fi
 fi
 
