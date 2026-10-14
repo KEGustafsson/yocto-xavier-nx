@@ -421,7 +421,7 @@ At build time, `grub.cfg` is generated from `KERNEL_ARGS` and checked with
 | trial B panics | B(1 try) → A | A commits; B `OK=0`; NVIDIA count reset on A |
 | committed A, one power cut mid-boot | A(TRY 1) → cold boot → A(TRY 2) → `boat-grubenv-guard` resets TRY | stays on A (cold boot also re-seeds NVIDIA's register; Phase 0 confirms this) |
 | committed A broken, B good | A → A → B | B runs; reported in `status` |
-| both broken | A → A → B → (4th warm boot) | NVIDIA sticky recovery → stops in UEFI. The recovery procedure is documented (UEFI menu path captured in Phase 0, or USB reflash). |
+| both broken | A → A → B → (4th warm boot) | NVIDIA sticky recovery → stops in UEFI. Recovery is a USB reflash, which empties `/data`; a UEFI-menu path that clears the marker without one is still to be found (Phase 0 runbook 2.6), and then documented. |
 
 **`grubenv` integrity** (review M2):
 
@@ -859,9 +859,15 @@ certificate sits under the same CA as the bundle signer:
   rules. It needs NBD and root, and it does not check `compatible` itself.
   Kept as a Phase 6 extra check, not the stage-1 gate.
 
-**Channels:** `testing` (bench) and `stable` (the boat). To promote a
-release, re-publish the same bundle file with a new `stable` index. Bundles
-are never renamed, because names are content-addressed.
+**Channels:** `stable` (the boats); `testing`, followed by a test board
+that runs an ordinary boat image, where each release goes first; and
+`bench`, for the validation bench's `BOAT_BENCH` images and bundles
+(section 7, [the validation runbook](ab-validation.md)). A bench image has
+its own `compatible` and trusts the bench CA, so it takes nothing built for
+a boat: the bench validates the design, `testing` the release. To promote a
+release that committed on the `testing` board, re-publish that same bundle
+file with a new `stable` index. Bundles are never renamed, because names
+are content-addressed.
 
 **Access:** the default is a **public** channel. Bundles carry nothing
 secret: the image's password hash is already public (README
@@ -1128,10 +1134,13 @@ the steps that change state (items 2-5), each with how to undo it.
 
    Revert by setting the variable back to 1.
 3. **Watchdogs:**
-   - Is the Tegra WDT running during UEFI/GRUB? Test with a `grub.cfg` that
-     just `sleep`s forever.
+   - Is the Tegra WDT running during UEFI/GRUB? Test with a `grub.cfg`
+     that sleeps - **once**: each watchdog reset is a warm boot that never
+     reaches `nv_update_verifier`, so a test that repeats on every boot
+     ends in NVIDIA's sticky state on the fourth (the runbook's 2.3 clears
+     a flag before the test starts).
    - Is it running before userspace (`/sys/class/watchdog/watchdog0/state`
-     early in boot)?
+     early in boot; a one-shot boot with `rdinit=/bin/sh`)?
    - With `panic=10`, does `echo c > /proc/sysrq-trigger` reset the board?
      Does a hard hang?
 4. **NVIDIA's counter:**
@@ -1187,8 +1196,9 @@ exit criteria wait for the bench board.*
   - `sysrq-c` during a B trial lands on A;
   - **≥4 consecutive warm reboots on B** do not trip NVIDIA's counter;
   - removing `grubaa64.efi` still boots A via DIRECT;
-  - a test `grub.cfg` that only sleeps is reset by the UEFI watchdog within
-    about 5 minutes.
+  - a test `grub.cfg` that sleeps is reset by the UEFI watchdog within
+    about 5 minutes - the one-shot test of the Phase 0 runbook (2.3), so the
+    boot after the reset is a normal one.
 
 **Phase 2: storage and state.** Effort: S–M. *Implemented; the exit
 criteria wait for the bench board.*
@@ -1315,13 +1325,15 @@ exit criteria wait for the bench board.*
   - **`scripts/publish-update.sh <channel> <bundle>`**: content-addressed
     bundle name; write `index.json`; sign it into one attached `index.p7`;
     upload the bundle first and the index last (5.10).
-  - **`scripts/push-update.sh <host> [bundle]`**, the no-internet fallback:
+  - **`scripts/push-update.sh <bundle.raucb> [user@host]`**, the no-internet fallback:
     copy to `/data`, install, reboot, then *wait and report which slot came
     back*, in the style of `wol/boat-wake.sh`.
 - **A bench update channel:** any local HTTPS server with Range support
-  (e.g. Caddy) serving a `testing` channel to the bench board.
+  (e.g. Caddy) serving `bench` to the bench board (a `BOAT_BENCH` image),
+  or `testing` to a board running a boat image. A LAN server's own TLS CA
+  goes on the board as `/data/boat-update/server-ca.pem` (5.10).
 - **Exit:**
-  - a bundle published to `testing` is downloaded in the background,
+  - a bundle published to the board's channel is downloaded in the background,
     survives a pulled Ethernet cable, an SC7 sleep and a reboot
     mid-download, and becomes "ready";
   - `boat-update install --reboot` takes it through trial to commit;
@@ -1335,7 +1347,8 @@ exit criteria wait for the bench board.*
   - docs/04 `--host-drive`: `doexternal.sh` isn't shipped by meta-tegra
     kirkstone, so A/B is `initrd-flash` only;
   - docs/05 "Updates" and "Reclaiming the rest of the SSD";
-  - docs/06 troubleshooting, including the sticky-recovery procedure;
+  - docs/06 troubleshooting, including the sticky state (a reflash until
+    Phase 0 finds the UEFI-menu path);
   - README.
 
 **Phase 6: OTA stage 2 (streaming + adaptive installs).** Effort: S–M.
@@ -1457,7 +1470,7 @@ All of them run from `lint.sh`, so they cover every PR.
 | 25 | unprivileged user, and a container running as a non-root user with the system bus mounted, call RAUC `Install`/`Mark` | denied |
 | 26 | `boat-update rollback` after commit | other slot boots and commits |
 | 27 | `boat-sleep` (and the UDP sleep listener) during install and during a trial | refused |
-| 28 | both slots broken | A, A, B, then UEFI stop (sticky recovery) is the documented end state; the documented recovery works |
+| 28 | both slots broken | A, A, B, then UEFI stop (sticky recovery) is the documented end state; the USB reflash recovers it, and so does the UEFI-menu path once Phase 0 has found it and docs/06 describes it (open until then) |
 | 29 | carry-over | SSH host key, `/root/.ssh`, `/home`, Wi-Fi, BT pairing, hostname, `boat-sleep.key`, passwords (D5) are unchanged after update and after rollback |
 | 30 | SC7 + WoL on both slots | works |
 | 31 | OTA: channel offers a newer bundle, unmetered link | background download; `status` shows "ready"; no install or reboot happens by itself |
@@ -1525,7 +1538,7 @@ safe in-place conversion, and the plan does not attempt one.
 | GRUB on this UEFI mishandles the DTB, initrd or cmdline (SC7, display) | M / H | Phase 0 step 2 first; option C is the fallback |
 | a GRUB-stage hang with no watchdog running | L / H | GRUB patched to keep the UEFI watchdog armed (5.1); Phase 1 exit test; Tegra WDT as a second layer (Phase 0) |
 | Tegra WDT not running in the early kernel | M / M | Phase 0 step 3; enable at probe; otherwise document power-cycle-to-recover for a kernel hang before systemd starts |
-| NVIDIA sticky recovery reached (both slots fail, or a shared fault that slipped past `nofail`) | L / H | the 2+1 attempt budget (5.3); `nofail` shared mounts; documented UEFI-menu reset; test 28 |
+| NVIDIA sticky recovery reached (both slots fail, or a shared fault that slipped past `nofail`) | L / H | the 2+1 attempt budget (5.3); `nofail` shared mounts; a USB reflash today, a UEFI-menu reset once Phase 0 finds it; test 28 |
 | `nvbootctrl verify` doesn't reset the count when booted from `APP_b` | M / H | Phase 1 exit criterion; if it fails, `boat-commit` resets it another way, or the budget becomes 1+1 |
 | `grubenv` torn on vfat | L / M | guard unit, `.bak`, defaults (5.3) |
 | ESP (vfat) damaged | L / H | rare, tiny writes; `fsck.fat` reported in `status`; recovery = USB reflash |
@@ -1808,6 +1821,19 @@ The update client and host tooling findings:
 | CI ran the boat's Python under the runner's newer Python | `lint.sh` also compiles it and runs `test-boat-update.py` under 3.10 (CI installs it) |
 | a channel whose TLS certificate comes from its own CA (a bench server) could not be used: the board trusted only the slot's store, and a CA added there was gone after the first update | `BOAT_UPDATE_SERVER_CA`, by default `/data/boat-update/server-ca.pem`, for curl and the relay (5.10) |
 | tests 34 and 38 expected an alert in `status` that `boat-update` never showed: a refused check or download left only the journal | the last failure is kept and shown as an alert until it is resolved (5.10) |
+
+The documentation and runbook findings:
+
+| finding | resolution |
+|---|---|
+| the documented release flow - publish to `testing` for the bench, then the same bundle to `stable` - could not work once bench images got their own `compatible`: a bench board refuses every boat bundle, and a bench bundle never leaves `bench` | `testing` is followed by a test board running a boat image, and the bundle that committed there is the one promoted; `bench` is the validation bench's own channel (5.10, docs/07, `publish-update.sh`, `channel.conf`) |
+| Phase 0's watchdog test - a `grub.cfg` that only sleeps, or `init=/bin/sh` - repeats on every watchdog reset and reaches NVIDIA's sticky state on the fourth boot, with no undo | a one-shot test that clears its flag before it starts, `rdinit=/bin/sh` for the early-boot case, and an undo (runbook 2.3, Phase 0 and Phase 1 exit) |
+| the bench runbook said `BOAT_BENCH` did not outlive its subshell; it stays in `local.conf`, so a later boat build was a bench image | said so, and `03-build.sh` refuses a bench-configured build directory unless `BOAT_BENCH=1` |
+| the bench channel had no TLS trust path the board could use, and its check ran from the host with the host's trust store | `server-ca.pem` on `/data` (5.10); the runbook checks from the board |
+| docs/07's `push-update.sh` example matched several bundles, from the wrong directory | the deploy directory's link, from the repository root; `push-update.sh` refuses a file as the board |
+| docs/06 pointed at the Phase 0 runbook for a UEFI-menu recovery that the runbook says is yet to be found | a USB reflash, which empties `/data`, is given as the only recovery known; test 28 stays open until the menu path is found and written down |
+| the bench build blocks ran on after a failed build - copying the previous bundle or flashing an older image - the fault bundles had no release, and the `--stream` soak reused versions the board had already run | `set -e` in every block, a release for every bundle, and a second, higher set for `--stream` |
+| docs/07's first A/B flash skipped `04-unpack-tegraflash.sh`, so it could write an older single-slot unpack back | the step is there, and `05-flash-nvme.sh` refuses an unpack whose layout does not match `AB_LAYOUT` |
 
 ### Your review
 

@@ -31,6 +31,9 @@ BUNDLE="${ARGS[0]}"
 [[ -f "${BUNDLE}" ]] || die "no bundle at ${BUNDLE}"
 if [[ "${#ARGS[@]}" -eq 2 ]]; then
   TARGET="${ARGS[1]}"
+  # A pattern such as boat-bundle-*.raucb matches the deploy directory's
+  # link as well as the bundle: the second file is not a board.
+  [[ ! -e "${TARGET}" ]] || die "${TARGET} is a file, not a board - give one bundle, e.g. the deploy directory's boat-bundle-<MACHINE>.raucb link"
   BOAT_HOST="${TARGET#*@}"
 else
   require_conf BOAT_HOST

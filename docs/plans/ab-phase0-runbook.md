@@ -70,15 +70,73 @@ SIGKILL and nothing resets, write that down: it decides D8.
 
 ### 2.3 Is the watchdog running inside UEFI/GRUB, and before userspace?
 
-This needs the Phase 1 GRUB build: `AB_LAYOUT=1` builds `grubaa64.efi`
-(package `boat-grub-esp`). See 2.5 for the hand-off itself.
+This needs a board that boots through the Phase 1 GRUB: a Phase 1
+(`AB_LAYOUT=1`) image, or an older one after 2.5's hand-off.
 
-- **Inside GRUB.** Temporarily use a `grub.cfg` that only runs `sleep 900`.
-  If the board resets on its own, the watchdog covers a GRUB hang. If it
-  sits there, GRUB hangs need a power cycle (5.5 row "GRUB itself hangs").
-- **Before userspace.** Boot with `init=/bin/sh` from the same GRUB
-  command line and leave it. A reset means the watchdog runs before
-  systemd. Stopping at the shell means it does not.
+Changes: the ESP's `grub.cfg` (kept as `grub.cfg.orig`) and a small
+`wdtest.env` next to it. Undo at the end of this section.
+
+**Risk: real, if a test repeats.** A boot that never reaches Linux's
+`nv_update_verifier` counts down NVIDIA's rootfs retry counter (plan 5.3,
+and 2.4 here), and a watchdog reset is a warm boot. A test the reset simply
+runs again - a `grub.cfg` that only sleeps, or `init=/bin/sh` left on the
+command line - reaches the sticky "unbootable" state on its fourth boot,
+about 15 minutes in, and the way out of that is not known yet (2.6). So
+each test below runs **once**: the test `grub.cfg` clears its flag before
+it starts, and every boot after that is a normal one. If the flag cannot be
+cleared, the test does not run.
+
+```bash
+cd /boot/efi/EFI/BOOT
+cp grub.cfg grub.cfg.orig
+cat > grub.cfg <<'EOF'
+# Phase 0 runbook 2.3: one watchdog test, then normal boots again.
+load_env -f $prefix/wdtest.env WDTEST
+set test="$WDTEST"
+set WDTEST=done
+if [ "$test" = grub ]; then
+    if save_env -f $prefix/wdtest.env WDTEST; then
+        echo "2.3: GRUB sleeps 900 s - a reset before then means the watchdog covers GRUB"
+        sleep 900
+        echo "2.3: no reset - booting normally"
+    fi
+elif [ "$test" = initramfs ]; then
+    if save_env -f $prefix/wdtest.env WDTEST; then
+        echo "2.3: slot A's kernel, with a shell instead of the initramfs's /init"
+        if [ -f $prefix/boot.cfg ]; then source $prefix/boot.cfg; fi
+        regexp --set=1:disk '^([^,]+),' "$root"
+        linux ($disk,gpt1)/boot/Image $cbootargs console=ttyTCU0,115200 root=/dev/nvme0n1p1 rootwait rw rdinit=/bin/sh
+        initrd ($disk,gpt1)/boot/initrd
+        boot
+    fi
+fi
+configfile $prefix/grub.cfg.orig
+EOF
+grub-editenv wdtest.env create
+```
+
+(Slot A is GPT entry 1 on `nvme0n1`, as in the A/B layout.)
+
+- **Inside GRUB.** `grub-editenv /boot/efi/EFI/BOOT/wdtest.env set WDTEST=grub`, then
+  `reboot`. meta-boat's GRUB keeps the UEFI watchdog armed at 300 s, so a
+  reset about 5 minutes into the sleep means the watchdog covers a GRUB
+  hang; the board then boots normally. If it sleeps the whole 900 s and
+  then boots, GRUB hangs need a power cycle (plan 5.5, row "GRUB itself
+  hangs").
+- **Before userspace.** `grub-editenv /boot/efi/EFI/BOOT/wdtest.env set WDTEST=initramfs`,
+  then `reboot`. The kernel starts a shell instead of the initramfs's
+  `/init`, so nothing in userspace opens or feeds a watchdog. A reset means
+  the watchdog runs before systemd; the board then boots normally. A shell
+  that is still there after 10 minutes means it does not: type
+  `reboot -f`, or pull the power.
+
+The serial console shows a `2.3:` line when a test starts; a boot without
+one ran no test (check the path of `wdtest.env`), so it proves nothing.
+Record the time from `reboot` to the reset for each. Undo:
+
+```bash
+cd /boot/efi/EFI/BOOT && mv grub.cfg.orig grub.cfg && rm wdtest.env
+```
 
 ### 2.4 NVIDIA's rootfs retry counter: is it re-seeded by a cold power-on?
 
@@ -159,4 +217,6 @@ There is no risk in looking. On the serial console (115200 8N1), press
 **Esc** during the NVIDIA logo, then find the menu that shows or resets
 the rootfs slot status. On R35 it is under the L4T configuration pages of
 the Device Manager. Write down the exact path: it becomes the
-sticky-recovery procedure in docs/06 (plan 5.3, test 28).
+sticky-recovery procedure in docs/06 and docs/07 (plan 5.3, test 28).
+Until it is written there, those documents give a USB reflash, which
+empties `/data`, as the only recovery - and test 28 stays open.

@@ -116,7 +116,16 @@ fits.
 The A/B layout is a different partition table. The first flash after
 switching `AB_LAYOUT` on (or off) is a full `scripts/05-flash-nvme.sh` in
 recovery mode, and **it erases everything on the SSD**, `/data` included.
-Copy off what you need first.
+Copy off what you need first. Then, with the board in recovery mode:
+
+```bash
+scripts/04-unpack-tegraflash.sh boat-image   # the image you just built
+scripts/05-flash-nvme.sh
+```
+
+Unpack first: `05-flash-nvme.sh` flashes whatever was unpacked last. It
+refuses an unpack whose layout does not match `AB_LAYOUT`, so an older
+single-slot unpack is not written back over the erased SSD.
 
 Use the default `initrd-flash` path. `--host-drive` relies on a
 `doexternal.sh` that meta-tegra's kirkstone branch does not ship, and the DATA
@@ -181,11 +190,14 @@ stick instead, and then neither slot runs.
 **Without internet**, from a laptop on the boat's network:
 
 ```bash
-scripts/push-update.sh tmp/deploy/images/jetson-xavier-nx-devkit/boat-bundle-*.raucb
+scripts/push-update.sh yocto/build/tmp/deploy/images/jetson-xavier-nx-devkit/boat-bundle-jetson-xavier-nx-devkit.raucb
 ```
 
-It copies the bundle to the board, installs it, reboots, waits, and tells you
-which slot came back. From a USB stick, use exFAT or ext4 (a bundle over
+That file is the link to the last bundle built; run it from the
+repository root. (A `boat-bundle-*` pattern names both the bundle and that
+link.) A second argument is the board, as `user@host`; without one,
+`wol/boat.conf` names it. It copies the bundle to the board, installs it,
+reboots, waits, and tells you which slot came back. From a USB stick, use exFAT or ext4 (a bundle over
 4 GiB does not fit on FAT32), then `sudo boat-update install /media/<stick>/<bundle>.raucb --reboot`.
 
 ## Over the air: the update channel
@@ -198,21 +210,35 @@ download resume after the link drops. Check a host before you rely on it:
 scripts/ab-phase0-capture.sh --channel-url https://updates.example/boat-xavier-nx/stable/index.p7
 ```
 
+That check runs from the build host, after a read-only probe of the board
+over SSH, and with the host's own CA store. What counts is the board: once
+the channel is set, `sudo boat-update check` on the board shows whether it
+can reach the channel and trusts its certificate (a server with a CA of its
+own needs `server-ca.pem`, below).
+
 GitHub Releases is a poor fit: bundles that carry CUDA can exceed its per-file
 size limit.
 
 ```text
 https://updates.example/boat-xavier-nx/
-    stable/index.p7                 the signed index the boat follows
+    stable/index.p7                 the signed index the boats follow
     stable/boat-bundle-<version>-<sha256[:12]>.raucb
-    testing/...                     the bench's channel
+    testing/...                     a test board running a boat image: each release goes here first
+    bench/...                       the A/B validation bench (BOAT_BENCH images and bundles only)
 ```
+
+`testing` and `bench` are not the same thing. A **bench** image
+(`BOAT_BENCH=1`, [the validation runbook](plans/ab-validation.md)) trusts the
+bench CA, has its own RAUC `compatible`, and follows `bench`: it validates
+the A/B design, with fault bundles, and takes nothing built for a boat. A
+release is tried on a board that runs an ordinary boat image and follows
+`testing`; the same file then goes to `stable`.
 
 ### Publishing
 
 ```bash
 BOAT_PUBLISH_DEST=user@updates.example:/srv/www/boat-xavier-nx \
-  scripts/publish-update.sh testing tmp/deploy/images/jetson-xavier-nx-devkit/boat-bundle-jetson-xavier-nx-devkit.raucb
+  scripts/publish-update.sh testing yocto/build/tmp/deploy/images/jetson-xavier-nx-devkit/boat-bundle-jetson-xavier-nx-devkit.raucb
 ```
 
 The script:
@@ -224,9 +250,12 @@ The script:
    publishing machine never goes backwards);
 4. uploads the bundle **first** and the index **last**.
 
-To promote a release that passed on the bench, publish the same bundle to
-`stable`. `--reflash` marks a BSP bump: boards are told to reflash at the
-dock instead of downloading it. `--notes FILE` attaches release notes.
+To promote a release once it has committed on the `testing` board, publish
+the same bundle file to `stable` - not a rebuild, which would be a
+different file nobody has tried. Keep a copy of each bundle you publish:
+the next build of `boat-bundle` deletes it from the deploy directory.
+`--reflash` marks a BSP bump: boards are told to reflash at the dock
+instead of downloading it. `--notes FILE` attaches release notes.
 
 ### What the board accepts
 
@@ -268,7 +297,7 @@ slots, so it stays right across updates and rollbacks.
 
 ```bash
 BOAT_UPDATE_URL="https://updates.example/boat-xavier-nx"   # the final URL - redirects are not followed
-BOAT_UPDATE_CHANNEL=stable          # or testing
+BOAT_UPDATE_CHANNEL=stable          # testing on the test board, bench on a bench image
 BOAT_UPDATE_AUTO=download           # off | check | download - never installs
 BOAT_UPDATE_METERED=no              # download over a metered link?
 BOAT_UPDATE_RATE_LIMIT=""           # e.g. 200k
@@ -463,9 +492,12 @@ whole SSD.
 - **The board stops in the UEFI menu, or will not boot at all.** Both
   slots failed repeatedly, and NVIDIA's own boot counter has marked the
   drive unbootable. That marker is sticky. Recover with a USB reflash
-  (`scripts/05-flash-nvme.sh`); this keeps nothing on the SSD. The UEFI-menu
-  path that clears the marker without a reflash is captured by Phase 0 (see
-  [`plans/ab-phase0-runbook.md`](plans/ab-phase0-runbook.md)).
+  (`scripts/04-unpack-tegraflash.sh boat-image`, then
+  `scripts/05-flash-nvme.sh`), which keeps nothing on the SSD: `/data` starts
+  empty. That is the only recovery known today. The UEFI menu may be able
+  to clear the marker without a reflash, but where is not known yet: the
+  Phase 0 runbook (2.6) is where it gets found, and then it is written here
+  and in [`06-troubleshooting.md`](06-troubleshooting.md).
 - **"BSP bump: reflash at the dock."** The new release is built on another
   L4T. Flash it over USB. Like the first flash, **a USB flash empties
   `/data`**: copy off what you need first.
