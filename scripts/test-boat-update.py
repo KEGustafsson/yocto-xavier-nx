@@ -48,6 +48,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(HERE, "..", "layers", "meta-boat", "external", "rauc",
@@ -743,9 +744,10 @@ esac
         err = stream()
         log = open(board + "/rauc.log").read()
         want_url = "%s/stable/%s" % (url, bundle_name)
-        check("a streamed install hands RAUC only the local relay's URL - no certificate, no key",
-              err is None and re.search(r"rauc install http://127\.0\.0\.1:\d+/boat-xavier-nx/stable/%s\n"
-                                        % re.escape(bundle_name), log)
+        check("a streamed install hands RAUC only the local relay's URL, with this stream's token - "
+              "no certificate, no key",
+              err is None and re.search(r"rauc install http://127\.0\.0\.1:\d+/[A-Za-z0-9_-]{24}"
+                                        r"/boat-xavier-nx/stable/%s\n" % re.escape(bundle_name), log)
               and "--tls" not in log and key_line not in log, "%s\n%s" % (err, log))
         check("... and RAUC's Range requests are answered through it, from the channel",
               "fetched 206 206" in log, log)
@@ -825,17 +827,20 @@ esac
         check("the relay never leaves the link that was checked",
               through_relay(dev="boatnodev0") == "502")
 
-        def relay_get(rng):
+        def relay_get(rng, path=None):
             relay, local_url = bu.start_relay(conf, want_url, "lo")
             try:
                 u = local_url.split("/", 3)
                 host, port = u[2].split(":")
                 c = http.client.HTTPConnection(host, int(port), timeout=10)
-                c.request("GET", "/" + u[3], headers={"Range": rng})
+                c.request("GET", path or "/" + u[3], headers={"Range": rng})
                 return c.getresponse().status
             finally:
                 relay.shutdown()
                 relay.server_close()
+        bundle_path = urllib.parse.urlsplit(want_url).path
+        check("the relay serves nothing without this stream's token - the bundle's own path is not enough",
+              relay_get("bytes=0-3", path=bundle_path) == 403)
         check("the relay refuses a range that ends before it starts (it would read the whole bundle)",
               relay_get("bytes=1000-0") == 400)
         uids, bu.relay_uids = bu.relay_uids, lambda: {0x7ffffff0}

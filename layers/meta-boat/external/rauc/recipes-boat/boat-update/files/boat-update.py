@@ -43,12 +43,14 @@ import configparser
 import contextlib
 import fcntl
 import hashlib
+import hmac
 import http.client
 import http.server
 import json
 import os
 import pwd
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -1316,8 +1318,13 @@ def start_relay(conf, url, dev):
     its first request, so bytes from elsewhere in the bundle would be
     written at the offset it asked for. Only RAUC's streaming client (and
     root) may use it, and only for a range of at most RELAY_MAX bytes, a
-    few at a time. Returns (server, the URL to hand RAUC)."""
+    few at a time. A uid alone does not say it is this install's RAUC - a
+    host-networked container can run as root - so the URL also carries a
+    token made for this stream, which only the 'rauc install' command line
+    and RAUC itself see; a request without it gets nothing, not even a
+    relay slot. Returns (server, the URL to hand RAUC)."""
     u = urllib.parse.urlsplit(url)
+    expected = ("/%s%s" % (secrets.token_urlsafe(18), u.path)).encode()
     ctx = ssl.create_default_context(cafile=conf["BOAT_UPDATE_SERVER_CA"] or None)
     if conf["BOAT_UPDATE_CLIENT_CERT"]:
         ctx.load_cert_chain(conf["BOAT_UPDATE_CLIENT_CERT"], conf["BOAT_UPDATE_CLIENT_KEY"] or None)
@@ -1340,9 +1347,11 @@ def start_relay(conf, url, dev):
             uid = tcp_peer_uid(self.client_address, self.server.server_address)
             if uid not in relay_uids():
                 return self.refuse(403, "a request from uid %s, which is not RAUC's streaming client - refused" % uid)
+            if not hmac.compare_digest(self.path.encode("latin-1", "replace"), expected):
+                return self.refuse(403, "a request without this stream's token (uid %s) - refused" % uid)
             m = RANGE_RE.match(self.headers.get("Range", ""))
-            if not m or self.path != u.path or not 0 <= int(m.group(2)) - int(m.group(1)) < RELAY_MAX:
-                return self.refuse(400, "unexpected request %s %r" % (self.path, self.headers.get("Range")))
+            if not m or not 0 <= int(m.group(2)) - int(m.group(1)) < RELAY_MAX:
+                return self.refuse(400, "unexpected range %r" % self.headers.get("Range"))
             if not in_flight.acquire(timeout=120):
                 return self.refuse(503, "too many requests at once")
             try:
@@ -1386,7 +1395,7 @@ def start_relay(conf, url, dev):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Relay)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, "http://127.0.0.1:%d%s" % (server.server_address[1], u.path)
+    return server, "http://127.0.0.1:%d%s" % (server.server_address[1], expected.decode())
 
 
 def stream_preflight(conf, url, dev):
