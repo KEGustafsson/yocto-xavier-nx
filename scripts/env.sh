@@ -62,6 +62,12 @@
 # Empty = "0.0.0-dev", fine for bench work but never offered over the air
 # (every dev build has that same version). Set it for anything you ship.
 : "${BOAT_RELEASE:=}"
+# RAUC's min-bundle-version (plan D6): the oldest release an A/B image will
+# install, on every path - over the air, scripts/push-update.sh, a USB
+# stick. Empty = no floor. Raise it to a release that fixed a security
+# problem, so that no board running it can be put back below it
+# (docs/07-updates.md). Never above BOAT_RELEASE.
+: "${BOAT_MIN_BUNDLE_VERSION:=}"
 # Where the update signing keys live (scripts/gen-update-keys.sh). Outside
 # the repository AND outside WORKROOT on purpose: yocto/ gets deleted, and
 # losing the CA means reflashing every board over USB.
@@ -88,6 +94,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${BUILD_DIR:=${WORKROOT}/build}"
 : "${FLASH_DIR:=${WORKROOT}/flash}"     # unpacked tegraflash tarball
 
-export YOCTO_BRANCH MACHINE BOOTDEV ROOTFS_SIZE_BYTES AB_LAYOUT BOAT_RELEASE BOAT_KEYS_DIR \
+export YOCTO_BRANCH MACHINE BOOTDEV ROOTFS_SIZE_BYTES AB_LAYOUT BOAT_RELEASE BOAT_MIN_BUNDLE_VERSION BOAT_KEYS_DIR \
   BOAT_BENCH BOAT_BENCH_KEYS_DIR BOAT_FAULT IMAGE
 export REPO_ROOT WORKROOT LAYERS_DIR BUILD_DIR FLASH_DIR

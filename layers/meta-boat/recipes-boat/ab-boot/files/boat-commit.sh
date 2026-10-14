@@ -7,6 +7,9 @@
 #   boat-commit --deadline  run by boat-trial-deadline.timer, 15 minutes
 #                           into a trial: fail the trial if it is still
 #                           not committed (a check that hangs, a stuck unit)
+#   boat-commit --shutdown  run as boat-trial-inhibit.service stops: a
+#                           clean shutdown or reboot before the verdict
+#                           gives the trial its attempt back - once
 #
 # Two tiers, so that a broken data partition or an app can never move the
 # boat back to an older OS on its own:
@@ -30,10 +33,18 @@
 #                        on /data, reboot - GRUB then boots the other slot
 #                        (boat.stay=1: no reboot, for bench work)
 #   committed boot       the attempt counter is reset first, before any
-#                        check (the slot did boot); a Tier 1 failure is an
-#                        alert, never a reboot or a mark
+#                        check (the slot did boot - boat-grubenv-guard has
+#                        normally done it already, earlier in the boot); a
+#                        Tier 1 failure is an alert, never a reboot or a mark
+#   last resort          (boat.lastresort=1: GRUB found no usable slot) an
+#                        alert in every case. A committed slot that only ran
+#                        out of attempts is made usable again; a slot that
+#                        never passed a trial is left as it is
 #
-# The gate and the deadline take a lock, so only one of them decides.
+# A healthy boot that carried boat.stay=1 ends the hold (BOAT_STAY=0): it
+# is for the one boot being debugged, not for good.
+#
+# Every grubenv write takes the A/B lock, so only one of these decides.
 #
 # Nothing outside the board - internet, NTP, GNSS, NMEA - is ever checked.
 set -u
@@ -83,16 +94,9 @@ data_mounted() {
     [ "$(mount_source "$DATA_MOUNT")" = "$(part_dev "$BOAT_AB_PART_DATA")" ]
 }
 
-# One decision at a time: the gate and the deadline timer must never both
-# write grubenv, or commit a slot the other has just failed.
-locked=0
-lock() {
-    [ "$locked" = 1 ] && return 0
-    mkdir -p "$BOAT_AB_RUNDIR"
-    exec 9>"$BOAT_AB_RUNDIR/commit.lock"
-    flock -w 60 9 || warn "could not take $BOAT_AB_RUNDIR/commit.lock - going on without it"
-    locked=1
-}
+# One decision at a time: the gate, the deadline timer and a shutdown must
+# never both write grubenv, or commit a slot another has just failed.
+lock() { ab_lock; }
 
 slot_partition() {
     case "$1" in
@@ -164,12 +168,21 @@ release() { cat /etc/boat-release 2>/dev/null || echo unknown; }
 # after its rename shows COMMITTED=1 that was never flushed, or that
 # grubenv.bak - GRUB's fallback - does not have.
 COMMITTED_MARK="$BOAT_AB_RUNDIR/committed"
+# This boot's trial failed: nothing may give it its attempt back.
+FAILED_MARK="$BOAT_AB_RUNDIR/trial-failed"
+
+# BOAT_STAY=0 once a boot that carried the hold is found healthy.
+stay_off() {
+    cmdline_has boat.stay=1 && echo BOAT_STAY=0
+}
 
 commit() {
     lock
     [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_OK")" = 1 ] \
         || die "slot $slot was failed meanwhile (the trial deadline) - not committing it"
-    grubenv_set "${slot}_OK=1" "${slot}_TRY=0" "${slot}_COMMITTED=1" \
+    # BOAT_RETRY: the next trial gets its own shutdown retry.
+    # shellcheck disable=SC2046 # no word, or one
+    grubenv_set "${slot}_OK=1" "${slot}_TRY=0" "${slot}_COMMITTED=1" BOAT_RETRY= $(stay_off) \
         && [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_COMMITTED")" = 1 ] \
         || die "could not write grubenv - slot $slot is NOT committed (the trial deadline fails it)"
     : > "$COMMITTED_MARK" || warn "could not write $COMMITTED_MARK - the trial deadline will fail this slot"
@@ -181,6 +194,7 @@ commit() {
 
 fail_trial() {
     lock
+    : > "$FAILED_MARK" 2>/dev/null || true
     warn "slot $slot ($(release)) failed its trial: $1"
     grubenv_set "${slot}_OK=0" "${slot}_TRY=0" \
         || warn "could not mark slot $slot bad - GRUB's own attempt count still ends this trial"
@@ -190,12 +204,10 @@ fail_trial() {
         release >> "$STATE_DIR/failed-versions" || true
     fi
     sync
-    for arg in $(cat /proc/cmdline); do
-        if [ "$arg" = boat.stay=1 ]; then
-            warn "boat.stay=1: staying up for inspection - reboot to fall back to the other slot"
-            exit 1
-        fi
-    done
+    if cmdline_has boat.stay=1; then
+        warn "boat.stay=1: staying up for inspection - reboot to fall back to the other slot"
+        exit 1
+    fi
     warn "rebooting: GRUB will boot the other slot"
     systemctl reboot
     exit 1
@@ -213,21 +225,73 @@ if [ "${1:-}" = "--deadline" ]; then
     [ "$trial" = 1 ] || exit 0
     lock
     [ -e "$COMMITTED_MARK" ] && exit 0
+    # Failed already (boat.stay=1 keeps the board up after that): that
+    # verdict, and the reason it recorded, stand.
+    [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_OK")" = 0 ] && exit 0
     if [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_COMMITTED")" = 1 ]; then
         fail_trial "its commit was never confirmed (the grubenv write failed part-way)"
     fi
     fail_trial "not committed within the trial deadline"
 fi
 
+# A clean shutdown or reboot before the verdict - the helm's power-off, the
+# power key - says nothing about the release, but GRUB has already used the
+# trial's one attempt, so the next boot would fail it and the release would
+# never be offered again. Give the attempt back, once per trial
+# (BOAT_RETRY): a release that keeps being shut down mid-trial still ends.
+# Not after a verdict, not for a forced reboot (systemctl --force skips
+# this), and not when boat-commit stops the inhibitor on commit.
+if [ "${1:-}" = "--shutdown" ]; then
+    [ "$trial" = 1 ] || exit 0
+    [ -e "$COMMITTED_MARK" ] && exit 0
+    [ -e "$FAILED_MARK" ] && exit 0
+    [ "$(systemctl is-system-running 2>/dev/null)" = stopping ] || exit 0
+    lock
+    [ -e "$COMMITTED_MARK" ] && exit 0
+    [ -e "$FAILED_MARK" ] && exit 0
+    grubenv_valid "$BOAT_AB_GRUBENV" || exit 0
+    [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_OK")" = 1 ] || exit 0
+    [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_COMMITTED")" = 0 ] || exit 0
+    if [ "$(grubenv_get "$BOAT_AB_GRUBENV" BOAT_RETRY)" = "$slot" ]; then
+        warn "shut down before slot $slot's trial was decided, again - this attempt counts: the next boot falls back"
+        record "trial of slot $slot ($(release)) shut down before its verdict, a second time - it is not retried"
+        exit 0
+    fi
+    if grubenv_set "${slot}_TRY=0" "BOAT_RETRY=$slot"; then
+        say "shut down before slot $slot's trial was decided - the next boot tries it again (once)"
+        record "trial of slot $slot ($(release)) shut down before its verdict - retried on the next boot"
+    else
+        warn "could not give slot $slot's trial its attempt back - the next boot falls back"
+    fi
+    exit 0
+fi
+
+lastresort=0
+booted_lastresort && lastresort=1
+committed="$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_COMMITTED")"
+problems=""
+problem() { problems="${problems:+$problems; }$*"; }
+
+if [ "$lastresort" = 1 ]; then
+    if [ "$committed" = 1 ]; then
+        problem "GRUB found no usable slot and booted slot $slot as its last resort - it is committed and only ran out of attempts, so it is made usable again"
+    else
+        problem "GRUB found no usable slot and booted slot $slot as its last resort - it has not passed a trial (a failed release or an interrupted install): install a release, or reflash"
+    fi
+fi
+
 # A committed slot that got this far did boot: reset its attempt count
 # first, before any check that may take a while, so only a slot that keeps
-# failing to BOOT is ever handed over.
-if [ "$trial" = 0 ] && grubenv_valid "$BOAT_AB_GRUBENV"; then
+# failing to BOOT is ever handed over. A slot on trial, or one that never
+# passed a trial and only booted as the last resort, is never made usable
+# here.
+if [ "$trial" = 0 ] && [ "$committed" = 1 ] && grubenv_valid "$BOAT_AB_GRUBENV" \
+        && { [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_OK")" != 1 ] \
+             || [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_TRY")" != 0 ]; }; then
     lock
     grubenv_set "${slot}_OK=1" "${slot}_TRY=0" \
-        || warn "could not reset slot $slot's attempt count - two more failed boots would hand the board to the other slot"
-    exec 9>&-
-    locked=0
+        || problem "could not reset slot $slot's attempt count (the ESP will not take the write) - one more failed boot, or two reboots of any kind while this lasts, hands the board to the other slot"
+    ab_unlock
 fi
 
 deadline=$(( $(uptime_s) + BOAT_HEALTH_DEADLINE ))
@@ -245,12 +309,19 @@ if [ "$trial" = 1 ]; then
     fail_trial "$reason"
 fi
 
-if [ -n "$reason" ]; then
-    mkdir -p "$BOAT_AB_RUNDIR"
-    echo "$reason" > "$BOAT_AB_RUNDIR/health-alert"
-    warn "slot $slot is committed but unhealthy: $reason - staying on it (see 'journalctl -b -u boat-commit')"
-    record "slot $slot ($(release)) committed but unhealthy: $reason"
+[ -n "$reason" ] && problem "slot $slot is unhealthy: $reason - staying on it (see 'journalctl -b -u boat-commit')"
+if [ -n "$problems" ]; then
+    alert "$problems"
+    record "slot $slot ($(release)): $problems"
     exit 1
+fi
+if [ -n "$(stay_off)" ] && [ "$(grubenv_get "$BOAT_AB_GRUBENV" BOAT_STAY)" = 1 ]; then
+    lock
+    if grubenv_set BOAT_STAY=0; then
+        say "debug hold (BOAT_STAY) ended: this boot was healthy"
+    else
+        warn "could not end the debug hold (BOAT_STAY=1)"
+    fi
 fi
 say "slot $slot ($(release)) is healthy"
 exit 0

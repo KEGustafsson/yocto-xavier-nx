@@ -15,6 +15,9 @@ BOAT_AB_PART_DATA="@PARTNUM_DATA@"
 BOAT_AB_ESP_MOUNT=/boot/efi
 BOAT_AB_GRUBENV="${BOAT_AB_ESP_MOUNT}/EFI/BOOT/grubenv"
 BOAT_AB_RUNDIR=/run/boat-ab
+# Problems this boot that need a person, one per line: shown by
+# 'boat-update status'.
+BOAT_AB_ALERT="${BOAT_AB_RUNDIR}/health-alert"
 # gNVIDIAPublicVariableGuid - L4TDefaultBootMode and the rootfs slot status.
 BOAT_AB_NV_GUID=781e084c-a330-417c-b678-38e696380cb9
 EFIVARS=/sys/firmware/efi/efivars
@@ -29,6 +32,39 @@ BOAT_AB_ENV_KEYS="ORDER A_OK A_TRY A_COMMITTED B_OK B_TRY B_COMMITTED BOAT_STAY"
 say() { echo "${SELF:-boat-ab}: $*"; }
 warn() { echo "${SELF:-boat-ab}: WARNING: $*" >&2; }
 die() { echo "${SELF:-boat-ab}: $*" >&2; exit 1; }
+
+# Warn, and add the line to this boot's alerts. Never fails.
+alert() {
+    warn "$*"
+    { mkdir -p "$BOAT_AB_RUNDIR" && echo "$*" >> "$BOAT_AB_ALERT"; } 2>/dev/null || true
+}
+
+# One grubenv read-modify-write at a time: boat-commit, the guards, RAUC
+# (through the grub-editenv wrapper) and boat-update all take this lock.
+# Held on fd 9 until ab_unlock or exit. A holder that is stuck must not
+# stop a boot, so after BOAT_AB_LOCK_WAIT seconds this goes on without it.
+BOAT_AB_LOCK_WAIT=60
+_ab_locked=0
+ab_lock() {
+    [ "$_ab_locked" = 1 ] && return 0
+    mkdir -p "$BOAT_AB_RUNDIR"
+    exec 9>"$BOAT_AB_RUNDIR/commit.lock"
+    flock -w "$BOAT_AB_LOCK_WAIT" 9 \
+        || warn "could not take $BOAT_AB_RUNDIR/commit.lock in $BOAT_AB_LOCK_WAIT s - going on without it"
+    _ab_locked=1
+}
+ab_unlock() {
+    exec 9>&-
+    _ab_locked=0
+}
+
+# True when word $1 is on the kernel command line.
+cmdline_has() {
+    for _ab_arg in $(cat /proc/cmdline); do
+        [ "$_ab_arg" = "$1" ] && return 0
+    done
+    return 1
+}
 
 # The slot GRUB booted (A or B), from rauc.slot= on the kernel command line.
 # Empty when the board came up outside GRUB (L4TLauncher's own fallback).
@@ -96,6 +132,16 @@ efi_u32() {
     od -An -t u4 -j 4 -N 4 "$_ab_f" | tr -d ' '
 }
 
+# The same for a one-byte variable.
+efi_u8() {
+    _ab_f="${EFIVARS}/$1-${BOAT_AB_NV_GUID}"
+    if [ ! -e "$_ab_f" ]; then
+        echo absent
+        return 0
+    fi
+    od -An -t u1 -j 4 -N 1 "$_ab_f" | tr -d ' '
+}
+
 # True when grubenv at $1 parses and every variable grub.cfg reads holds a
 # value it understands.
 grubenv_valid() {
@@ -118,12 +164,11 @@ grubenv_get() {
 
 # True when this boot is a trial: GRUB adds boat.trial=1 for a slot that is
 # not committed yet.
-booted_on_trial() {
-    for _ab_arg in $(cat /proc/cmdline); do
-        [ "$_ab_arg" = boat.trial=1 ] && return 0
-    done
-    return 1
-}
+booted_on_trial() { cmdline_has boat.trial=1; }
+
+# True when GRUB found no usable slot and booted this one as its last
+# resort (boat.lastresort=1): uncounted, whatever state the slot is in.
+booted_lastresort() { cmdline_has boat.lastresort=1; }
 
 # Replace file $2 with file $1 so that a power cut leaves either the old or
 # the new contents, never a mix: flush, rename, flush. (grub-editenv itself

@@ -330,6 +330,35 @@ else
     fail_check "boat-storage failed a case"
 fi
 
+# --- 5a2. The A/B initramfs's root selection, run against a fake board ------
+# /init and its platform-preboot pick the root filesystem on every boot of an
+# A/B image - exactly the slot GRUB named, after a GPT name check - and reset
+# the board when they cannot, so GRUB can fall back. A mistake there fails
+# every slot at once. scripts/test-ab-initramfs.py runs both as shipped, with
+# mount, blkid, reboot and switch_root stubbed.
+log "A/B initramfs ..."
+if [[ "${HAVE_PYTHON}" == "0" ]]; then
+    skip_check "python3 not installed - A/B initramfs not run"
+elif python3 scripts/test-ab-initramfs.py; then
+    log "  A/B initramfs: clean"
+else
+    fail_check "the A/B initramfs failed a case"
+fi
+
+# --- 5a3. The A/B partition layout, generated from NVIDIA's shape -----------
+# boat-ab-layout.py pins the GPT entry numbers GRUB, the initramfs and RAUC
+# address the slots by. scripts/test-ab-layout.py runs it on a template in
+# NVIDIA's shape, checks the result (with meta-tegra's own nvflashxmlparse
+# when meta-tegra is checked out), and that each wrong template is refused.
+log "A/B partition layout ..."
+if [[ "${HAVE_PYTHON}" == "0" ]]; then
+    skip_check "python3 not installed - A/B partition layout not generated"
+elif python3 scripts/test-ab-layout.py; then
+    log "  A/B partition layout: clean"
+else
+    fail_check "the A/B partition layout generator failed a case"
+fi
+
 # --- 5b. The A/B on-board scripts, run against a fake board -----------------
 # The grubenv guard and the commit step decide, unattended, which slot stays
 # bootable. scripts/test-ab-scripts.py runs them as shipped against a scratch

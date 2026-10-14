@@ -4,8 +4,10 @@
 # sysinit.target, so waiting for that mount here would hold up the whole
 # boot. Instead it is skipped unless the mount is already there (the journal
 # stays in /run meanwhile), and boat-journal-flush.service moves the journal
-# onto DATA when the mount arrives. The empty RequiresMountsFor= drops the
-# stock unit's own wait for /var/log/journal for the same reason.
+# onto DATA when the mount arrives. The stock unit's own
+# RequiresMountsFor=/var/log/journal stays (systemd v250 cannot reset it),
+# and names no mount: /var/log is the volatile tmpfs's symlink, which
+# boat-storage.bb insists on (VOLATILE_LOG_DIR), so the journal's mount is
+# under /var/volatile.
 [Unit]
 ConditionPathIsMountPoint=@JOURNAL_DIR@
-RequiresMountsFor=

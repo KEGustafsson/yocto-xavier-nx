@@ -23,13 +23,32 @@ SRC_URI += "file://0001-Base.h-guard-has_feature-has_builtin-for-assembler-.patc
 # built overlay. The overlay only SEEDS a variable that does not exist yet,
 # so a board that already carries 1 is put right at runtime by
 # boat-bootmode-guard (recipes-boat/ab-boot).
-BOAT_AB_BOOTMODE_NODE = "/fragment@0/__overlay__/firmware/uefi/variables/gNVIDIAPublicVariableGuid/L4TDefaultBootMode"
+#
+# The same overlay boots USB first: DefaultBootPriority "usb,nvme,..." sorts
+# the boot order once, on the first boot, and NewDeviceHierarchy = 1 puts
+# every USB stick or SD card inserted later at the front. A bootable stick
+# left in would then boot instead of the NVMe's L4TLauncher and GRUB - the
+# slot logic would never run. NVMe first, and new devices at the end
+# (plan 5.2). boat-bootmode-guard also sets NewDeviceHierarchy at runtime.
+BOAT_AB_UEFI_VARS = "/fragment@0/__overlay__/firmware/uefi/variables"
+BOAT_AB_BOOTMODE_NODE = "${BOAT_AB_UEFI_VARS}/gNVIDIAPublicVariableGuid/L4TDefaultBootMode"
+BOAT_AB_HIERARCHY_NODE = "${BOAT_AB_UEFI_VARS}/gNVIDIAPublicVariableGuid/NewDeviceHierarchy"
+BOAT_AB_PRIORITY_NODE = "${BOAT_AB_UEFI_VARS}/gNVIDIATokenSpaceGuid/DefaultBootPriority"
+BOAT_AB_BOOT_PRIORITY = "nvme,emmc,sd,usb,ufs"
 
 do_compile:append() {
     if [ "${BOAT_AB_LAYOUT}" = "1" ]; then
-        fdtput -t bx ${B}/images/L4TConfiguration.dtbo ${BOAT_AB_BOOTMODE_NODE} data 00 00 00 00
-        mode="$(fdtget -t bx ${B}/images/L4TConfiguration.dtbo ${BOAT_AB_BOOTMODE_NODE} data)"
+        dtbo=${B}/images/L4TConfiguration.dtbo
+        fdtput -t bx $dtbo ${BOAT_AB_BOOTMODE_NODE} data 00 00 00 00
+        mode="$(fdtget -t bx $dtbo ${BOAT_AB_BOOTMODE_NODE} data)"
         [ "$mode" = "0 0 0 0" ] || bbfatal "L4TDefaultBootMode is '$mode' after fdtput, expected 0 (GRUB)"
+        fdtput -t bx $dtbo ${BOAT_AB_HIERARCHY_NODE} data 00
+        hierarchy="$(fdtget -t bx $dtbo ${BOAT_AB_HIERARCHY_NODE} data)"
+        [ "$hierarchy" = "0" ] || bbfatal "NewDeviceHierarchy is '$hierarchy' after fdtput, expected 0"
+        fdtput -t s $dtbo ${BOAT_AB_PRIORITY_NODE} data "${BOAT_AB_BOOT_PRIORITY}"
+        priority="$(fdtget -t s $dtbo ${BOAT_AB_PRIORITY_NODE} data)"
+        [ "$priority" = "${BOAT_AB_BOOT_PRIORITY}" ] \
+            || bbfatal "DefaultBootPriority is '$priority' after fdtput, expected '${BOAT_AB_BOOT_PRIORITY}'"
     fi
 }
-do_compile[vardeps] += "BOAT_AB_LAYOUT"
+do_compile[vardeps] += "BOAT_AB_LAYOUT BOAT_AB_BOOT_PRIORITY"

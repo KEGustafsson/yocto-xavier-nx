@@ -32,6 +32,10 @@ if [[ "${AB_LAYOUT}" == 1 ]]; then
   # (relaxed) semantic version, so keep it to what that grammar allows.
   [[ -z "${BOAT_RELEASE}" || "${BOAT_RELEASE}" =~ ^[0-9]+(\.[0-9]+){0,2}(-[0-9A-Za-z.]+)?(\+[0-9A-Za-z.]+)?$ ]] \
     || die "BOAT_RELEASE must be a version like 1.4.0 or 2026.10.1-rc.1 (no '-' inside the pre-release part: RAUC splits at the last one), got '${BOAT_RELEASE}'"
+  # The same grammar. That it is not above BOAT_RELEASE is checked when the
+  # build parses (meta-boat's rauc bbappend), for kas builds too.
+  [[ -z "${BOAT_MIN_BUNDLE_VERSION}" || "${BOAT_MIN_BUNDLE_VERSION}" =~ ^[0-9]+(\.[0-9]+){0,2}(-[0-9A-Za-z.]+)?(\+[0-9A-Za-z.]+)?$ ]] \
+    || die "BOAT_MIN_BUNDLE_VERSION must be a version like BOAT_RELEASE, got '${BOAT_MIN_BUNDLE_VERSION}'"
   [[ "${BOAT_KEYS_DIR}" == /* ]] || die "BOAT_KEYS_DIR must be an absolute path, got '${BOAT_KEYS_DIR}'"
   [[ "${BOAT_BENCH}" == 0 || "${BOAT_BENCH}" == 1 ]] || die "BOAT_BENCH must be 0 or 1, got '${BOAT_BENCH}'"
   if [[ "${BOAT_BENCH}" == 1 && "$(realpath -m "${BOAT_BENCH_KEYS_DIR}")" == "$(realpath -m "${BOAT_KEYS_DIR}")" ]]; then
@@ -333,8 +337,9 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
       # carries its own kernel; GRUB loads them from the slot it picks.
       echo 'UBOOT_EXTLINUX = "1"'
       # Build the ext4 image at its content size (+30% overhead, + the
-      # image's extra space) instead of meta-tegra's default, which fills the
-      # whole 16 GiB partition. Only the image's bytes cross the flasher's
+      # image's extra space: 512 MiB on this layout, see boat-image.bb)
+      # instead of meta-tegra's default, which fills the whole 16 GiB
+      # partition. Only the image's bytes cross the flasher's
       # USB 2.0 link and an update's network link; the filesystem is grown
       # into its partition on the board. The maximum stops an image that
       # would no longer fit a slot at build time.
@@ -346,6 +351,9 @@ sed -i "/${MARKER_BEGIN}/,/${MARKER_END}/d" "${CONF}/local.conf"
       echo "BOAT_KEYS_DIR = \"${BOAT_KEYS_DIR}\""
       if [[ -n "${BOAT_RELEASE}" ]]; then
         echo "BOAT_RELEASE = \"${BOAT_RELEASE}\""
+      fi
+      if [[ -n "${BOAT_MIN_BUNDLE_VERSION}" ]]; then
+        echo "BOAT_MIN_BUNDLE_VERSION = \"${BOAT_MIN_BUNDLE_VERSION}\""
       fi
       if [[ "${BOAT_BENCH}" == 1 ]]; then
         # Bench image: also trusts the bench CA that signs fault bundles.
@@ -365,6 +373,7 @@ log "  ROOTFSPART_SIZE  = ${ROOTFS_SIZE_BYTES} bytes"
 log "  AB_LAYOUT        = ${AB_LAYOUT}$([[ "${AB_LAYOUT}" == 1 ]] && echo '  (A/B slots - EXPERIMENTAL; the first flash erases the SSD)')"
 if [[ "${AB_LAYOUT}" == 1 ]]; then
   log "  BOAT_RELEASE     = ${BOAT_RELEASE:-0.0.0-dev}"
+  log "  BOAT_MIN_BUNDLE_VERSION = ${BOAT_MIN_BUNDLE_VERSION:-<none: any older release installs>}"
   log "  BOAT_KEYS_DIR    = ${BOAT_KEYS_DIR}"
   if [[ "${BOAT_BENCH}" == 1 ]]; then
     warn "  BOAT_BENCH       = 1  (BENCH image: trusts the bench CA - never put it on a boat)"

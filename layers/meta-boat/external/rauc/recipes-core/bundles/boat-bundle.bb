@@ -34,9 +34,15 @@ RAUC_BUNDLE_HOOKS[file] = "boat-bundle-hook.sh"
 # Filled in from the image itself by boat_bundle_meta, below.
 RAUC_META_SECTIONS = "boat"
 
-RAUC_KEY_FILE = "${BOAT_KEYS_DIR}/rauc-signing.key.pem"
-RAUC_CERT_FILE = "${BOAT_KEYS_DIR}/rauc-signing.cert.pem"
-RAUC_KEYRING_FILE = "${BOAT_KEYS_DIR}/ca.cert.pem"
+# Signed with the fleet's keys - or, in a bench build (BOAT_BENCH = "1"),
+# the bench's (scripts/gen-update-keys.sh --bench). A bench build's bundles
+# carry the -bench compatible and go only to bench boards, which trust the
+# bench CA: signing them with the fleet key would only mean that key - the
+# one every boat trusts - has to be wherever bench builds run.
+BOAT_BUNDLE_KEYS_DIR = "${@d.getVar('BOAT_BENCH_KEYS_DIR') if d.getVar('BOAT_BENCH') == '1' else d.getVar('BOAT_KEYS_DIR')}"
+RAUC_KEY_FILE = "${BOAT_BUNDLE_KEYS_DIR}/rauc-signing.key.pem"
+RAUC_CERT_FILE = "${BOAT_BUNDLE_KEYS_DIR}/rauc-signing.cert.pem"
+RAUC_KEYRING_FILE = "${BOAT_BUNDLE_KEYS_DIR}/ca.cert.pem"
 # Their contents, not just their paths, belong in the signature: a renewed
 # signing certificate at the same path must produce a newly signed bundle.
 do_bundle[file-checksums] += "${RAUC_KEY_FILE}:True ${RAUC_CERT_FILE}:True ${RAUC_KEYRING_FILE}:True"

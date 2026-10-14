@@ -19,14 +19,15 @@ repos:
     url: https://github.com/rauc/meta-rauc.git
     branch: kirkstone
 
-# Passed through from the calling environment; scripts/build-kas.sh sets both
-# from scripts/env.sh (BOAT_KEYS_DIR defaults to
+# Passed through from the calling environment; scripts/build-kas.sh sets
+# them from scripts/env.sh (BOAT_KEYS_DIR defaults to
 # ~/.local/share/boat-update-keys there). Left empty, the build stops at the
-# first recipe that needs the keys and says so, and BOAT_RELEASE falls back
-# to 0.0.0-dev.
+# first recipe that needs the keys and says so, BOAT_RELEASE falls back to
+# 0.0.0-dev, and BOAT_MIN_BUNDLE_VERSION sets no floor.
 env:
   BOAT_KEYS_DIR: ""
   BOAT_RELEASE: ""
+  BOAT_MIN_BUNDLE_VERSION: ""
 
 local_conf_header:
   # kas writes these entries sorted by key, and this one has to come AFTER
@@ -47,7 +48,8 @@ local_conf_header:
     # Puts /boot/Image and /boot/initrd into the rootfs, so every slot
     # carries its own kernel; GRUB loads them from the slot it picks.
     UBOOT_EXTLINUX = "1"
-    # The ext4 image at its content size rather than the whole partition:
+    # The ext4 image at its content size (+30% overhead, + boat-image's
+    # 512 MiB extra space on this layout) rather than the whole partition:
     # only the image's bytes cross the flasher's USB link and an update's
     # network link. The maximum fails a build that would not fit a slot.
     IMAGE_ROOTFS_SIZE = "1048576"

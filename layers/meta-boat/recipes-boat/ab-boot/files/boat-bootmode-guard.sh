@@ -8,6 +8,13 @@
 # UEFI settings were reset from the setup menu, carries 1 (extlinux) and
 # would boot slot A every time, ignoring grubenv. This puts it back.
 #
+# It also keeps UEFI from putting a newly inserted USB stick or SD card at
+# the front of its boot order (NewDeviceHierarchy, seeded as 1 by NVIDIA's
+# overlay): a bootable stick left in would otherwise be booted instead of
+# the NVMe - and GRUB, which counts the attempts, would never run. A failure
+# there is only a warning: this unit is one the trial's health gate waits
+# for.
+#
 # It also records how this boot got here in /run/boat-ab/boot-path: "grub"
 # (rauc.slot= is on the command line) or "outside-grub" - L4TLauncher's own
 # fallback, which always boots slot A and bypasses the slot logic. The
@@ -29,16 +36,35 @@ else
     warn "L4TLauncher booted slot A by itself, so A/B slot selection is bypassed"
 fi
 
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+
+# Write $2 zero bytes to gNVIDIAPublicVariableGuid variable $1. efivar keeps
+# the variable's attributes and handles efivarfs's immutable flag.
+efi_write_zero() {
+    command -v efivar >/dev/null 2>&1 || { warn "efivar is not installed"; return 1; }
+    head -c "$2" /dev/zero > "$tmp" && efivar -w -n "${BOAT_AB_NV_GUID}-$1" -f "$tmp"
+}
+
+hierarchy="$(efi_u8 NewDeviceHierarchy)"
+case "$hierarchy" in
+    0|absent) ;;
+    *)
+        warn "NewDeviceHierarchy is '$hierarchy': UEFI puts every newly inserted USB stick or SD card first in its boot order - setting it to 0"
+        if efi_write_zero NewDeviceHierarchy 1 && [ "$(efi_u8 NewDeviceHierarchy)" = 0 ]; then
+            say "NewDeviceHierarchy is now 0: new boot devices go to the end of UEFI's boot order"
+        else
+            warn "could not set NewDeviceHierarchy to 0 - take any bootable USB stick or SD card out before a reboot"
+        fi
+        ;;
+esac
+
 mode="$(efi_u32 L4TDefaultBootMode)"
 if [ "$mode" = 0 ]; then
     exit 0
 fi
 warn "L4TDefaultBootMode is '$mode', not 0 (GRUB) - setting it so the next boot goes through GRUB"
-command -v efivar >/dev/null 2>&1 || die "efivar is not installed - cannot fix L4TDefaultBootMode"
-tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
-printf '\000\000\000\000' > "$tmp"
-efivar -w -n "${BOAT_AB_NV_GUID}-L4TDefaultBootMode" -f "$tmp"
+efi_write_zero L4TDefaultBootMode 4 || die "cannot fix L4TDefaultBootMode"
 mode="$(efi_u32 L4TDefaultBootMode)"
 [ "$mode" = 0 ] || die "L4TDefaultBootMode still reads '$mode' after writing 0"
 say "L4TDefaultBootMode is now 0 (GRUB)"

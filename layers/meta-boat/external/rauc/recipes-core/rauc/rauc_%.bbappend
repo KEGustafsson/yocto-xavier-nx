@@ -71,6 +71,52 @@ do_install:prepend() {
 do_install[vardeps] += "BOAT_BUNDLE_COMPATIBLE BOAT_AB_DISK BOAT_AB_PARTNUM_APP_A \
     BOAT_AB_PARTNUM_APP_B BOAT_MIN_BUNDLE_VERSION"
 
+# min-bundle-version, checked as the build parses (kas builds as well as
+# scripts/02-configure-build.sh's): a version RAUC can read, and not above
+# this build's own release - or every board it is flashed on would refuse
+# this build's own bundles.
+def boat_semver_le(a, b):
+    """RAUC's r_semver_less_equal(a, b); ValueError if either does not parse."""
+    def parse(v):
+        v = v.rsplit('+', 1)[0] if '+' in v else v
+        pre = None
+        if '-' in v:
+            v, pre = v.rsplit('-', 1)
+        parts = v.split('.', 2)
+        if not all(p.isdigit() for p in parts):
+            raise ValueError(v)
+        return [int(p) for p in parts] + [0] * (3 - len(parts)), pre
+    (ca, pa), (cb, pb) = parse(a), parse(b)
+    if ca != cb:
+        return ca < cb
+    if pa is None or pb is None:
+        return pb is None
+    fa, fb = pa.split('.') if pa else [], pb.split('.') if pb else []
+    for x, y in zip(fa, fb):
+        if x.isdigit() and y.isdigit():
+            if int(x) != int(y):
+                return int(x) < int(y)
+        elif x.isdigit() or y.isdigit():
+            return x.isdigit()
+        elif x != y:
+            return x < y
+    return len(fa) <= len(fb)
+
+python () {
+    floor = d.getVar('BOAT_MIN_BUNDLE_VERSION') or ''
+    release = d.getVar('BOAT_RELEASE_EFFECTIVE')
+    if not floor:
+        return
+    try:
+        ok = boat_semver_le(floor, release)
+    except ValueError:
+        bb.fatal("BOAT_MIN_BUNDLE_VERSION (%r) and BOAT_RELEASE (%r) must both be versions "
+                 "like 1.4.0 or 2026.10.1-rc.1" % (floor, release))
+    if not ok:
+        bb.fatal("BOAT_MIN_BUNDLE_VERSION (%s) is above this build's BOAT_RELEASE (%s): "
+                 "every board flashed with it would refuse its own bundles" % (floor, release))
+}
+
 # A bench image (BOAT_BENCH = "1") also trusts the bench CA, which signs the
 # fault-injection bundles (boat-bundle-faulty). A boat's image never does:
 # such a bundle is rejected there before anything is written (plan 5.7).

@@ -91,7 +91,6 @@ function pick_slot {
             fi
             if [ "$A_TRY" = 0 ]; then set A_TRY=1; else set A_TRY=2; fi
             set chosen=A
-            set partnum=@PARTNUM_A@
             set committed="$A_COMMITTED"
             break
         elif [ "$SLOT" = B ]; then
@@ -109,7 +108,6 @@ function pick_slot {
             fi
             if [ "$B_TRY" = 0 ]; then set B_TRY=1; else set B_TRY=2; fi
             set chosen=B
-            set partnum=@PARTNUM_B@
             set committed="$B_COMMITTED"
             break
         fi
@@ -133,32 +131,55 @@ if [ -n "$chosen" -a "$envok" = 1 ]; then
     fi
 fi
 
+# Load and boot slot $chosen. Returns only if its kernel or initrd did not
+# load, or did not start.
+function boot_chosen {
+    if [ "$chosen" = A ]; then set partnum=@PARTNUM_A@; else set partnum=@PARTNUM_B@; fi
+    set args="$extra"
+    if [ "$committed" != 1 ]; then set args="$args boat.trial=1"; fi
+    if [ "$BOAT_STAY" = 1 ]; then set args="$args boat.stay=1"; fi
+    echo "boat: booting slot $chosen (${bootdisk},gpt${partnum}) $args"
+    linux (${bootdisk},gpt${partnum})/boot/Image $cbootargs @KERNEL_ARGS@ root=@DISK@p${partnum} rootwait rw rootfstype=ext4 rauc.slot=$chosen panic=10 $args
+    if [ "$?" = 0 ]; then
+        initrd (${bootdisk},gpt${partnum})/boot/initrd
+        if [ "$?" = 0 ]; then
+            boot
+        fi
+    fi
+}
+
 set extra=""
 if [ -z "$chosen" ]; then
-    # Nothing qualifies. Booting the flashed slot uncounted beats stopping on
-    # a boat with nobody at the console; if it fails too, NVIDIA's own counter
-    # ends this in its recovery state after 3 warm boots.
-    echo "boat: no slot is usable - last resort: slot A, uncounted"
-    set chosen=A
-    set partnum=@PARTNUM_A@
-    set committed=1
+    # Nothing qualifies. Booting something uncounted beats stopping on a boat
+    # with nobody at the console. A slot that passed a trial (COMMITTED=1)
+    # and only ran out of attempts comes first, in ORDER: the slot that had
+    # failed or was half way through an install never is. Then any other
+    # slot, the flashed A first. Nothing is written: if none of them boots,
+    # NVIDIA's own counter ends this in its recovery state after 3 warm
+    # boots. boat-commit raises an alert on such a boot (boat.lastresort=1).
+    set candidates=""
+    set seenA=0
+    set seenB=0
+    for SLOT in $ORDER; do
+        if [ "$SLOT" = A -a "$seenA" = 0 -a "$A_COMMITTED" = 1 ]; then set candidates="$candidates A"; set seenA=1; fi
+        if [ "$SLOT" = B -a "$seenB" = 0 -a "$B_COMMITTED" = 1 ]; then set candidates="$candidates B"; set seenB=1; fi
+    done
+    if [ "$seenA" = 0 ]; then set candidates="$candidates A"; fi
+    if [ "$seenB" = 0 ]; then set candidates="$candidates B"; fi
+    echo "boat: no slot is usable - last resort, uncounted, in this order:$candidates"
     set extra="boat.lastresort=1"
+    set committed=1
+    for SLOT in $candidates; do
+        set chosen="$SLOT"
+        boot_chosen
+        echo "boat: last resort: slot $SLOT failed to load"
+    done
+    echo "boat: no slot could be loaded - resetting"
+    sleep 5
+    reboot
 fi
-if [ "$committed" != 1 ]; then set extra="$extra boat.trial=1"; fi
-if [ "$BOAT_STAY" = 1 ]; then set extra="$extra boat.stay=1"; fi
 
-echo "boat: booting slot $chosen (${bootdisk},gpt${partnum}) $extra"
-set loaded=0
-linux (${bootdisk},gpt${partnum})/boot/Image $cbootargs @KERNEL_ARGS@ root=@DISK@p${partnum} rootwait rw rootfstype=ext4 rauc.slot=$chosen panic=10 $extra
-if [ "$?" = 0 ]; then
-    initrd (${bootdisk},gpt${partnum})/boot/initrd
-    if [ "$?" = 0 ]; then
-        set loaded=1
-    fi
-fi
-if [ "$loaded" = 1 ]; then
-    boot
-fi
+boot_chosen
 
 # The kernel or initrd of the chosen slot did not load, or did not start.
 echo "boat: slot $chosen failed to load - marking it bad and resetting"

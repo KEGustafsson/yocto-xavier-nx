@@ -9,7 +9,8 @@ partitions that may hold the boat's only copy of its data. This runs the
 script against a scratch directory standing in for the board: /proc/mounts
 and /proc/swaps, the block devices that exist, and what blkid reports for
 each partition (GPT name, filesystem, label). mkswap, swapon, e2fsck,
-mkfs.ext4, resize2fs, df and sync are stubs that log how they were called,
+mkfs.ext4, resize2fs (which can report that it grew, or fail), df and sync
+are stubs that log how they were called,
 so each case checks exactly what would have been run - and what never was.
 
 Exit status: 0 = all passed, 1 = a case failed.
@@ -41,7 +42,11 @@ def slurp(path):
 class Board:
     def __init__(self, root, names=None, types=None, labels=None, swaps=(),
                  data_mounted=True, blkid_fails=(), e2fsck_rc=0, home=True,
-                 seeded=False):
+                 seeded=False, cmdline="root=x rauc.slot=A", root_part="1",
+                 resize="nothing"):
+        """cmdline: the kernel command line. root_part: the partition /
+        is mounted from. resize: what resize2fs does - "nothing" (already
+        full size), "grew" or "fails"."""
         self.root = root
         for d in ("bin", "proc", "data", "home"):
             os.makedirs(self.path(d), exist_ok=True)
@@ -53,13 +58,14 @@ class Board:
         self.write("devices", "".join("%sp%s\n" % (DISK, n) for n in NAMES))
         self.write("blkid-fails", "".join(n + "\n" for n in blkid_fails))
         self.write("e2fsck-rc", "%d\n" % e2fsck_rc)
-        mounts = ["%sp1 / ext4 rw 0 0" % DISK]
+        mounts = ["%sp%s / ext4 rw 0 0" % (DISK, root_part)]
         if data_mounted:
             mounts.append("%s %s ext4 rw 0 0" % (DATA, self.data))
         self.write("proc/mounts", "".join(m + "\n" for m in mounts))
         self.write("proc/swaps", "Filename Type Size Used Priority\n" +
                    "".join("%s partition 8388604 0 -2\n" % s for s in swaps))
-        self.write("proc/cmdline", "root=x rauc.slot=A\n")
+        self.write("proc/cmdline", cmdline + "\n")
+        self.write("resize", resize + "\n")
         if home:
             os.makedirs(self.path("home/boat/.ssh"))
             self.write("home/boat/.ssh/authorized_keys", "ssh-ed25519 AAAA boat\n")
@@ -102,7 +108,11 @@ exit "$(cat %(r)s/e2fsck-rc)"
 """ % dict(r=r))
         self.write("bin/resize2fs", """#!/bin/sh
 echo "resize2fs $*" >> %(r)s/calls
-echo "The filesystem is already 1000 blocks long.  Nothing to do!"
+case "$(cat %(r)s/resize)" in
+    grew) echo "The filesystem on $1 is now 4000000 (4k) blocks long." ;;
+    fails) echo "resize2fs: Permission denied to resize filesystem"; exit 1 ;;
+    *) echo "The filesystem is already 1000 blocks long.  Nothing to do!" ;;
+esac
 """ % dict(r=r))
         self.write("bin/df", "#!/bin/sh\necho \"Filesystem Size\"\n")
         names = ["blkid", "e2fsck", "resize2fs", "df"]
@@ -221,6 +231,30 @@ CASES = [
     case("format-data: --yes makes a new boat-data ext4", ["format-data", "--yes"], 0,
          board=dict(data_mounted=False),
          calls=["mkfs.ext4 -F -q -b 4096 -m 1 -L boat-data " + DATA]),
+    # --- grow ------------------------------------------------------------
+    case("grow: DATA and slot A's root filesystem are grown", ["grow"], 0,
+         board=dict(resize="grew"),
+         calls=["resize2fs " + DATA, "resize2fs %sp1" % DISK],
+         says=["grew the filesystem on %s" % DATA, r"grew the filesystem on %sp1 \(/\)" % DISK]),
+    case("grow: on slot B it grows APP_b, never APP", ["grow"], 0,
+         board=dict(cmdline="rauc.slot=B", root_part="2"),
+         calls=["resize2fs " + DATA, "resize2fs %sp2" % DISK]),
+    case("grow: a root not mounted from the booted slot is not grown", ["grow"], 0,
+         board=dict(cmdline="rauc.slot=A", root_part="2"),
+         calls=["resize2fs " + DATA], says=["/ is not mounted from %sp1 - not growing it" % DISK]),
+    case("grow: DATA not mounted - only the root is grown", ["grow"], 0,
+         board=dict(data_mounted=False), calls=["resize2fs %sp1" % DISK],
+         says=["is not mounted from %s - not growing it" % DATA]),
+    case("grow: another layout's partition is not grown", ["grow"], 0,
+         board=dict(names=dict(NAMES, **{"1": "UDA", "18": "UDA2"})), calls=[],
+         says=["expected 'APP'", "expected 'DATA'"]),
+    case("grow: booted outside GRUB - the root is not grown", ["grow"], 0,
+         board=dict(cmdline="root=/dev/nvme0n1p1"), calls=["resize2fs " + DATA],
+         says=["booted outside GRUB"]),
+    case("grow: a resize2fs that fails is reported, and the unit fails", ["grow"], 1,
+         board=dict(resize="fails"),
+         calls=["resize2fs " + DATA, "resize2fs %sp1" % DISK],
+         says=["resize2fs %s failed" % DATA, "Permission denied"]),
     # --- status ----------------------------------------------------------
     case("status: a partition blkid cannot probe still gets its line", ["status"], 0,
          board=dict(blkid_fails=["17"]),

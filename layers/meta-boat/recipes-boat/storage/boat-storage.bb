@@ -107,6 +107,17 @@ python () {
     for user in d.getVar('BOAT_AB_HOME_USERS').split():
         if not re.match(r'^[a-z_][a-z0-9_]*$', user):
             bb.fatal("BOAT_AB_HOME_USERS: %r is not a user name this recipe can make a mount unit for" % user)
+    # systemd-journal-flush.service has RequiresMountsFor=/var/log/journal,
+    # which no drop-in can take away (an empty RequiresMountsFor= does not
+    # reset it in systemd v250). With a persistent /var/log that path is the
+    # journal's bind mount from DATA, and sysinit.target would wait for
+    # DATA's fsck - however long a repair takes. With the volatile /var/log
+    # it names no mount, and the drop-in skips the unit until DATA is there.
+    if d.getVar('BOAT_AB_LAYOUT') == '1' and \
+            not bb.utils.to_boolean(d.getVar('VOLATILE_LOG_DIR')):
+        bb.fatal("boat-storage: the A/B layout keeps the journal on DATA and needs "
+                 "VOLATILE_LOG_DIR = \"yes\" (poky's default): with a persistent "
+                 "/var/log every boot would wait for DATA's filesystem check")
 }
 
 SYSTEMD_SERVICE:${PN} = "\

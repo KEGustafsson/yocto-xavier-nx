@@ -13,6 +13,7 @@ what the new slot ends up with.
 Only paths are changed (the running slot's files are read from a scratch
 directory instead of /). Exit status: 0 = all passed, 1 = a case failed.
 """
+import hashlib
 import os
 import re
 import stat
@@ -47,7 +48,11 @@ def put(path, text, mode=None):
 
 
 class Slots:
-    def __init__(self, root, old_shadow=OLD_SHADOW, new_shadow=NEW_SHADOW, fail_copy=None):
+    def __init__(self, root, old_shadow=OLD_SHADOW, new_shadow=NEW_SHADOW, fail_copy=None,
+                 health=None, shipped=None):
+        """health: the running slot's /etc/boat-update/health.conf (None:
+        none). shipped: what its image shipped there, as recorded in
+        conffile-defaults.sha256 (None: an image without the record)."""
         self.root = root
         self.old = os.path.join(root, "old")
         self.new = os.path.join(root, "new")
@@ -65,6 +70,14 @@ class Slots:
         put(self.n("etc/NetworkManager/system-connections/default.nmconnection"), "[eth]\n", 0o600)
         put(self.n("var/lib/bluetooth/README"), "image\n")
         put(self.n("etc/shadow"), new_shadow, 0o640)
+        put(self.n("etc/boat-update/health.conf"), NEW_HEALTH)
+        if health is not None:
+            put(self.o("etc/boat-update/health.conf"), health)
+        if shipped is not None:
+            put(self.o("usr/lib/boat-ab/conffile-defaults.sha256"),
+                "%s  /etc/hostname\n%s  /etc/boat-update/health.conf\n"
+                % (hashlib.sha256(b"image-default\n").hexdigest(),
+                   hashlib.sha256(shipped.encode()).hexdigest()))
         # A cp that fails for one path, the way a full disk or an I/O error
         # would, to see what that leaves behind.
         os.makedirs(os.path.join(root, "bin"))
@@ -74,7 +87,7 @@ exec /bin/cp "$@"
 """ % (fail_copy or "NEVER-MATCHES"), 0o755)
         text = slurp(HOOK)
         # The running slot is read from self.old instead of /.
-        for old, new in (('src="$1"', 'src="%s$1"' % self.old),
+        for old, new in (('\nfrom=""\n', '\nfrom="%s"\n' % self.old),
                          ("for key in /etc/ssh/ssh_host_*; do\n    copy \"$key\"",
                           "for key in %s/etc/ssh/ssh_host_*; do\n    copy \"${key#%s}\""
                           % (self.old, self.old)),
@@ -164,6 +177,22 @@ def failed_copy(s, rc, out):
     return e
 
 
+OLD_HEALTH = 'BOAT_HEALTH_UNITS="sshd.socket"\n'
+NEW_HEALTH = 'BOAT_HEALTH_UNITS="sshd.service"\n'
+EDITED_HEALTH = 'BOAT_HEALTH_UNITS="sshd.socket my-app.service"\n'
+
+
+def health_is(want, says):
+    def check(s, rc, out):
+        e = []
+        expect(e, rc == 0, "exit %d, expected 0" % rc)
+        got = slurp(s.n("etc/boat-update/health.conf"))
+        expect(e, got == want, "health.conf is %r, expected %r" % (got, want))
+        expect(e, re.search(says, out), "output never matched %r" % says)
+        return e
+    return check
+
+
 def untouched(s, rc, out):
     e = []
     expect(e, rc == 0, "exit %d, expected 0" % rc)
@@ -179,6 +208,15 @@ CASES = [
     ("refuses to install a merged shadow without root", dict(new_shadow=NO_ROOT), {}, refused),
     ("a copy that fails leaves the image's own version, and the rest goes on",
      dict(fail_copy="var/lib/bluetooth"), {}, failed_copy),
+    ("a conffile nobody changed takes the new image's version",
+     dict(health=OLD_HEALTH, shipped=OLD_HEALTH), {},
+     health_is(NEW_HEALTH, r"kept the new image's /etc/boat-update/health\.conf")),
+    ("a conffile someone changed is carried over",
+     dict(health=EDITED_HEALTH, shipped=OLD_HEALTH), {},
+     health_is(EDITED_HEALTH, r"carried over \S*/etc/boat-update/health\.conf")),
+    ("a running image without the record carries every conffile, as before",
+     dict(health=OLD_HEALTH), {},
+     health_is(OLD_HEALTH, r"carried over \S*/etc/boat-update/health\.conf")),
     ("ignores any other hook call", {}, dict(arg="install-check"), untouched),
     ("ignores a slot that is not the rootfs", {}, dict(slot_class="appfs"), untouched),
 ]
