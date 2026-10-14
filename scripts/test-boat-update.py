@@ -297,6 +297,14 @@ def main():
         # systemd: what boat-update asks of it is logged, nothing is run.
         # The install unit "runs" by leaving unit-result as its Result.
         write(board + "/unit-result", "success\n")
+        # rauc.service's cgroup is this test's own, so the stub RAUC's
+        # streaming requests (curl, run from here) come from "rauc.service".
+        own = {}
+        for line in open("/proc/self/cgroup").read().splitlines():
+            _, controllers, cgpath = line.split(":", 2)
+            own.setdefault(controllers or "unified", cgpath)
+        own_cgroup = own.get("unified") or own.get("name=systemd") or "/"
+        write(board + "/rauc-cgroup", own_cgroup + "\n")
         write(board + "/rauc-journal", "")
         write(binp + "/systemctl", """#!/bin/sh
 echo "systemctl $*" >> %(b)s/systemd.log
@@ -306,6 +314,7 @@ case "$1" in
     show)
         case "$*" in
             *ActiveState*) echo "$state" ;;
+            *ControlGroup*) cat %(b)s/rauc-cgroup ;;
             *) cat %(b)s/unit-result ;;
         esac ;;
     *) exit 0 ;;
@@ -841,6 +850,12 @@ esac
         bundle_path = urllib.parse.urlsplit(want_url).path
         check("the relay serves nothing without this stream's token - the bundle's own path is not enough",
               relay_get("bytes=0-3", path=bundle_path) == 403)
+        write(board + "/rauc-cgroup", "/system.slice/rauc.service\n")
+        got = relay_get("bytes=0-3")
+        write(board + "/rauc-cgroup", own_cgroup + "\n")
+        check("... nor a process outside rauc.service, even with RAUC's uid and the token "
+              "(root in a container sharing the host's PID and network namespaces)",
+              got == 403 and relay_get("bytes=0-3") == 206, str(got))
         check("the relay refuses a range that ends before it starts (it would read the whole bundle)",
               relay_get("bytes=1000-0") == 400)
         uids, bu.relay_uids = bu.relay_uids, lambda: {0x7ffffff0}

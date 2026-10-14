@@ -87,6 +87,7 @@ PATHS = {
     "expect": "/run/boat-update/expect",
     "clock_retry": "/run/boat-update/clock-retry",
     "net_tcp": "/proc/net/tcp",
+    "proc": "/proc",
 }
 
 DEFAULTS = {
@@ -1292,17 +1293,48 @@ def relay_uids():
     return uids
 
 
-def tcp_peer_uid(peer, local):
-    """The uid that owns the local TCP socket at peer (ip, port), connected
-    to local (ip, port) - from /proc/net/tcp; None if it is not there."""
+def tcp_peer(peer, local):
+    """(uid, socket inode) of the local TCP socket at peer (ip, port),
+    connected to local (ip, port) - from /proc/net/tcp; (None, None) if it
+    is not there."""
     def enc(addr):
         return "%s:%04X" % ("".join("%02X" % int(b) for b in reversed(addr[0].split("."))), addr[1])
     want = (enc(peer), enc(local))
     for line in read(path("net_tcp")).splitlines()[1:]:
         f = line.split()
-        if len(f) > 7 and (f[1], f[2]) == want:
-            return int(f[7])
-    return None
+        if len(f) > 9 and (f[1], f[2]) == want:
+            return int(f[7]), f[9]
+    return None, None
+
+
+def socket_cgroups(inode):
+    """The cgroup paths (/proc/<pid>/cgroup) of the process holding socket
+    inode; an empty set if no process does. A process is found by its open
+    files, which only root may list for other users' processes."""
+    target = "socket:[%s]" % inode
+    with contextlib.suppress(OSError):
+        for pid in os.listdir(path("proc")):
+            fd_dir = os.path.join(path("proc"), pid, "fd")
+            if not pid.isdigit():
+                continue
+            try:
+                fds = os.listdir(fd_dir)
+            except OSError:
+                continue
+            for fd in fds:
+                with contextlib.suppress(OSError):
+                    if os.readlink(os.path.join(fd_dir, fd)) == target:
+                        return {line.split(":", 2)[2] for line in
+                                read(os.path.join(path("proc"), pid, "cgroup")).splitlines()
+                                if line.count(":") >= 2}
+    return set()
+
+
+def rauc_cgroup():
+    """rauc.service's cgroup, as systemd names it; "" when it is not running."""
+    with contextlib.suppress(FileNotFoundError):
+        return run(["systemctl", "show", "-p", "ControlGroup", "--value", "rauc.service"]).stdout.strip()
+    return ""
 
 
 def start_relay(conf, url, dev):
@@ -1318,13 +1350,16 @@ def start_relay(conf, url, dev):
     its first request, so bytes from elsewhere in the bundle would be
     written at the offset it asked for. Only RAUC's streaming client (and
     root) may use it, and only for a range of at most RELAY_MAX bytes, a
-    few at a time. A uid alone does not say it is this install's RAUC - a
-    host-networked container can run as root - so the URL also carries a
-    token made for this stream, which only the 'rauc install' command line
-    and RAUC itself see; a request without it gets nothing, not even a
-    relay slot. Returns (server, the URL to hand RAUC)."""
+    few at a time. A uid alone does not say it is RAUC - a host-networked
+    container can run as root - so the socket must also belong to a process
+    in rauc.service's own cgroup (where RAUC runs its streaming client),
+    which no container's process is, whatever namespaces it shares with the
+    host. And the URL carries a token made for this stream. A request that
+    fails any of these gets nothing, not even a relay slot. Returns
+    (server, the URL to hand RAUC)."""
     u = urllib.parse.urlsplit(url)
     expected = ("/%s%s" % (secrets.token_urlsafe(18), u.path)).encode()
+    rauc = []                   # rauc.service's cgroup, read at the first request: RAUC runs by then
     ctx = ssl.create_default_context(cafile=conf["BOAT_UPDATE_SERVER_CA"] or None)
     if conf["BOAT_UPDATE_CLIENT_CERT"]:
         ctx.load_cert_chain(conf["BOAT_UPDATE_CLIENT_CERT"], conf["BOAT_UPDATE_CLIENT_KEY"] or None)
@@ -1343,10 +1378,22 @@ def start_relay(conf, url, dev):
             self.end_headers()
             warn("stream relay: %s" % why)
 
+        def from_rauc(self):
+            """Whether this connection's socket is held by a process of
+            rauc.service - found once per connection."""
+            if getattr(self, "rauc_peer", None) is None:
+                uid, inode = tcp_peer(self.client_address, self.server.server_address)
+                if not rauc:
+                    rauc.append(rauc_cgroup())
+                self.rauc_peer = (uid in relay_uids() and bool(rauc[0])
+                                  and rauc[0] in socket_cgroups(inode), uid)
+            return self.rauc_peer
+
         def do_GET(self):
-            uid = tcp_peer_uid(self.client_address, self.server.server_address)
-            if uid not in relay_uids():
-                return self.refuse(403, "a request from uid %s, which is not RAUC's streaming client - refused" % uid)
+            ok, uid = self.from_rauc()
+            if not ok:
+                return self.refuse(403, "a request from uid %s that is not RAUC's streaming client "
+                                        "(rauc.service) - refused" % uid)
             if not hmac.compare_digest(self.path.encode("latin-1", "replace"), expected):
                 return self.refuse(403, "a request without this stream's token (uid %s) - refused" % uid)
             m = RANGE_RE.match(self.headers.get("Range", ""))

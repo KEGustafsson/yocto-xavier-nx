@@ -1041,12 +1041,14 @@ until the bundle is ready or the offer goes away (tests 34, 38).
     only on its first request. A link that goes away fails it too. RAUC
     gets no TLS options, so the key stays root-only and nothing
     credential-bearing is on any command line. The relay serves only RAUC's
-    streaming client (its `rauc-stream` user, or root - from
-    `/proc/net/tcp`), only on a URL carrying a token made for this stream
-    (a uid alone is not RAUC: a host-networked container can run as root,
-    and cannot see the `rauc install` command line), only ranges up to
-    64 MiB that end after they start, and a few at a time. A request
-    without the token gets no relay slot. A VPN default route is refused without
+    streaming client: a socket held by its `rauc-stream` user (or root),
+    from `/proc/net/tcp`, *and* by a process in `rauc.service`'s own
+    cgroup, from the process's open files - a uid alone is not RAUC, since
+    a host-networked container can run as root, and no container's process
+    is in that cgroup, whatever namespaces it shares with the host. The URL
+    also carries a token made for this stream. It serves only ranges up to
+    64 MiB that end after they start, a few at a time; a request that fails
+    any check gets no relay slot. A VPN default route is refused without
     `--allow-metered`: the tunnel follows whatever link carries it.
   - The bundle URL is the one from the verified index, on the channel the
     offer was checked on. A preflight request for the first byte refuses a
@@ -1786,7 +1788,7 @@ The update client and host tooling findings:
 | the boot that committed a trial refused every OTA verb and install until the next reboot (`boat.trial=1` stays on the command line) | "on trial" is one rule everywhere: booted as one and not yet committed this boot, or not committed in `grubenv`; a last-resort boot may install (5.10) |
 | a failed slot write is recorded by RAUC with the new version, and a reflash leaves an old slot B in place: either way the release counted as "already in the other slot", which `rollback` then refused | the other slot's release counts only if a rollback would boot it (5.10) |
 | a server that ignores Range sent a bundle larger than one window into an endless download loop | one window for the whole file, counted as a re-fetch (5.10) |
-| the stream relay served any local process with the client certificate, and a reversed range made it read the whole bundle into memory | RAUC's streaming user and root only, on a URL with a per-stream token (a root process in a host-networked container is not RAUC - CodeRabbit), valid ranges only, a few at a time (5.10) |
+| the stream relay served any local process with the client certificate, and a reversed range made it read the whole bundle into memory | RAUC's streaming user and root only, and only from a process in `rauc.service`'s cgroup (a root process in a container is not RAUC, even one sharing the host's PID and network namespaces - CodeRabbit), on a URL with a per-stream token, valid ranges only, a few at a time (5.10) |
 | `publish-update.sh` published the index when the bundle copy failed, and published any squashfs | every step stops the publish; the copy is checked, and a bundle given as a symlink (the deploy directory's link, which rsync would skip) is published as the file it points at; the bundle's signature, CA, key usage and verity format are checked first, and the index is made from the signed manifest |
 | a streamed install checked the release only after RAUC had activated the slot | the pre-install handler refuses another release before anything is written (5.10) |
 | `boat-update` did not depend on what `http.server` imports, or on chrony | `python3-netserver`, `python3-html`; chrony recommended, `timedatectl` when it is missing; the health gate fails a trial whose `boat-update` does not start |
