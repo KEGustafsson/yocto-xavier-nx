@@ -33,13 +33,26 @@ itself only behave like the real thing on the real thing.
    (`boat-xavier-nx-bench`), so nothing it builds - not even a good bundle,
    whose rootfs trusts the bench CA - installs on a boat, and
    `publish-update.sh` sends it to the `bench` channel only. A bench board
-   goes back to boat images by reflashing. The commands below run in a
-   subshell, so `BOAT_BENCH` does not stay set for a later boat build:
+   goes back to boat images by reflashing.
+
+   **The build directory stays a bench one.** `02-configure-build.sh` writes
+   `BOAT_BENCH` (and `BOAT_FAULT` and `BOAT_RELEASE`) into
+   `yocto/build/conf/local.conf`, which is what bitbake reads, so every
+   build there is a bench build until `02-configure-build.sh` runs again
+   without them. `03-build.sh` refuses to build in it unless `BOAT_BENCH=1`
+   is set, so a boat build cannot become a bench image by accident: before
+   one, run `scripts/02-configure-build.sh` again (or give the bench its own
+   `BUILD_DIR`).
+
+   Each block below runs in a subshell with `set -e`, so a step that fails
+   stops it - nothing flashes or copies what an earlier build left behind:
 
    ```bash
    (
+     set -e
      export AB_LAYOUT=1 BOAT_BENCH=1 BOAT_RELEASE=1.0.0 IMAGE=boat-image
-     scripts/02-configure-build.sh && scripts/03-build.sh
+     scripts/02-configure-build.sh
+     scripts/03-build.sh
      scripts/04-unpack-tegraflash.sh
      scripts/05-flash-nvme.sh            # erases the SSD
    )
@@ -51,18 +64,25 @@ itself only behave like the real thing on the real thing.
 
    ```bash
    (
+     set -e
      export AB_LAYOUT=1 BOAT_BENCH=1
      source scripts/env.sh                # BUILD_DIR, MACHINE
      deploy="${BUILD_DIR}/tmp/deploy/images/${MACHINE}"
      mkdir -p ~/bench
-     BOAT_RELEASE=1.0.1 scripts/02-configure-build.sh && scripts/03-build.sh boat-bundle
+     BOAT_RELEASE=1.0.1 scripts/02-configure-build.sh
+     scripts/03-build.sh boat-bundle
      cp -L "$deploy/boat-bundle-${MACHINE}.raucb" ~/bench/good.raucb
      for f in panic emergency tier2 hang; do
-       BOAT_FAULT=$f scripts/02-configure-build.sh && scripts/03-build.sh boat-bundle-faulty
+       BOAT_RELEASE=1.0.2 BOAT_FAULT=$f scripts/02-configure-build.sh
+       scripts/03-build.sh boat-bundle-faulty
        cp -L "$deploy/boat-bundle-faulty-$f-${MACHINE}.raucb" ~/bench/faulty-$f.raucb
      done
    )
    ```
+
+   (`source scripts/env.sh` sets `BOAT_RELEASE` to empty, so each configure
+   names its release; one left empty would build `0.0.0-dev`, which a
+   `BOAT_MIN_BUNDLE_VERSION` floor refuses.)
 
    A fault bundle installs normally, then fails its **trial** boot in one
    way:
@@ -75,11 +95,25 @@ itself only behave like the real thing on the real thing.
    | `hang` | `boat-commit` never finishes | 18 |
 
 4. **A channel** for the OTA rows. Use any local HTTPS server with Range
-   support, such as Caddy, serving the `bench` channel. Check it with
-   `scripts/ab-phase0-capture.sh --channel-url …`, publish to it with
-   `scripts/publish-update.sh bench <bundle>`, and set
-   `BOAT_UPDATE_CHANNEL=bench` in the board's
-   `/data/boat-update/channel.conf`.
+   support, such as Caddy, serving the `bench` channel, and publish to it
+   with `scripts/publish-update.sh bench <bundle>`. In the board's
+   `/data/boat-update/channel.conf`, set `BOAT_UPDATE_URL` to it and
+   `BOAT_UPDATE_CHANNEL=bench`.
+
+   A server on the bench LAN usually has a certificate from a CA of its
+   own - Caddy's internal CA, which Caddy uses for an IP address, a
+   `.internal` or `.home.arpa` name, or with `tls internal`: its root is
+   `pki/authorities/local/root.crt` in Caddy's data directory.
+   The board does not trust that CA until it is installed as
+   `/data/boat-update/server-ca.pem` (docs/07, "The channel's own
+   certificate"). Do not add it to the running slot's `/etc/ssl` instead:
+   the first good update boots the other slot, a fresh image without it,
+   and every check from then on fails.
+
+   Then check from the board: `sudo boat-update check` must answer
+   without an error. `scripts/ab-phase0-capture.sh --channel-url …` checks
+   the server's Range support from the build host, with the host's trust
+   store - it does not show that the board trusts the certificate.
 5. **Optional: a USB relay on the barrel jack** for the power-cut rows and
    the soak. Its off-then-on command goes in `BOAT_SOAK_POWER_CUT_CMD`; it
    must return once power is back on.
@@ -115,27 +149,30 @@ scripts/ab-soak.sh --good ~/bench/good.raucb \
 `bench` channel. A board takes only a release newer than the one it runs
 (and never one that failed a trial), so every cycle needs its own bundle,
 with versions growing in cycle order and above anything the board has run.
-Build them once, named so that name order is cycle order:
+Build a set, named so that name order is cycle order:
 
 ```bash
 (
+  set -e
   export AB_LAYOUT=1 BOAT_BENCH=1
   source scripts/env.sh
   deploy="${BUILD_DIR}/tmp/deploy/images/${MACHINE}"
-  mkdir -p ~/bench/ota
+  minor=1 out=~/bench/ota               # the --stream run: minor=2 out=~/bench/ota-stream
+  mkdir -p "$out"
   faults=(panic emergency tier2 hang)
   for i in $(seq 1 25); do
     g=$((2 * i - 1)); f=$((2 * i)); kind=${faults[$(( (i - 1) % 4 ))]}
-    BOAT_RELEASE=1.1.$g scripts/02-configure-build.sh && scripts/03-build.sh boat-bundle
-    cp -L "$deploy/boat-bundle-${MACHINE}.raucb" ~/bench/ota/$(printf %02d $g)-good.raucb
-    BOAT_RELEASE=1.1.$f BOAT_FAULT=$kind scripts/02-configure-build.sh \
-      && scripts/03-build.sh boat-bundle-faulty
+    BOAT_RELEASE=1.$minor.$g scripts/02-configure-build.sh
+    scripts/03-build.sh boat-bundle
+    cp -L "$deploy/boat-bundle-${MACHINE}.raucb" "$out/$(printf %02d $g)-good.raucb"
+    BOAT_RELEASE=1.$minor.$f BOAT_FAULT=$kind scripts/02-configure-build.sh
+    scripts/03-build.sh boat-bundle-faulty
     cp -L "$deploy/boat-bundle-faulty-$kind-${MACHINE}.raucb" \
-      ~/bench/ota/$(printf %02d $f)-faulty-$kind.raucb
+      "$out/$(printf %02d $f)-faulty-$kind.raucb"
   done
 )
 BOAT_PUBLISH_DEST=<the bench channel root> \
-  scripts/ab-soak.sh --ota ~/bench/ota [--stream] [--power-cut-every 5]
+  scripts/ab-soak.sh --ota ~/bench/ota [--power-cut-every 5]
 ```
 
 Cycle N publishes the Nth bundle to `bench` with `publish-update.sh`; the
@@ -143,7 +180,10 @@ board then runs `boat-update check` and `download`, and then `install
 --reboot` (with `--stream`: `check`, then `install --stream --reboot`). A
 power cut is timed from the install, so it never lands in the download. A
 name with `-faulty` in it is a faulty bundle. A run with `--stream` is a
-third result of its own.
+third result of its own, and it needs **a set of its own**: after the first
+run the board has run, or failed, every `1.1.x`, so it would take none of
+them again. Build the second set with `minor=2 out=~/bench/ota-stream`,
+then run `scripts/ab-soak.sh --ota ~/bench/ota-stream --stream`.
 
 ## The matrix, row by row
 
@@ -179,7 +219,7 @@ manual step on the bench board. The expected results are the plan's.
 | 25 | bench | as `boat`: `busctl call de.pengutronix.rauc / de.pengutronix.rauc.Installer InstallBundle sa{sv} /x 0` is denied; also from a container running as a non-root user with `/run/dbus` mounted (a container running as root is root to D-Bus, plan 5.7) |
 | 26 | bench | `boat-update rollback` after a commit: the other slot boots and commits |
 | 27 | bench | `boat-sleep` (with and without `--force`) and the UDP sleep listener during an install and during a trial: refused. Then, committed, with the helm session logged in: the listener's sleep works; with an app holding a sleep inhibitor: refused, and the lock is listed |
-| 28 | bench | both slots' kernels corrupted: A, A, B, then UEFI stop; the documented recovery (docs/07, Phase 0 runbook) works |
+| 28 | bench | both slots' kernels corrupted: A, A, B, then UEFI stop; the USB reflash in docs/07 recovers it. Stays open until the Phase 0 runbook (2.6) has found the UEFI-menu path and docs/06 and docs/07 describe it, and that path works too |
 | 29 | bench | before an update, note SSH host key fingerprint, `/home/root/.ssh`, `/home/boat`, Wi-Fi, a BT pairing, hostname, `boat-sleep.key`, passwords; compare after the update and after a rollback |
 | 30 | bench | SC7 sleep + WoL wake on slot A and on slot B |
 | 31-33 | auto + bench | publish to `bench`: background download, "ready", nothing installs by itself; pull the cable / sleep / reboot mid-download; serve a corrupted file |

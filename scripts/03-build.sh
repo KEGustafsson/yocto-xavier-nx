@@ -14,6 +14,18 @@ source "${HERE}/env.sh"
 TARGET="${1:-${IMAGE}}"
 [[ -f "${BUILD_DIR}/conf/local.conf" ]] || die "build not configured; run scripts/02-configure-build.sh first"
 
+# bitbake takes BOAT_BENCH from local.conf, where 02-configure-build.sh
+# wrote it, not from this shell - so a build directory configured for the
+# bench builds bench images until it is configured again. A bench image on
+# a boat trusts the bench CA and refuses every stable update
+# (docs/plans/ab-validation.md). Say so instead of building one.
+if grep -q '^BOAT_BENCH = "1"' "${BUILD_DIR}/conf/local.conf" && [[ "${BOAT_BENCH}" != 1 ]]; then
+  die "${BUILD_DIR}/conf/local.conf is configured for a bench image (BOAT_BENCH = \"1\"). For a boat build, run scripts/02-configure-build.sh again first; for a bench build, export BOAT_BENCH=1."
+fi
+if [[ "${BOAT_BENCH}" == 1 ]] && ! grep -q '^BOAT_BENCH = "1"' "${BUILD_DIR}/conf/local.conf"; then
+  die "BOAT_BENCH=1, but ${BUILD_DIR}/conf/local.conf is not configured for a bench image - run scripts/02-configure-build.sh with AB_LAYOUT=1 BOAT_BENCH=1 first (a bench image is an A/B one)"
+fi
+
 [[ "$(id -u)" -ne 0 ]] || die "do NOT run bitbake as root"
 
 log "Building '${TARGET}' for MACHINE=${MACHINE} (branch ${YOCTO_BRANCH})"

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Publish an A/B update bundle to an update channel (docs/07-updates.md).
 #
-#   scripts/publish-update.sh testing  <bundle.raucb>   # the bench
-#   scripts/publish-update.sh stable   <bundle.raucb>   # the boat
+#   scripts/publish-update.sh testing  <bundle.raucb>   # a test board, on a boat image
+#   scripts/publish-update.sh stable   <bundle.raucb>   # the boats
+#   scripts/publish-update.sh bench    <bundle.raucb>   # a BOAT_BENCH build, for the bench
 #   BOAT_PUBLISH_DEST=/srv/www/boat-xavier-nx scripts/publish-update.sh ...
 #   BOAT_PUBLISH_DEST=user@host:/srv/www/boat-xavier-nx scripts/publish-update.sh ...
 #
@@ -26,7 +27,8 @@
 #   --notes FILE   release notes shown by `boat-update status`
 #
 # Promote a release from testing to stable by publishing the same bundle to
-# stable: names are content-addressed, so the file is never renamed.
+# stable, once it has committed on the testing board: names are
+# content-addressed, so the file is never renamed.
 #
 # A bundle from a BOAT_BENCH build (its compatible ends in -bench) goes to
 # the 'bench' channel only, and nothing else does: its rootfs trusts the

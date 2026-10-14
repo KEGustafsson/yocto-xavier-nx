@@ -25,6 +25,19 @@ source "${HERE}/env.sh"
 # inside NVIDIA's tooling with the board already in recovery mode.
 [[ -e "${FLASH_DIR}/.boat-unpack-complete" ]] \
   || die "${FLASH_DIR} is not a complete unpack - re-run scripts/04-unpack-tegraflash.sh"
+# The unpack must have the layout this configuration builds. Nothing else
+# ties it to the current build: an older single-slot unpack, flashed after
+# switching AB_LAYOUT on, erases the SSD - /data included - and writes the
+# old image back. The A/B layout is the one with a second rootfs slot.
+if [[ -e "${FLASH_DIR}/external-flash.xml.in" ]]; then
+  if grep -q 'name="APP_b"' "${FLASH_DIR}/external-flash.xml.in"; then unpacked_ab=1; else unpacked_ab=0; fi
+  if [[ "${unpacked_ab}" != "${AB_LAYOUT}" ]]; then
+    if [[ "${AB_LAYOUT}" == 1 ]]; then
+      die "AB_LAYOUT=1, but ${FLASH_DIR} holds a single-slot image - unpack the A/B one: scripts/04-unpack-tegraflash.sh boat-image"
+    fi
+    die "${FLASH_DIR} holds an A/B image, but AB_LAYOUT is not 1 - export AB_LAYOUT=1 to flash it, or unpack the image you meant"
+  fi
+fi
 cd "${FLASH_DIR}"
 
 if [[ "${1:-}" == "--host-drive" ]]; then
