@@ -725,8 +725,8 @@ The order matches RAUC 1.13's `install.c`:
     (`/usr/lib/boat-ab/conffile-defaults.sha256`); a file that still
     matches is left as the new image has it, so a release can change its
     defaults (a renamed unit in the health gate's list, a `daemon.json` a
-    new Docker needs). One the image shipped and someone deleted stays
-    deleted. An image from before the record carries them all;
+    new Docker needs). A file shipped in the image and later deleted
+    stays deleted. An image from before the record carries them all;
   - the password hash fields of `root` and `boat`, merged (**D5**);
   - `/etc/nv_boot_control.conf`.
   - Not on this list: the OTA channel configuration. Its defaults ship in
