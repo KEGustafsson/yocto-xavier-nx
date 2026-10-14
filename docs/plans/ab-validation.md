@@ -24,7 +24,10 @@ itself only behave like the real thing on the real thing.
 
 1. **Keys.** Run `scripts/gen-update-keys.sh` for the fleet keys if they do
    not exist yet. Then run `scripts/gen-update-keys.sh --bench` for a
-   **separate** bench CA, in `~/.local/share/boat-update-bench-keys`.
+   **separate** bench CA, in `~/.local/share/boat-update-bench-keys`. A
+   bench build signs every bundle - good and faulty - with the bench keys,
+   so the fleet's bundle-signing key need not be on the bench host; the
+   fleet CA certificate is, for the image's keyring.
 2. **A bench image.** It trusts both CAs, so it accepts fault bundles.
    A `BOAT_BENCH` build also gets its own RAUC `compatible`
    (`boat-xavier-nx-bench`), so nothing it builds - not even a good bundle,
@@ -170,10 +173,10 @@ manual step on the bench board. The expected results are the plan's.
 | 21 | bench | `dd if=/dev/zero of=/boot/efi/EFI/BOOT/grubenv bs=1k count=1`, reboot: boots, "grubenv was torn and rebuilt"; install works |
 | 22 | bench | `efivar -w` `L4TDefaultBootMode` = 1, reboot: "booted outside GRUB", install refused; next boot through GRUB |
 | 23 | bench | rename `grubaa64.efi`: DIRECT boots A, flagged |
-| 24 | bench | a JetPack SD card in the module slot plus a USB stick labelled `APP`/`esp`: everything still resolves to the NVMe |
+| 24 | bench | a JetPack SD card in the module slot plus a JetPack-flashed (UEFI-bootable) USB stick, both in across a reboot: the NVMe still boots through GRUB, and everything resolves to it. Also on a board whose UEFI variables predate the image: note `NewDeviceHierarchy` and `DefaultBootPriority` (`efivar -l`) before and after |
 | 25 | bench | as `boat`: `busctl call de.pengutronix.rauc / de.pengutronix.rauc.Installer InstallBundle sa{sv} /x 0` is denied; also from a container running as a non-root user with `/run/dbus` mounted (a container running as root is root to D-Bus, plan 5.7) |
 | 26 | bench | `boat-update rollback` after a commit: the other slot boots and commits |
-| 27 | bench | `boat-sleep` during an install and during a trial: refused (sleep inhibitor) |
+| 27 | bench | `boat-sleep` (with and without `--force`) and the UDP sleep listener during an install and during a trial: refused. Then, committed, with the helm session logged in: the listener's sleep works; with an app holding a sleep inhibitor: refused, and the lock is listed |
 | 28 | bench | both slots' kernels corrupted: A, A, B, then UEFI stop; the documented recovery (docs/07, Phase 0 runbook) works |
 | 29 | bench | before an update, note SSH host key fingerprint, `/home/root/.ssh`, `/home/boat`, Wi-Fi, a BT pairing, hostname, `boat-sleep.key`, passwords; compare after the update and after a rollback |
 | 30 | bench | SC7 sleep + WoL wake on slot A and on slot B |
@@ -190,6 +193,8 @@ manual step on the bench board. The expected results are the plan's.
 | 48 | bench | `boat-update download` while the timer's run is downloading: the second waits on the lock |
 | 49 | bench | sleep/resume and link up/down: a check on each, at most one per 30 minutes |
 | 50 | auto + bench | during a trial: `check`/`download` refused until commit |
+| 53 | bench | during a trial, power off from the helm (then the power key, in the retried trial): the first boot after it tries the trial again; the second time the board falls back |
+| 54 | auto + bench | rename `grub.cfg` on the ESP: GRUB resets, never a prompt (`scripts/test-grub-ab.py` covers it in `grub-emu`), until NVIDIA's counter stops it in UEFI as in row 28; reflash to recover |
 
 ## Results
 

@@ -113,7 +113,12 @@ IMAGE_INSTALL:remove = "${@'boat-grow-rootfs' if d.getVar('BOAT_AB_LAYOUT') == '
 # Give the rootfs headroom for Docker's local image cache, logs, and compose
 # state before /data (docs/05 "Reliability") is provisioned and dockerd's
 # data-root actually moves there. Bump if `docker pull` starts failing ENOSPC.
-IMAGE_ROOTFS_EXTRA_SPACE = "4194304"
+# Not on the A/B layout: Docker keeps everything on /data there, and the
+# slot's filesystem is grown into its partition on the board (boat-storage,
+# RAUC's resize=true), so 512 MiB will do. 4 GiB would cap what a 16 GiB
+# slot can hold at about 9 GiB ((16 GiB - extra) / 1.3 overhead, against
+# IMAGE_ROOTFS_MAXSIZE) and add 4 GiB of zeros to every flash.
+IMAGE_ROOTFS_EXTRA_SPACE = "${@'524288' if d.getVar('BOAT_AB_LAYOUT') == '1' else '4194304'}"
 
 # What this image cannot be built without. DISTRO_FEATURES is evaluated
 # per-recipe at parse time against the global distro config, so an
@@ -256,3 +261,19 @@ mask_unused_networkd() {
     done
 }
 ROOTFS_POSTPROCESS_COMMAND += "mask_unused_networkd; "
+
+# A/B updates carry this board's configuration over into the new slot, but
+# only what someone actually changed (boat-bundle-hook): a file still as the
+# image shipped it takes the new release's version, so a release can change
+# its defaults. This records what the image shipped - the sha256 of every
+# file in /etc - for the hook to compare against. Last, after the other
+# post-processing commands have changed /etc.
+boat_record_conffile_defaults() {
+    install -d ${IMAGE_ROOTFS}${nonarch_libdir}/boat-ab
+    ( cd ${IMAGE_ROOTFS} && find etc -type f -print0 | LC_ALL=C sort -z \
+        | xargs -0 -r sha256sum | sed -e 's|  etc/|  /etc/|' ) \
+        > ${IMAGE_ROOTFS}${nonarch_libdir}/boat-ab/conffile-defaults.sha256
+    grep -q '  /etc/' ${IMAGE_ROOTFS}${nonarch_libdir}/boat-ab/conffile-defaults.sha256 \
+        || bbfatal "recorded no /etc file hashes"
+}
+ROOTFS_POSTPROCESS_COMMAND:append = "${@' boat_record_conffile_defaults; ' if d.getVar('BOAT_AB_LAYOUT') == '1' else ''}"

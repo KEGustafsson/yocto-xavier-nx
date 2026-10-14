@@ -7,7 +7,12 @@
 # boots from grubenv.bak or its built-in defaults, but cannot count attempts
 # until the file is whole again. This runs on every boot that reaches Linux:
 #
-#   valid grubenv -> keep grubenv.bak as a copy of it (last known good)
+#   valid grubenv -> on a committed boot, give the slot back its attempts
+#                    (TRY=0): it did boot, and doing it here - as soon as
+#                    the ESP is mounted, not minutes later in boat-commit -
+#                    keeps a run of power cuts during start-up from using up
+#                    a good slot; then keep grubenv.bak as a copy of
+#                    grubenv (last known good)
 #   torn grubenv  -> rebuild it from what this boot itself proves:
 #     - the slot that booted works, and stays on trial if it was booted as
 #       one (boat.trial=1), so its health gate still decides about it;
@@ -19,9 +24,10 @@
 #       unusable until the next update writes it. grubenv.bak is never
 #       trusted for it: it predates whatever happened since this boot began.
 #
-# A rebuild is reported in /run/boat-ab/grubenv-repaired and in the journal.
-# Nothing is touched when the board came up outside GRUB, or when the disk
-# does not look like the layout this image was built for.
+# A rebuild is reported in /run/boat-ab/grubenv-repaired and in the journal;
+# a failure, as an alert (/run/boat-ab/health-alert). Nothing is touched
+# when the board came up outside GRUB, or when the disk does not look like
+# the layout this image was built for.
 #
 # See docs/plans/ab-os-updates.md section 5.3 ("grubenv integrity").
 set -eu
@@ -30,11 +36,25 @@ SELF=boat-grubenv-guard
 . /usr/lib/boat-ab/lib.sh
 
 mkdir -p "$BOAT_AB_RUNDIR"
+trap '[ "$?" = 0 ] || alert "boat-grubenv-guard failed - the A/B boot state may be wrong (journalctl -b -u boat-grubenv-guard)"' EXIT
 mountpoint -q "$BOAT_AB_ESP_MOUNT" || die "the ESP is not mounted at $BOAT_AB_ESP_MOUNT"
 check_layout || die "the disk does not match this image's A/B layout - not touching grubenv"
 
+ab_lock || die "could not take the A/B lock - another grubenv writer is stuck; nothing written"
 if grubenv_valid "$BOAT_AB_GRUBENV"; then
-    grubenv_sync_bak
+    slot="$(booted_slot)"
+    # Committed, and booted as such - not a trial, not GRUB's last resort
+    # (boat-commit decides about that one).
+    if [ -n "$slot" ] && ! booted_on_trial && ! booted_lastresort \
+            && [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_COMMITTED")" = 1 ] \
+            && [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_TRY")" != 0 ]; then
+        if grubenv_set "${slot}_TRY=0"; then
+            say "slot $slot booted: its attempt count is reset"
+        else
+            alert "could not reset slot $slot's attempt count (the ESP will not take the write) - one more failed boot, or two reboots of any kind while this lasts, hands the board to the other slot"
+        fi
+    fi
+    grubenv_sync_bak || alert "could not copy grubenv to grubenv.bak - GRUB's fallback copy is out of date (the ESP will not take the write)"
     exit 0
 fi
 

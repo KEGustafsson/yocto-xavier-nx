@@ -21,7 +21,10 @@ from GRUB's own $root.
 Only the five commands that would leave the emulator or the machine are
 replaced, by stubs that print what they were asked to do: linux, initrd,
 boot, reboot and sleep. Everything else is the file the build ships, with
-the build's own placeholders filled in.
+the build's own placeholders filled in. Some scenarios start one step
+earlier, from the config built into grubaa64.efi
+(layers/meta-boat/recipes-bsp/grub/files/cfg), which runs grub.cfg and
+resets when grub.cfg is missing or truncated.
 
 Exit status: 0 = all scenarios passed, 1 = a scenario failed, 77 = grub-emu
 (or another tool) is missing - the automake "skipped" code, which
@@ -37,6 +40,9 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG_IN = os.path.join(HERE, "..", "layers", "meta-boat", "recipes-bsp",
                       "boat-grub-esp", "files", "grub.cfg.in")
+# The config built into grubaa64.efi, which runs grub.cfg.
+EMBEDDED_CFG = os.path.join(HERE, "..", "layers", "meta-boat", "recipes-bsp",
+                            "grub", "files", "cfg")
 
 DISK = "/dev/nvme0n1"
 PART = {"A": 1, "B": 2}
@@ -49,6 +55,9 @@ FLASHED = dict(ORDER="A B", A_OK="1", A_TRY="0", A_COMMITTED="1",
 
 ESP_PART = 12
 ESP_DIR = "/EFI/BOOT"
+# grub-emu has no built-in config, so the embedded one is run as the
+# grub.cfg of another directory, which grub-emu is pointed at instead.
+EMB_DIR = "/EFI/EMB"
 
 # grub-emu has every module linked in; the board's grubaa64.efi has only
 # GRUB_BUILDIN and their dependencies, and GRUB merely prints an error for a
@@ -68,14 +77,21 @@ STUBS = r"""
 # --- test stubs (scripts/test-grub-ab.py) ---
 function stub_linux {
     echo "BOAT-LINUX: $*"
-    if [ "$SIM_LINUX_FAIL" = 1 ]; then false; fi
+    # A GRUB function returns the status of its last statement.
+    if [ "$SIM_LINUX_FAIL" = 1 -o "$SIM_LINUX_FAIL_SLOT" = "$chosen" ]; then false; fi
 }
 function stub_initrd {
     echo "BOAT-INITRD: $*"
+    if [ "$SIM_INITRD_FAIL" = 1 ]; then false; fi
 }
 function stub_boot {
-    echo "BOAT-RESULT: boot"
-    reboot
+    if [ "$SIM_BOOT_RETURNS" = 1 ]; then
+        echo "BOAT-BOOT-RETURNED"
+        false
+    else
+        echo "BOAT-RESULT: boot"
+        reboot
+    fi
 }
 function stub_reboot {
     echo "BOAT-RESULT: reboot"
@@ -85,7 +101,40 @@ function stub_reboot {
 """
 
 
-def build_cfg(sim_linux_fail):
+def stub(text, subs):
+    for pattern, repl in subs:
+        text, n = re.subn(pattern, repl, text, flags=re.M)
+        if n == 0:
+            sys.exit("a GRUB config no longer has a line matching %r - "
+                     "update this test's stubs" % pattern)
+    return text
+
+
+def build_embedded():
+    with open(EMBEDDED_CFG) as f:
+        text = f.read()
+    return STUBS + stub(text, [(r"^reboot$", "stub_reboot"),
+                               (r"^sleep \d+$", "true")])
+
+
+def rescue_parser_errors():
+    """GRUB runs its built-in config with the rescue parser, which takes one
+    plain command per line: no comments, blocks, functions or ';'."""
+    errors = []
+    with open(EMBEDDED_CFG) as f:
+        for n, line in enumerate(f, 1):
+            words = line.split()
+            if not words:
+                errors.append("%s:%d: an empty line" % (EMBEDDED_CFG, n))
+            elif line.lstrip().startswith("#") or ";" in line or \
+                    words[0] in SCRIPT_WORDS | {"fi", "done", "for",
+                                                "function", "}"}:
+                errors.append("%s:%d: the rescue parser runs only plain "
+                              "commands: %s" % (EMBEDDED_CFG, n, line.strip()))
+    return errors
+
+
+def build_cfg(sim):
     with open(CFG_IN) as f:
         text = f.read()
     for key, value in (("@KERNEL_ARGS@", KERNEL_ARGS), ("@DISK@", DISK),
@@ -95,48 +144,50 @@ def build_cfg(sim_linux_fail):
     leftover = re.findall(r"@[A-Z_]+@", text)
     if leftover:
         sys.exit("unfilled placeholders in grub.cfg.in: %s" % leftover)
-    subs = [
+    text = stub(text, [
         (r"^(\s*)linux \(", r"\1stub_linux ("),
         (r"^(\s*)initrd \(", r"\1stub_initrd ("),
         (r"^(\s*)boot$", r"\1stub_boot"),
         (r"^(\s*)reboot$", r"\1stub_reboot"),
         (r"^(\s*)sleep \d+$", r"\1true"),
-    ]
-    for pattern, repl in subs:
-        text, n = re.subn(pattern, repl, text, flags=re.M)
-        if n == 0:
-            sys.exit("grub.cfg.in no longer has a line matching %r - "
-                     "update this test's stubs" % pattern)
+    ])
     head = STUBS
-    if sim_linux_fail:
-        head += 'set SIM_LINUX_FAIL=1\n'
+    for key, value in sorted(sim.items()):
+        head += 'set %s="%s"\n' % (key, value)
     return head + text
 
 
-def make_disk(workdir, files):
+def make_disk(workdir, files, emb=None):
     """A GPT disk image with APP (1), APP_b (2) and a FAT esp (12) holding
-    files ({name: bytes}) in ESP_DIR. Returns (image, esp byte offset)."""
+    files ({name: bytes}) in ESP_DIR, and emb (bytes) as EMB_DIR/grub.cfg.
+    Returns (image, esp byte offset)."""
     disk = os.path.join(workdir, "disk.img")
     esp = os.path.join(workdir, "esp.img")
     with open(disk, "wb") as f:
-        f.truncate(16 << 20)
+        f.truncate(80 << 20)
     subprocess.run(["sgdisk", "-o",
                     "-n", "1:2048:+1M", "-c", "1:APP",
                     "-n", "2:0:+1M", "-c", "2:APP_b",
-                    "-n", "%d:0:+8M" % ESP_PART, "-t", "%d:EF00" % ESP_PART,
+                    "-n", "%d:0:+64M" % ESP_PART, "-t", "%d:EF00" % ESP_PART,
                     "-c", "%d:esp" % ESP_PART, disk],
                    check=True, capture_output=True)
     info = subprocess.run(["sgdisk", "-i", str(ESP_PART), disk], check=True,
                           capture_output=True, text=True).stdout
     start = int(re.search(r"First sector: (\d+)", info).group(1))
-    subprocess.run(["mkfs.vfat", "-C", esp, "8192"], check=True,
+    # As meta-tegra's tegra-espimage makes it: 64 MiB, FAT32, which gives
+    # 512-byte clusters - the 1 KiB grubenv spans two of them.
+    subprocess.run(["mkfs.vfat", "-F", "32", "-C", esp, "65536"], check=True,
                    capture_output=True)
-    subprocess.run(["mmd", "-i", esp, "::/EFI", "::" + ESP_DIR], check=True)
-    for name, data in files.items():
-        local = os.path.join(workdir, name)
+    subprocess.run(["mmd", "-i", esp, "::/EFI", "::" + ESP_DIR, "::" + EMB_DIR],
+                   check=True)
+    copies = [(ESP_DIR, name, data) for name, data in files.items()]
+    if emb is not None:
+        copies.append((EMB_DIR, "grub.cfg", emb))
+    for i, (where, name, data) in enumerate(copies):
+        local = os.path.join(workdir, "copy%d" % i)
         with open(local, "wb") as f:
             f.write(data)
-        subprocess.run(["mcopy", "-i", esp, local, "::%s/%s" % (ESP_DIR, name)],
+        subprocess.run(["mcopy", "-i", esp, local, "::%s/%s" % (where, name)],
                        check=True)
     with open(esp, "rb") as src, open(disk, "r+b") as dst:
         dst.seek(start * 512)
@@ -163,14 +214,14 @@ def read_esp_file(workdir, disk, offset, name):
         return f.read()
 
 
-def run_grub(workdir, disk, read_only=False):
+def run_grub(workdir, disk, read_only=False, directory=ESP_DIR):
     devmap = os.path.join(workdir, "device.map")
     with open(devmap, "w") as f:
         f.write("(hd0) %s\n" % disk)
     # grub-emu wants a terminal; script(1) gives it one. A wide terminal
     # keeps the long kernel command line on one output line.
     cmd = ("stty cols 1000 2>/dev/null; exec %sgrub-emu -m '%s' -r hd0,gpt%d -d %s"
-           % (unprivileged() if read_only else "", devmap, ESP_PART, ESP_DIR))
+           % (unprivileged() if read_only else "", devmap, ESP_PART, directory))
     if read_only:
         # A disk GRUB can read but not write: every save_env fails, the way
         # it would on an ESP with a failing write path.
@@ -182,17 +233,32 @@ def run_grub(workdir, disk, read_only=False):
 
 
 def scenario(name, env, expect, env_after=None, grubenv="valid", bak=None,
-             linux_fail=False, grub_errors=(), read_only=False, says=()):
-    """env: grubenv contents. expect: dict with result, slot, flags.
-    env_after: the keys grubenv must have changed to (None = the file is
-    not written at all). grubenv: "valid", "torn" or "missing". bak:
-    grubenv.bak contents, or None for no backup. grub_errors: regexes of
-    the GRUB error lines this scenario is expected to print. read_only: the
-    disk refuses every write. says: regexes the output must match - proof
-    that the path under test was the one taken."""
+             sim=None, grub_errors=(), read_only=False, says=(), loads=1,
+             embedded=False, grubcfg="whole"):
+    """env: grubenv contents. expect: dict with result, slot, flags - the
+    slot and flags of the LAST kernel load. env_after: the keys grubenv must
+    have changed to (None = the file is not written at all). grubenv:
+    "valid", "torn", "empty" or "missing". bak: grubenv.bak contents, or
+    None for no backup. sim: stub switches - SIM_LINUX_FAIL=1 (every kernel
+    load fails), SIM_LINUX_FAIL_SLOT=X (only slot X's), SIM_INITRD_FAIL=1,
+    SIM_BOOT_RETURNS=1 (boot comes back instead of starting the kernel).
+    grub_errors: regexes of the GRUB error lines this scenario is expected
+    to print. read_only: the disk refuses every write. says: regexes the
+    output must match - proof that the path under test was the one taken.
+    loads: how many kernel loads it takes. embedded: start from the config
+    built into grubaa64.efi, which runs grub.cfg, instead of from grub.cfg.
+    grubcfg: "whole", "truncated" (cut off inside a function) or
+    "missing"."""
     return dict(name=name, env=env, expect=expect, env_after=env_after,
-                grubenv=grubenv, bak=bak, linux_fail=linux_fail,
-                grub_errors=grub_errors, read_only=read_only, says=says)
+                grubenv=grubenv, bak=bak, sim=sim or {},
+                grub_errors=grub_errors, read_only=read_only, says=says,
+                loads=loads, embedded=embedded, grubcfg=grubcfg)
+
+
+# grub-emu leaves $cmdpath empty, so the built-in config's search.file finds
+# nothing and $root stays the one grub-emu was given: the ESP, as on the
+# board.
+NO_CMDPATH = r"error: no such device: \(\)/EFI/BOOT/grub\.cfg\."
 
 
 def flashed(**kw):
@@ -256,7 +322,57 @@ SCENARIOS = [
              flashed(ORDER="B A", B_OK=1, B_COMMITTED=0),
              dict(result="reboot", slot="B", flags=["boat.trial=1"]),
              env_after=dict(B_OK="0", B_TRY="1", A_OK="1"),
-             linux_fail=True),
+             sim=dict(SIM_LINUX_FAIL=1)),
+    scenario("committed A's kernel fails to load: A marked bad, reset",
+             flashed(),
+             dict(result="reboot", slot="A", flags=[]),
+             env_after=dict(A_OK="0", A_TRY="1"),
+             sim=dict(SIM_LINUX_FAIL=1)),
+    scenario("initrd fails to load: slot marked bad, reset",
+             flashed(ORDER="B A", B_OK=1, B_COMMITTED=0),
+             dict(result="reboot", slot="B", flags=["boat.trial=1"]),
+             env_after=dict(B_OK="0", B_TRY="1"),
+             sim=dict(SIM_INITRD_FAIL=1)),
+    scenario("boot returns: slot marked bad, reset",
+             flashed(ORDER="B A", B_OK=1, B_COMMITTED=0),
+             dict(result="reboot", slot="B", flags=["boat.trial=1"]),
+             env_after=dict(B_OK="0", B_TRY="1"),
+             sim=dict(SIM_BOOT_RETURNS=1),
+             says=[r"BOAT-BOOT-RETURNED"]),
+    scenario("last resort prefers the committed slot: B, not a failed A",
+             flashed(ORDER="B A", A_OK=0, A_COMMITTED=0, B_OK=1, B_TRY=2,
+                     B_COMMITTED=1),
+             dict(result="boot", slot="B", flags=["boat.lastresort=1"]),
+             env_after=dict(B_OK="0"),
+             says=[r"last resort, uncounted, in this order: B A"]),
+    scenario("last resort with both committed follows ORDER",
+             flashed(ORDER="B A", A_TRY=2, B_OK=1, B_TRY=2, B_COMMITTED=1),
+             dict(result="boot", slot="B", flags=["boat.lastresort=1"]),
+             env_after=dict(A_OK="0", B_OK="0")),
+    scenario("last resort: a committed slot that will not load hands over to the other",
+             flashed(ORDER="B A", A_OK=0, A_COMMITTED=0, B_OK=1, B_TRY=2,
+                     B_COMMITTED=1),
+             dict(result="boot", slot="A", flags=["boat.lastresort=1"]),
+             env_after=dict(B_OK="0"),
+             sim=dict(SIM_LINUX_FAIL_SLOT="B"),
+             says=[r"last resort: slot B failed to load"], loads=2),
+    scenario("last resort: nothing loads, nothing more is written, reset",
+             flashed(A_TRY=2),
+             dict(result="reboot", slot="B", flags=["boat.lastresort=1"]),
+             env_after=dict(A_OK="0"),
+             sim=dict(SIM_LINUX_FAIL=1),
+             says=[r"no slot could be loaded"], loads=2),
+    scenario("ESP refuses writes after A is used up, B on trial: last resort A",
+             flashed(A_TRY=2, B_OK=1, B_COMMITTED=0),
+             dict(result="boot", slot="A", flags=["boat.lastresort=1"]),
+             read_only=True,
+             grub_errors=[r"error: "],
+             says=[r"could not record the attempt on trial slot B"]),
+    scenario("grubenv missing a key: B_COMMITTED absent counts as on trial",
+             {k: v for k, v in flashed(ORDER="B A", B_OK=1).items()
+              if k != "B_COMMITTED"},
+             dict(result="boot", slot="B", flags=["boat.trial=1"]),
+             env_after=dict(B_TRY="1")),
     scenario("torn grubenv: grubenv.bak is used, nothing is written",
              None,
              dict(result="boot", slot="B", flags=[]),
@@ -287,11 +403,45 @@ SCENARIOS = [
              grubenv="torn",
              grub_errors=[r"invalid environment block",
                           r"file `/EFI/BOOT/grubenv\.bak' not found"]),
+    scenario("empty grubenv: grubenv.bak is used, nothing is written",
+             None,
+             dict(result="boot", slot="B", flags=[]),
+             grubenv="empty",
+             bak=flashed(ORDER="B A", B_OK=1, B_COMMITTED=1),
+             grub_errors=[r"invalid environment block|unexpected end of file"]),
     scenario("missing grubenv and no backup: built-in defaults boot A",
              None,
              dict(result="boot", slot="A", flags=[]),
              grubenv="missing",
              grub_errors=[r"file `/EFI/BOOT/grubenv(\.bak)?' not found"]),
+    scenario("GRUB's $root names no partition: reset, nothing written",
+             flashed(),
+             dict(result="reboot"),
+             sim=dict(root="hd0"),
+             says=[r"cannot tell which disk GRUB was loaded from"], loads=0),
+    scenario("built-in config runs grub.cfg: fresh flash boots A, counted",
+             flashed(),
+             dict(result="boot", slot="A", flags=[]),
+             env_after=dict(A_TRY="1"),
+             embedded=True, grub_errors=[NO_CMDPATH]),
+    scenario("built-in config, B on trial: trial boot of B",
+             flashed(ORDER="B A", B_OK=1, B_COMMITTED=0),
+             dict(result="boot", slot="B", flags=["boat.trial=1"]),
+             env_after=dict(B_TRY="1"),
+             embedded=True, grub_errors=[NO_CMDPATH]),
+    scenario("grub.cfg missing: the built-in config resets",
+             flashed(),
+             dict(result="reboot"),
+             embedded=True, grubcfg="missing", grub_errors=[NO_CMDPATH],
+             says=[r"grub\.cfg did not boot a slot - resetting"], loads=0),
+    scenario("grub.cfg truncated: the built-in config resets",
+             flashed(),
+             dict(result="reboot"),
+             env_after=dict(A_TRY="1"),
+             embedded=True, grubcfg="truncated",
+             grub_errors=[NO_CMDPATH, r"error: (syntax error|Incorrect command|"
+                                      r"out of memory)\."],
+             says=[r"grub\.cfg did not boot a slot - resetting"], loads=0),
 ]
 
 LINUX_RE = re.compile(r"^BOAT-LINUX: (.*)$", re.M)
@@ -299,30 +449,38 @@ RESULT_RE = re.compile(r"^BOAT-RESULT: (\w+)$", re.M)
 
 
 def check(sc, workdir):
-    files = {
-        "grub.cfg": build_cfg(sc["linux_fail"]).encode(),
-        "boot.cfg": ('set cbootargs="%s"\n' % CBOOTARGS).encode(),
-    }
+    cfg = build_cfg(sc["sim"])
+    if sc["grubcfg"] == "truncated":
+        # A flash cut off part way: the file ends inside boot_chosen.
+        cut = cfg.index("\n", cfg.index("stub_linux (${bootdisk}"))
+        cfg = cfg[:cut + 1]
+    files = {"boot.cfg": ('set cbootargs="%s"\n' % CBOOTARGS).encode()}
+    if sc["grubcfg"] != "missing":
+        files["grub.cfg"] = cfg.encode()
     if sc["grubenv"] == "valid":
         files["grubenv"] = make_env(workdir, sc["env"])
     elif sc["grubenv"] == "torn":
         # A write cut off mid-block: the signature is gone.
         files["grubenv"] = b"\0" * 512 + b"#" * 512
+    elif sc["grubenv"] == "empty":
+        files["grubenv"] = b""
     if sc["bak"] is not None:
         files["grubenv.bak"] = make_env(workdir, sc["bak"])
-    disk, offset = make_disk(workdir, files)
+    emb = build_embedded().encode() if sc["embedded"] else None
+    disk, offset = make_disk(workdir, files, emb)
 
-    out = run_grub(workdir, disk, sc["read_only"])
+    out = run_grub(workdir, disk, sc["read_only"],
+                   EMB_DIR if sc["embedded"] else ESP_DIR)
     errors = []
     results = RESULT_RE.findall(out)
     linux = LINUX_RE.findall(out)
     exp = sc["expect"]
     if results != [exp["result"]]:
         errors.append("result %s, expected [%r]" % (results, exp["result"]))
-    if len(linux) != 1:
-        errors.append("%d kernel loads, expected 1" % len(linux))
-    else:
-        args = linux[0].split()
+    if len(linux) != sc["loads"]:
+        errors.append("%d kernel loads, expected %d" % (len(linux), sc["loads"]))
+    elif linux:
+        args = linux[-1].split()
         slot = exp["slot"]
         want = ["(hd0,gpt%d)/boot/Image" % PART[slot], CBOOTARGS] + \
             KERNEL_ARGS.split() + \
@@ -423,8 +581,10 @@ def check_modules():
         if mod not in have:
             have.add(mod)
             todo.extend(deps.get(mod, []))
-    with open(CFG_IN, encoding="utf-8") as f:
-        cmds = cfg_commands(f.read())
+    cmds = set()
+    for path in (CFG_IN, EMBEDDED_CFG):
+        with open(path, encoding="utf-8") as f:
+            cmds |= cfg_commands(f.read())
     errors = []
     for cmd in sorted(cmds - CORE_COMMANDS):
         if cmd not in cmd_mod:
@@ -442,6 +602,9 @@ def main():
             print("SKIP: %s not installed (apt-get install grub-emu gdisk "
                   "dosfstools mtools)" % tool)
             return 77
+    version = subprocess.run(["grub-emu", "--version"], capture_output=True,
+                             text=True).stdout.strip()
+    print("using %s (the board runs GRUB 2.06)" % (version or "grub-emu"))
     failed = 0
     errors = check_modules()
     for e in errors:
@@ -449,7 +612,16 @@ def main():
     if errors:
         failed += 1
     else:
-        print("ok:   every command grub.cfg runs is in the board's GRUB build")
+        print("ok:   every command the GRUB configs run is in the board's "
+              "GRUB build")
+    errors = rescue_parser_errors()
+    for e in errors:
+        print("FAIL: " + e)
+    if errors:
+        failed += 1
+    else:
+        print("ok:   the built-in config is plain commands only, as GRUB's "
+              "rescue parser needs")
     with tempfile.TemporaryDirectory(prefix="grub-ab-") as workdir:
         # Readable by the unprivileged user the read-only scenarios run as.
         os.chmod(workdir, 0o755)
@@ -466,7 +638,8 @@ def main():
                     print(out)
             else:
                 print("ok:   %s" % sc["name"])
-    print("%d of %d checks passed" % (len(SCENARIOS) + 1 - failed, len(SCENARIOS) + 1))
+    total = len(SCENARIOS) + 2
+    print("%d of %d checks passed" % (total - failed, total))
     return 1 if failed else 0
 
 

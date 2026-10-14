@@ -1,13 +1,20 @@
 # No sleep while a slot is on trial: the trial deadline counts real time,
 # and a board that sleeps half way through a trial would come back with its
 # health checks long since timed out. boat-commit stops this on commit.
+#
+# Shutdown and reboot are not held off - the skipper must always be able to
+# turn the computer off. Instead, stopping this unit during a shutdown,
+# before the verdict, gives the trial its attempt back, once (boat-commit
+# --shutdown). After= the ESP and the guard, so it stops before either.
 [Unit]
 Description=Hold off sleep until the A/B trial is committed
 Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
 ConditionKernelCommandLine=boat.trial=1
+After=boot-efi.mount boat-grubenv-guard.service
 
 [Service]
 ExecStart=/usr/bin/systemd-inhibit --what=sleep --who=boat-commit --why="A/B update on trial until committed" --mode=block sleep infinity
+ExecStop=/usr/sbin/boat-commit --shutdown
 
 [Install]
 WantedBy=multi-user.target

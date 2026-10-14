@@ -793,8 +793,14 @@ all the kernel offers, and pushes past inhibitor locks);
 `BOAT_SLEEP_REQUIRE_WOL=0` in `/etc/default/boat-power` turns it off for
 good, which you want only on a board you can reach.
 
-Running it over SSH is safe: `systemctl suspend` hands the request to logind
-and returns, so the output and exit status reach you before the network goes
+Without `--force`, a sleep inhibitor lock another program holds - the XFCE
+power manager on the helm display, say, or a root service - makes it
+refuse, and it lists the locks. The logged-in helm user alone does not. On
+an A/B image it also refuses, `--force` or not, while an update is being
+installed or is on trial (docs/07-updates.md).
+
+Running it over SSH is safe: logind takes the suspend request and answers at
+once, so the output and exit status reach you before the network goes
 away. The connection then drops when the board actually suspends — an
 expected disconnect, not a failure. It must run as **root** (arming WoL and
 selecting the sleep state are both `/sys` writes) — either `ssh root@<boat>`,

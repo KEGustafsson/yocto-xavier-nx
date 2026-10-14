@@ -1,0 +1,8 @@
+search.file ($cmdpath)/EFI/BOOT/grub.cfg root
+set prefix=($root)/EFI/BOOT
+set superusers="boat-locked"
+export superusers
+configfile $prefix/grub.cfg
+echo "boat: grub.cfg did not boot a slot - resetting"
+sleep 10
+reboot

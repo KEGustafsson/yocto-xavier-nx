@@ -10,7 +10,9 @@ ConditionKernelCommandLine=rauc.slot
 # judged - e.g. to test that a crashing trial falls back. (The kernel
 # command line cannot be edited on this board: GRUB has no menu.)
 ConditionPathExists=!/etc/boat-ab-nocommit
-Requires=boat-grubenv-guard.service
+# Wants, not Requires: a guard that failed (an ESP that will not mount or
+# take writes) must not stop the gate - its Tier 1 then names the problem.
+Wants=boat-grubenv-guard.service
 # Not after docker.service: Docker waits for /data, and /data for its own
 # check, which may take long. The checks retry for Docker instead, so a
 # /data problem can never hold up - or fail - the OS's own verdict.

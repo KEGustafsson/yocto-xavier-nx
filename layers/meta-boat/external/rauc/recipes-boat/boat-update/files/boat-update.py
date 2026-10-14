@@ -1286,11 +1286,15 @@ def do_status(conf, state):
                                                        slot_version(o, slots) or "unknown"))
     if env is None:
         print("  ALERT     grubenv is unreadable")
-    for name, text in (("grubenv-repaired", "grubenv was torn and rebuilt this boot"),
-                       ("health-alert", "the running slot is committed but unhealthy: ")):
-        p = path("run_ab", name)
-        if os.path.exists(p):
-            print("  ALERT     %s%s" % (text, read(p).strip() if name == "health-alert" else ""))
+    if os.path.exists(path("run_ab", "grubenv-repaired")):
+        print("  ALERT     grubenv was torn and rebuilt this boot")
+    # One line per problem the A/B scripts (boat-commit, the guards) found
+    # this boot, each saying what it is.
+    for line in read(path("run_ab", "health-alert")).splitlines():
+        if line.strip():
+            print("  ALERT     %s" % line.strip())
+    if "boat.lastresort=1" in read(path("cmdline")).split():
+        print("  ALERT     GRUB found no usable slot: this is its last resort boot")
     last = read(path("state", "last-result")).strip()
     if last:
         print("  last      %s" % last)

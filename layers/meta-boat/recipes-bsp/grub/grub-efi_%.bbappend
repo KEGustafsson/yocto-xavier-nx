@@ -9,6 +9,16 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 # hang inside GRUB still ends in a reset and a fallback to the other slot.
 SRC_URI += "file://0001-efi-re-arm-the-UEFI-watchdog-instead-of-disabling-it.patch"
 
+# The config built into grubaa64.efi: files/cfg here takes the place of
+# poky's file://cfg through FILESEXTRAPATHS. Poky's only finds the ESP and
+# sets $prefix; GRUB's normal mode then reads grub.cfg - and if grub.cfg is
+# missing it opens a shell, and if it is truncated it stops at one, with
+# nobody aboard to type at it. Boat's runs grub.cfg itself, locks the shell
+# before anything else runs (a superuser with no password), and resets when
+# grub.cfg comes back without booting a slot. It runs under GRUB's rescue
+# parser: one plain command per line, and no comments.
+# scripts/test-grub-ab.py runs it in grub-emu.
+
 # What boat-grub-esp's grub.cfg uses beyond poky's default set:
 #   regexp  - take the disk from the ESP's own $root, so the slots are
 #             addressed on the same drive GRUB was loaded from

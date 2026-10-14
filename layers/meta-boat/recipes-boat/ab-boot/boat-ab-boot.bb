@@ -15,6 +15,7 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda
 
 SRC_URI = "\
     file://boat-ab-lib.sh \
+    file://grub-editenv-wrapper.sh \
     file://boat-bootmode-guard.sh \
     file://boat-bootmode-guard.service \
     file://boat-grubenv-guard.sh \
@@ -61,6 +62,9 @@ do_install() {
         -e 's|@PARTNUM_DATA@|${BOAT_AB_PARTNUM_DATA}|g' \
         ${WORKDIR}/boat-ab-lib.sh > ${D}${libdir}/boat-ab/lib.sh
     chmod 0644 ${D}${libdir}/boat-ab/lib.sh
+    # First on rauc.service's PATH (meta-boat's rauc drop-in).
+    install -d ${D}${libdir}/boat-ab/bin
+    install -m 0755 ${WORKDIR}/grub-editenv-wrapper.sh ${D}${libdir}/boat-ab/bin/grub-editenv
 
     install -d ${D}${sbindir}
     install -m 0755 ${WORKDIR}/boat-bootmode-guard.sh ${D}${sbindir}/boat-bootmode-guard
@@ -95,7 +99,9 @@ do_install() {
     # The scripts source the library from its installed path.
     sed -i -e 's|^\. /usr/lib/boat-ab/lib.sh$|. ${libdir}/boat-ab/lib.sh|' \
         ${D}${sbindir}/boat-bootmode-guard ${D}${sbindir}/boat-grubenv-guard \
-        ${D}${sbindir}/boat-commit
+        ${D}${sbindir}/boat-commit ${D}${libdir}/boat-ab/bin/grub-editenv
+    sed -i -e 's|/usr/bin/grub-editenv|${bindir}/grub-editenv|' \
+        ${D}${libdir}/boat-ab/bin/grub-editenv
 }
 do_install[vardeps] += "BOAT_AB_DISK BOAT_AB_PARTNUM_APP_A BOAT_AB_PARTNUM_APP_B BOAT_AB_PARTNUM_ESP \
     BOAT_AB_PARTNUM_SWAP BOAT_AB_PARTNUM_DATA BOAT_AB_ESP_UNIT"
@@ -131,15 +137,18 @@ CONFFILES:${PN} = "${sysconfdir}/boat-update/health.conf"
 # util-linux-mountpoint - mountpoint
 # coreutils        - od, sync FILE for the grubenv writes, timeout for the
 #                    operator's health checks, "sleep infinity" for the trial
-#                    inhibitor (cmp comes from busybox)
+#                    inhibitor, readlink -f for the grub-editenv wrapper (cmp
+#                    comes from busybox)
 # util-linux-fsck, dosfstools - systemd-fsck's fsck and fsck.vfat, for the
 #                    ESP check before it is mounted
-# setup-nv-boot-control-service - boot-efi.mount, the unit the ESP drop-in
-#                    above amends. Otherwise only tegra-redundant-boot
-#                    (MACHINE_EXTRA_RDEPENDS) brings it, which an image
+# tegra-redundant-boot - nv_update_verifier, which resets NVIDIA's rootfs
+#                    retry count on every boot that reaches Linux: the 2+1
+#                    attempt budget (plan 5.3) only holds with it. Otherwise
+#                    only MACHINE_EXTRA_RDEPENDS brings it, which an image
 #                    without packagegroup-base never gets.
-# util-linux-flock - boat-commit's gate and its trial deadline decide one at
-#                    a time
+# setup-nv-boot-control-service - boot-efi.mount, the unit the ESP drop-in
+#                    above amends (tegra-redundant-boot needs it too)
+# util-linux-flock - the A/B lock: one grubenv writer at a time
 RDEPENDS:${PN} = "\
     grub-editenv \
     efivar \
@@ -148,6 +157,7 @@ RDEPENDS:${PN} = "\
     util-linux-fsck \
     dosfstools \
     coreutils \
+    tegra-redundant-boot \
     setup-nv-boot-control-service \
     util-linux-flock \
 "

@@ -45,9 +45,15 @@ UEFI -> L4TLauncher -> GRUB (NVMe ESP) -> kernel + initrd of slot A or B
   - systemd's emergency mode;
   - a wedged PID 1 (the hardware watchdog);
   - a trial still not committed after 15 minutes;
-  - a GRUB that hangs (the UEFI watchdog).
+  - a GRUB that hangs (the UEFI watchdog), or a `grub.cfg` that is missing
+    or cut short.
 
   The reset is what lets GRUB count the attempt and fall back.
+- If **no slot qualifies** any more, GRUB still boots one, as a **last
+  resort**, without counting: a slot that once passed its trial first, the
+  flashed slot A otherwise. `boat-update status` then shows an ALERT. A
+  committed slot is made usable again once it boots; a slot that never
+  passed a trial is not - install a release, or reflash.
 
 ## Turning it on
 
@@ -91,6 +97,17 @@ a version: `1.0.0 < 1.0.1 < 1.1.0-rc.1 < 1.1.0`, and `2026.10.1` works too.
 Left empty, a build reports `0.0.0-dev`. That is fine on the bench, but such
 a build is never offered over the air.
 
+**After a security fix, raise the floor.** `BOAT_MIN_BUNDLE_VERSION` (in
+`scripts/env.sh`, or the environment for kas) is the oldest release a board
+will install, over the air, by `push-update.sh` or from a USB stick alike.
+Set it to the release with the fix, in that release's build: from then on a
+board running it refuses anything older. Empty means no floor; it can never
+be above `BOAT_RELEASE` (the build stops).
+
+**A slot holds about 12 GiB of image content.** Each slot is 16 GiB; the
+build adds 30 % and 512 MiB to the content and stops if the result no longer
+fits.
+
 ### 3. Flash — this erases the SSD
 
 The A/B layout is a different partition table. The first flash after
@@ -115,13 +132,23 @@ sudo boat-update install --reboot     # write it to the other slot, reboot into 
 sudo boat-update install --stream --reboot   # same, streamed from the channel
 boat-update history          # installs, trials and what became of them
 sudo boat-update rollback    # switch to the other slot (if it is usable) and reboot
-sudo boat-update debug-hold on|off    # after a failure, stop for inspection instead of resetting
+sudo boat-update debug-hold on|off    # next boot: stop for inspection after a failure, not reset
 ```
 
 `install` runs as its own systemd unit, so losing the SSH session half way
 does not stop it; it still exits non-zero if the install fails. After the reboot the new slot is **on trial**. `boat-update
 status` says so, and sleep is held off until `boat-commit` has decided.
-That takes a minute or two.
+That takes a minute or two. `boat-sleep` refuses meanwhile, and while an
+install runs, even with `--force`.
+
+Turning the computer off, or rebooting it, before the verdict does not fail
+the release: the next boot tries it again. That happens **once** per
+install - a second shutdown before the verdict counts as a failed trial, as
+a power cut always does.
+
+Take a USB stick out before `--reboot`. The firmware is set to boot the SSD
+first, but a board flashed before that setting may still boot a bootable
+stick instead, and then neither slot runs.
 
 - **It committed:** the old slot stays as the rollback. The downloaded
   bundle is deleted, because the old slot, not the file, is what you go back
@@ -325,13 +352,22 @@ broke.
 Settings that belong to the board rather than the image are copied into the
 new slot at every install:
 
-- host keys and machine ID;
-- the Wi-Fi and network connections;
-- Bluetooth pairings;
+- host keys (`/etc/ssh/ssh_host_*`) and `/etc/machine-id`;
+- `root`'s SSH keys (`/home/root/.ssh`);
+- the Wi-Fi and network connections (`/etc/NetworkManager/system-connections`);
+- Bluetooth pairings (`/var/lib/bluetooth`);
 - hostname and time zone;
 - the `root` and `boat` passwords;
-- `/etc/default/boat-*`;
-- `/etc/docker/daemon.json`.
+- the sleep listener's key (`/etc/boat-sleep.key`) and its port, if you
+  moved it (`systemctl edit boat-sleep-listener.socket`).
+
+The configuration files you are meant to edit are carried **only if you
+changed them**: `/etc/default/boat-power`, `/etc/default/boat-bluetooth`,
+`/etc/default/boat-sleep-listener`, `/etc/bluetooth/main.conf`,
+`/etc/NetworkManager/conf.d/90-boat-wol.conf`, `/etc/docker/daemon.json` and
+`/etc/boat-update/health.conf`. One you never touched takes the new
+release's version, so a release can change its defaults; one you deleted
+stays deleted. (An image built before this rule carries them all, once.)
 
 **Any other edit under `/etc` does not survive an update.** Put it in
 `meta-boat`, or on `/data`.
@@ -361,7 +397,16 @@ whole SSD.
     needs the internet, say — belongs out of
     `BOAT_HEALTH_UNITS`/`health.d`.
   - On the bench, `sudo boat-update debug-hold on` keeps a failing slot up
-    for inspection.
+    for inspection. It lasts until a boot that carried it comes up
+    healthy, then turns itself off; `debug-hold off` ends it sooner.
+- **"GRUB found no usable slot: this is its last resort boot."** Both
+  slots used up their attempts. The ALERT says whether the running slot was
+  made usable again (it had passed a trial) or not (a failed release, or an
+  install that was cut off - install a release, or reflash).
+- **"could not reset slot X's attempt count"**, or **"boat-grubenv-guard
+  failed"**. The ESP will not take writes - usually a damaged filesystem.
+  While this lasts every reboot counts against the slot, and two of them
+  hand the board to the other slot. Reflash at the dock.
 - **The board stops in the UEFI menu, or will not boot at all.** Both
   slots failed repeatedly, and NVIDIA's own boot counter has marked the
   drive unbootable. That marker is sticky. Recover with a USB reflash

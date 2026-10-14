@@ -9,8 +9,8 @@
 #   boat-sleep --force                  # suspend even if WoL is not armed
 #   boat-sleep --delay 10               # seconds before logind is asked
 #
-# Why this is safe to run over SSH: `systemctl suspend` hands the request to
-# logind and returns immediately, so the command's output and exit status
+# Why this is safe to run over SSH: the suspend request goes to logind,
+# which takes it and answers at once, so the command's output and exit status
 # reach the caller before the network goes away. The link then drops when
 # the board actually suspends - an expected, clean-looking SSH disconnect.
 #
@@ -48,7 +48,8 @@ with a Wake-on-LAN magic packet. Run it over SSH as root.
                    without it the report says UNKNOWN rather than guessing)
   -n, --dry-run    arm Wake-on-LAN and run every check, but do not suspend
   -f, --force      suspend anyway: without Wake-on-LAN armed, into a
-                   non-deep sleep state, and past any inhibitor lock
+                   non-deep sleep state, and past any inhibitor lock -
+                   but never while an A/B update is installing or on trial
   -d, --delay N    seconds to wait before asking logind to suspend
   -h, --help       this text
 
@@ -227,18 +228,67 @@ fi
 
 # An A/B update on trial must not sleep until it is committed, --force or
 # not: its attempt is already counted, and a battery that dies overnight
-# would cost the update (docs/plans/ab-os-updates.md 5.4).
+# would cost the update (docs/plans/ab-os-updates.md 5.4). Nor while one is
+# being installed: a streamed install would lose its connection half way
+# through the write. Both units exist only on an A/B image. They are asked
+# about by name because their inhibitor locks are root's, like this
+# script, and logind never holds root back with root's own locks.
 if systemctl is-active --quiet boat-trial-inhibit.service 2>/dev/null; then
     die "an A/B update is on trial and not committed yet - refusing to sleep until it is (see 'boat-update status'; it takes a minute or two)"
 fi
+if systemctl is-active --quiet boat-update-install.service 2>/dev/null; then
+    die "an A/B update is being installed - refusing to sleep until it finishes (see 'journalctl -u boat-update-install')"
+fi
 
-# An inhibitor lock - the XFCE power manager holding one on the helm
-# display, say - makes logind refuse, and `systemctl suspend` says so and
-# exits non-zero, which is what the SSH caller sees. `systemd-inhibit
-# --list` names the holder. --force takes the request past them.
-# systemctl skips block inhibitors for root unless told to check them, and
-# this always runs as root - hence --check-inhibitors=yes.
 if [ "$FORCE" = "1" ]; then
     exec systemctl suspend -i
 fi
-exec systemctl suspend --check-inhibitors=yes
+
+# Every sleep inhibitor lock in block mode, "WHO (uid N): WHY" per line, from
+# logind's own list. busctl prints the reply as: a(ssssuu) COUNT, then for
+# each lock "what" "who" "why" "mode" uid pid - strings quoted, C-escaped.
+sleep_blockers() {
+    busctl call org.freedesktop.login1 /org/freedesktop/login1 \
+        org.freedesktop.login1.Manager ListInhibitors 2>/dev/null | awk '
+    {
+        s = $0; n = 0; i = 1; len = length(s)
+        while (i <= len) {
+            c = substr(s, i, 1)
+            if (c == " ") { i++; continue }
+            t = ""
+            if (c == "\"") {
+                i++
+                while (i <= len) {
+                    c = substr(s, i, 1)
+                    if (c == "\\") { t = t substr(s, i + 1, 1); i += 2; continue }
+                    i++
+                    if (c == "\"") break
+                    t = t c
+                }
+            } else {
+                while (i <= len && substr(s, i, 1) != " ") { t = t substr(s, i, 1); i++ }
+            }
+            tok[++n] = t
+        }
+        for (k = 3; k + 5 <= n; k += 6)
+            if (tok[k + 3] == "block" && (":" tok[k] ":") ~ /:sleep:/)
+                printf "%s (uid %s): %s\n", tok[k + 1], tok[k + 4], tok[k + 2]
+    }'
+}
+
+# A sleep inhibitor lock - the XFCE power manager's on the helm display,
+# say - makes this refuse; --force goes past every lock. The list is read
+# here because logind never holds root back with root's own locks, and this
+# runs as root. The request then asks logind's own check too
+# (SD_LOGIND_ROOT_CHECK_INHIBITORS, 1) - unlike `systemctl suspend
+# --check-inhibitors=yes`, neither refuses because the helm user is logged in.
+blockers="$(sleep_blockers)"
+if [ -n "$blockers" ]; then
+    printf '%s\n' "$blockers" | sed 's/^/  /' >&2
+    die "a sleep inhibitor lock is held (listed above) - 'boat-sleep --force' goes past it"
+fi
+if ! busctl call org.freedesktop.login1 /org/freedesktop/login1 \
+        org.freedesktop.login1.Manager SuspendWithFlags t 1; then
+    systemd-inhibit --list --no-pager >&2 || true
+    die "logind refused to suspend - a sleep inhibitor lock is held (listed above); 'boat-sleep --force' goes past it"
+fi
