@@ -65,15 +65,24 @@ copy /etc/nv_boot_control.conf
 # running slot's image shipped - someone changed it. A file nobody touched
 # is left as the new image has it, so a release can change its defaults (a
 # new health gate unit list, a daemon.json a new Docker needs), the way a
-# package manager treats a conffile. Without the record (an older image),
-# or for a file the image never shipped, it is carried as before.
+# package manager treats a conffile. One the image shipped and someone
+# deleted stays deleted. Without the record (an older image), or for a file
+# the image never shipped, it is carried as before.
 copy_edited() {
-    if [ -r "$DEFAULTS" ] && [ -f "$from$1" ] && [ ! -L "$from$1" ]; then
-        shipped="$(awk -v p="$1" '$2 == p { print $1; exit }' "$DEFAULTS")"
-        if [ -n "$shipped" ] && [ "$(sha256sum < "$from$1" | cut -d' ' -f1)" = "$shipped" ]; then
-            say "kept the new image's $1 (never changed on this board)"
-            return 0
+    shipped=""
+    [ -r "$DEFAULTS" ] && shipped="$(awk -v p="$1" '$2 == p { print $1; exit }' "$DEFAULTS")"
+    if [ -n "$shipped" ] && [ ! -e "$from$1" ] && [ ! -L "$from$1" ]; then
+        if rm -f "$new$1"; then
+            say "left $1 out of the new slot: it was deleted on this board"
+        else
+            say "WARNING: could not delete $1 in the new slot (it was deleted on this board)"
         fi
+        return 0
+    fi
+    if [ -n "$shipped" ] && [ -f "$from$1" ] && [ ! -L "$from$1" ] \
+            && [ "$(sha256sum < "$from$1" | cut -d' ' -f1)" = "$shipped" ]; then
+        say "kept the new image's $1 (never changed on this board)"
+        return 0
     fi
     copy "$1"
 }

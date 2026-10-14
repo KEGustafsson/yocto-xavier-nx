@@ -23,7 +23,7 @@ REAL="${BOAT_AB_REAL_EDITENV:-/usr/bin/grub-editenv}"
 if [ "${2:-}" = set ] && [ -n "${1:-}" ] \
         && [ "$(readlink -f "$1")" = "$(readlink -f "$BOAT_AB_GRUBENV")" ]; then
     shift 2
-    ab_lock
+    ab_lock || die "could not take the A/B lock - not writing $BOAT_AB_GRUBENV"
     grubenv_set "$@" || die "could not write $BOAT_AB_GRUBENV"
     exit 0
 fi

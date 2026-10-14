@@ -41,16 +41,21 @@ alert() {
 
 # One grubenv read-modify-write at a time: boat-commit, the guards, RAUC
 # (through the grub-editenv wrapper) and boat-update all take this lock.
-# Held on fd 9 until ab_unlock or exit. A holder that is stuck must not
-# stop a boot, so after BOAT_AB_LOCK_WAIT seconds this goes on without it.
+# Held on fd 9 until ab_unlock or exit. It fails after BOAT_AB_LOCK_WAIT
+# seconds - a writer that went on without it could undo the decision of
+# the one holding it (a commit over a deadline's verdict) - and the caller
+# then writes nothing: GRUB's own attempt count is the safe answer.
 BOAT_AB_LOCK_WAIT=60
 _ab_locked=0
 ab_lock() {
     [ "$_ab_locked" = 1 ] && return 0
     mkdir -p "$BOAT_AB_RUNDIR"
     exec 9>"$BOAT_AB_RUNDIR/commit.lock"
-    flock -w "$BOAT_AB_LOCK_WAIT" 9 \
-        || warn "could not take $BOAT_AB_RUNDIR/commit.lock in $BOAT_AB_LOCK_WAIT s - going on without it"
+    if ! flock -w "$BOAT_AB_LOCK_WAIT" 9; then
+        exec 9>&-
+        warn "could not take $BOAT_AB_RUNDIR/commit.lock in $BOAT_AB_LOCK_WAIT s - another grubenv writer is stuck"
+        return 1
+    fi
     _ab_locked=1
 }
 ab_unlock() {

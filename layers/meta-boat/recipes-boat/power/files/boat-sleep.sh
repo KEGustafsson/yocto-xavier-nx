@@ -243,11 +243,50 @@ fi
 if [ "$FORCE" = "1" ]; then
     exec systemctl suspend -i
 fi
-# A program's sleep inhibitor lock - the XFCE power manager's on the helm
-# display, say - makes logind refuse. logind's own check, asked for with
-# SD_LOGIND_ROOT_CHECK_INHIBITORS (1): unlike `systemctl suspend
-# --check-inhibitors=yes`, it does not also refuse because the helm user is
-# logged in. --force takes the request past every lock.
+
+# Every sleep inhibitor lock in block mode, "WHO (uid N): WHY" per line, from
+# logind's own list. busctl prints the reply as: a(ssssuu) COUNT, then for
+# each lock "what" "who" "why" "mode" uid pid - strings quoted, C-escaped.
+sleep_blockers() {
+    busctl call org.freedesktop.login1 /org/freedesktop/login1 \
+        org.freedesktop.login1.Manager ListInhibitors 2>/dev/null | awk '
+    {
+        s = $0; n = 0; i = 1; len = length(s)
+        while (i <= len) {
+            c = substr(s, i, 1)
+            if (c == " ") { i++; continue }
+            t = ""
+            if (c == "\"") {
+                i++
+                while (i <= len) {
+                    c = substr(s, i, 1)
+                    if (c == "\\") { t = t substr(s, i + 1, 1); i += 2; continue }
+                    i++
+                    if (c == "\"") break
+                    t = t c
+                }
+            } else {
+                while (i <= len && substr(s, i, 1) != " ") { t = t substr(s, i, 1); i++ }
+            }
+            tok[++n] = t
+        }
+        for (k = 3; k + 5 <= n; k += 6)
+            if (tok[k + 3] == "block" && (":" tok[k] ":") ~ /:sleep:/)
+                printf "%s (uid %s): %s\n", tok[k + 1], tok[k + 4], tok[k + 2]
+    }'
+}
+
+# A sleep inhibitor lock - the XFCE power manager's on the helm display,
+# say - makes this refuse; --force goes past every lock. The list is read
+# here because logind never holds root back with root's own locks, and this
+# runs as root. The request then asks logind's own check too
+# (SD_LOGIND_ROOT_CHECK_INHIBITORS, 1) - unlike `systemctl suspend
+# --check-inhibitors=yes`, neither refuses because the helm user is logged in.
+blockers="$(sleep_blockers)"
+if [ -n "$blockers" ]; then
+    printf '%s\n' "$blockers" | sed 's/^/  /' >&2
+    die "a sleep inhibitor lock is held (listed above) - 'boat-sleep --force' goes past it"
+fi
 if ! busctl call org.freedesktop.login1 /org/freedesktop/login1 \
         org.freedesktop.login1.Manager SuspendWithFlags t 1; then
     systemd-inhibit --list --no-pager >&2 || true

@@ -794,8 +794,8 @@ all the kernel offers, and pushes past inhibitor locks);
 good, which you want only on a board you can reach.
 
 Without `--force`, a sleep inhibitor lock another program holds - the XFCE
-power manager on the helm display, say - makes it refuse, and it lists the
-locks (`systemd-inhibit --list`). The logged-in helm user alone does not. On
+power manager on the helm display, say, or a root service - makes it
+refuse, and it lists the locks. The logged-in helm user alone does not. On
 an A/B image it also refuses, `--force` or not, while an update is being
 installed or is on trial (docs/07-updates.md).
 

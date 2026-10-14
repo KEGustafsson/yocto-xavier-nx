@@ -95,8 +95,13 @@ data_mounted() {
 }
 
 # One decision at a time: the gate, the deadline timer and a shutdown must
-# never both write grubenv, or commit a slot another has just failed.
-lock() { ab_lock; }
+# never both write grubenv, or commit a slot another has just failed. A
+# lock that cannot be had is not waited for twice in one run.
+lock_failed=0
+lock() {
+    [ "$lock_failed" = 1 ] && return 1
+    ab_lock || { lock_failed=1; return 1; }
+}
 
 slot_partition() {
     case "$1" in
@@ -177,7 +182,7 @@ stay_off() {
 }
 
 commit() {
-    lock
+    lock || die "could not take the A/B lock - slot $slot is NOT committed (the trial deadline, or GRUB's attempt count, ends this trial)"
     [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_OK")" = 1 ] \
         || die "slot $slot was failed meanwhile (the trial deadline) - not committing it"
     # BOAT_RETRY: the next trial gets its own shutdown retry.
@@ -193,11 +198,15 @@ commit() {
 }
 
 fail_trial() {
-    lock
+    mkdir -p "$BOAT_AB_RUNDIR" 2>/dev/null
     : > "$FAILED_MARK" 2>/dev/null || true
     warn "slot $slot ($(release)) failed its trial: $1"
-    grubenv_set "${slot}_OK=0" "${slot}_TRY=0" \
-        || warn "could not mark slot $slot bad - GRUB's own attempt count still ends this trial"
+    if lock; then
+        grubenv_set "${slot}_OK=0" "${slot}_TRY=0" \
+            || warn "could not mark slot $slot bad - GRUB's own attempt count still ends this trial"
+    else
+        warn "not marking slot $slot bad without the A/B lock - GRUB's own attempt count ends this trial at the reboot"
+    fi
     record "trial of slot $slot ($(release)) FAILED: $1"
     # The OTA check never offers a version that failed a trial here again.
     if data_mounted && mkdir -p "$STATE_DIR" 2>/dev/null; then
@@ -223,7 +232,9 @@ booted_on_trial && trial=1
 
 if [ "${1:-}" = "--deadline" ]; then
     [ "$trial" = 1 ] || exit 0
-    lock
+    # Without the lock the trial still ends (fail_trial reboots, and GRUB's
+    # attempt count does the rest).
+    lock || true
     [ -e "$COMMITTED_MARK" ] && exit 0
     # Failed already (boat.stay=1 keeps the board up after that): that
     # verdict, and the reason it recorded, stand.
@@ -246,7 +257,8 @@ if [ "${1:-}" = "--shutdown" ]; then
     [ -e "$COMMITTED_MARK" ] && exit 0
     [ -e "$FAILED_MARK" ] && exit 0
     [ "$(systemctl is-system-running 2>/dev/null)" = stopping ] || exit 0
-    lock
+    # Without the lock, no retry: the attempt counts, as a power cut's does.
+    lock || exit 0
     [ -e "$COMMITTED_MARK" ] && exit 0
     [ -e "$FAILED_MARK" ] && exit 0
     grubenv_valid "$BOAT_AB_GRUBENV" || exit 0
@@ -288,10 +300,13 @@ fi
 if [ "$trial" = 0 ] && [ "$committed" = 1 ] && grubenv_valid "$BOAT_AB_GRUBENV" \
         && { [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_OK")" != 1 ] \
              || [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_TRY")" != 0 ]; }; then
-    lock
-    grubenv_set "${slot}_OK=1" "${slot}_TRY=0" \
-        || problem "could not reset slot $slot's attempt count (the ESP will not take the write) - one more failed boot, or two reboots of any kind while this lasts, hands the board to the other slot"
-    ab_unlock
+    if lock; then
+        grubenv_set "${slot}_OK=1" "${slot}_TRY=0" \
+            || problem "could not reset slot $slot's attempt count (the ESP will not take the write) - one more failed boot, or two reboots of any kind while this lasts, hands the board to the other slot"
+        ab_unlock
+    else
+        problem "could not take the A/B lock to reset slot $slot's attempt count - one more failed boot hands the board to the other slot"
+    fi
 fi
 
 deadline=$(( $(uptime_s) + BOAT_HEALTH_DEADLINE ))
@@ -316,8 +331,7 @@ if [ -n "$problems" ]; then
     exit 1
 fi
 if [ -n "$(stay_off)" ] && [ "$(grubenv_get "$BOAT_AB_GRUBENV" BOAT_STAY)" = 1 ]; then
-    lock
-    if grubenv_set BOAT_STAY=0; then
+    if lock && grubenv_set BOAT_STAY=0; then
         say "debug hold (BOAT_STAY) ended: this boot was healthy"
     else
         warn "could not end the debug hold (BOAT_STAY=1)"

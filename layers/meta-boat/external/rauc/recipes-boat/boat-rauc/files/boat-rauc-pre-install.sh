@@ -158,7 +158,7 @@ for n in ${RAUC_TARGET_SLOTS:-}; do
 done
 [ -n "$targets" ] || die "RAUC named no target slot"
 
-ab_lock
+ab_lock || die "could not take the A/B lock - another grubenv writer is stuck; nothing changed"
 for t in $targets; do
     grubenv_set "${t}_COMMITTED=0" BOAT_RETRY=
     say "slot $t: marked not committed - it boots only as a trial until one passes"

@@ -40,7 +40,7 @@ trap '[ "$?" = 0 ] || alert "boat-grubenv-guard failed - the A/B boot state may 
 mountpoint -q "$BOAT_AB_ESP_MOUNT" || die "the ESP is not mounted at $BOAT_AB_ESP_MOUNT"
 check_layout || die "the disk does not match this image's A/B layout - not touching grubenv"
 
-ab_lock
+ab_lock || die "could not take the A/B lock - another grubenv writer is stuck; nothing written"
 if grubenv_valid "$BOAT_AB_GRUBENV"; then
     slot="$(booted_slot)"
     # Committed, and booted as such - not a trial, not GRUB's last resort

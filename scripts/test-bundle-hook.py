@@ -186,7 +186,8 @@ def health_is(want, says):
     def check(s, rc, out):
         e = []
         expect(e, rc == 0, "exit %d, expected 0" % rc)
-        got = slurp(s.n("etc/boat-update/health.conf"))
+        p = s.n("etc/boat-update/health.conf")
+        got = slurp(p) if os.path.exists(p) else None
         expect(e, got == want, "health.conf is %r, expected %r" % (got, want))
         expect(e, re.search(says, out), "output never matched %r" % says)
         return e
@@ -214,6 +215,9 @@ CASES = [
     ("a conffile someone changed is carried over",
      dict(health=EDITED_HEALTH, shipped=OLD_HEALTH), {},
      health_is(EDITED_HEALTH, r"carried over \S*/etc/boat-update/health\.conf")),
+    ("a conffile the image shipped and someone deleted stays deleted",
+     dict(health=None, shipped=OLD_HEALTH), {},
+     health_is(None, r"left /etc/boat-update/health\.conf out of the new slot")),
     ("a running image without the record carries every conffile, as before",
      dict(health=OLD_HEALTH), {},
      health_is(OLD_HEALTH, r"carried over \S*/etc/boat-update/health\.conf")),

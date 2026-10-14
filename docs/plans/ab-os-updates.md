@@ -435,7 +435,10 @@ At build time, `grub.cfg` is generated from `KERNEL_ARGS` and checked with
   advances. So **no writer edits `grubenv` in place**:
   - `boat-commit`, the guard, the RAUC handlers and `boat-update` write a
     copy, edit it, rename it over `grubenv`, flush, and copy it to
-    `grubenv.bak`, under one lock (`/run/boat-ab/commit.lock`);
+    `grubenv.bak`, under one lock (`/run/boat-ab/commit.lock`). A writer
+    that cannot have the lock within a minute writes nothing - one that went
+    on without it could undo another's decision - and GRUB's attempt count
+    decides instead;
   - RAUC's grub backend runs `grub-editenv` by name, and `rauc.service` has
     `/usr/lib/boat-ab/bin` first on its `PATH`: the `grub-editenv` there
     turns a `set` on `grubenv` into the same locked copy-and-rename, and
@@ -722,7 +725,8 @@ The order matches RAUC 1.13's `install.c`:
     (`/usr/lib/boat-ab/conffile-defaults.sha256`); a file that still
     matches is left as the new image has it, so a release can change its
     defaults (a renamed unit in the health gate's list, a `daemon.json` a
-    new Docker needs). An image from before the record carries them all;
+    new Docker needs). One the image shipped and someone deleted stays
+    deleted. An image from before the record carries them all;
   - the password hash fields of `root` and `boat`, merged (**D5**);
   - `/etc/nv_boot_control.conf`.
   - Not on this list: the OTA channel configuration. Its defaults ship in
@@ -1731,7 +1735,7 @@ boot and fallback findings:
 | a bundle RAUC refuses after the pre-install handler (wrong `compatible`, below `min-bundle-version`) still demoted the fallback slot | the handler makes RAUC's two checks first (5.6) |
 | `min-bundle-version` was not wired into any build script or document | `BOAT_MIN_BUNDLE_VERSION` in `env.sh`, `02-configure-build.sh` and the kas overlay, checked against `BOAT_RELEASE` as the build parses (5.7) |
 | bench builds signed their good bundles with the fleet key, which then had to be wherever bench builds run | a bench build signs with the bench keys |
-| `boat-sleep --force` slept during an install; and `--check-inhibitors=yes` refused whenever the helm user was logged in, on every build | refused during an install as during a trial; logind's own inhibitor check, which ignores logged-in users (5.6) |
+| `boat-sleep --force` slept during an install; and `--check-inhibitors=yes` refused whenever the helm user was logged in, on every build | refused during an install as during a trial; `boat-sleep` reads logind's list of sleep locks itself (logind never applies root's own locks to root), and then asks with logind's own check - neither refuses over a logged-in user (5.6) |
 | the trial deadline after a `boat.stay=1` failure overwrote the gate's reason and listed the release as failed twice | the deadline leaves a slot that is already failed alone |
 | plan 5.3 described a `grubenv` rebuild that consulted RAUC's status, which the guard never did | 5.3 describes the rules the guard implements, and what they mean for a rollback |
 | the GRUB harness ran no committed-slot load failure, no failing `initrd` or `boot`, no last resort with `B` committed, no `grub.cfg` failure, on an 8 MiB FAT; the scripts harness had no last-resort, lock or `boat-bootmode-guard` case; the initramfs, `boat-storage grow` and the layout generator had no test | all added: `test-grub-ab.py` (64 MiB FAT32, the built-in config), `test-ab-scripts.py`, `test-boat-storage.py`, and the new `test-ab-initramfs.py` and `test-ab-layout.py` |

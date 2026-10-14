@@ -366,8 +366,8 @@ changed them**: `/etc/default/boat-power`, `/etc/default/boat-bluetooth`,
 `/etc/default/boat-sleep-listener`, `/etc/bluetooth/main.conf`,
 `/etc/NetworkManager/conf.d/90-boat-wol.conf`, `/etc/docker/daemon.json` and
 `/etc/boat-update/health.conf`. One you never touched takes the new
-release's version, so a release can change its defaults. (An image built
-before this rule carries them all, once.)
+release's version, so a release can change its defaults; one you deleted
+stays deleted. (An image built before this rule carries them all, once.)
 
 **Any other edit under `/etc` does not survive an update.** Put it in
 `meta-boat`, or on `/data`.
