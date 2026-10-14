@@ -1331,9 +1331,11 @@ def socket_cgroups(inode):
 
 
 def rauc_cgroup():
-    """rauc.service's cgroup, as systemd names it; "" when it is not running."""
-    with contextlib.suppress(FileNotFoundError):
-        return run(["systemctl", "show", "-p", "ControlGroup", "--value", "rauc.service"]).stdout.strip()
+    """rauc.service's cgroup, as systemd names it; "" when it is not running,
+    or systemd does not answer within 10 s (the relay then refuses)."""
+    with contextlib.suppress(FileNotFoundError, subprocess.TimeoutExpired):
+        return run(["systemctl", "show", "-p", "ControlGroup", "--value", "rauc.service"],
+                   timeout=10).stdout.strip()
     return ""
 
 
