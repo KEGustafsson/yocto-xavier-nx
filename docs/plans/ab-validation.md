@@ -92,10 +92,12 @@ really reboot the board (a new boot ID). Each good bundle must come back on
 the other slot and commit; each faulty one must come back on the slot it
 started from, with the other slot marked bad - so a bundle that was
 refused before anything was written fails the cycle. A power-cut cycle
-waits for the cut to have happened, then only has to end committed on
-either slot, having booted after the cut (its uptime is shorter than the
-time since the cut). A cut command that fails fails the cycle, and so does
-an update the board refused or failed before the cut. The results go to a
+installs without `--reboot`, so only the cut can reboot the board. It waits
+for the cut to have happened, then only has to end committed on either
+slot, having booted after the cut (its uptime is shorter than the time
+since the cut). A cut command that fails fails the cycle, and so does one
+that cut nothing (the board never rebooted), and an update the board
+refused or failed before the cut. The results go to a
 CSV with a `delivery` column, and the exit status is the number of failed
 cycles. It runs two ways; record each run as its own result.
 
@@ -190,7 +192,7 @@ manual step on the bench board. The expected results are the plan's.
 | 40-42, 52 | bench | streamed install of a one-package change (record the bytes in docs/07), a link drop mid-stream, a server without Range, and a stream right after a cold boot |
 | 44 | bench | upload a bundle without its index: boards keep the previous index, no alarm |
 | 46, 47 | auto + bench | a server streaming past `size`; a redirect to another host / to `http` |
-| 48 | bench | `boat-update download` while the timer's run is downloading: the second waits on the lock |
+| 48 | bench | `boat-update download` while the timer's run is downloading: the timer's run is stopped and the manual one goes ahead, from where the other had got to |
 | 49 | bench | sleep/resume and link up/down: a check on each, at most one per 30 minutes |
 | 50 | auto + bench | during a trial: `check`/`download` refused until commit |
 | 53 | bench | during a trial, power off from the helm (then the power key, in the retried trial): the first boot after it tries the trial again; the second time the board falls back |

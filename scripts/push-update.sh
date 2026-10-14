@@ -46,7 +46,12 @@ log "checking ${TARGET} ..."
 ssh_b 'boat-update status' || die "cannot run boat-update on ${TARGET} - is it an A/B image?"
 BEFORE="$(ssh_b 'sed -n "s/.*rauc\.slot=\([AB]\).*/\1/p" /proc/cmdline')"
 
-REMOTE="/data/boat-update/incoming/$(basename "${BUNDLE}")"
+# The name goes into a command line the board's shell runs as root: only a
+# plain bundle name, never one that could end the quoting around it.
+NAME="$(basename "${BUNDLE}")"
+[[ "${NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.raucb$ ]] \
+  || die "'${NAME}' is not a plain bundle file name (letters, digits, . _ + -, ending .raucb) - rename it first"
+REMOTE="/data/boat-update/incoming/${NAME}"
 log "copying $(basename "${BUNDLE}") ($(( $(stat -c %s "${BUNDLE}") >> 20 )) MiB) ..."
 ssh_b "mkdir -p /data/boat-update/incoming"
 # shellcheck disable=SC2086

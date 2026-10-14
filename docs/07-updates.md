@@ -90,7 +90,10 @@ IMAGE=boat-image scripts/03-build.sh
 scripts/03-build.sh boat-bundle      # the update bundle (and the image in it)
 ```
 
-With kas: `AB_LAYOUT=1 BOAT_RELEASE=1.0.0 scripts/build-kas.sh`.
+With kas: `AB_LAYOUT=1 BOAT_RELEASE=1.0.0 scripts/build-kas.sh` builds the
+image, and `AB_LAYOUT=1 BOAT_RELEASE=1.0.0 scripts/build-kas.sh -- --target
+boat-bundle` the bundle. The build checks the release and the key directory
+itself either way.
 
 **`BOAT_RELEASE` must grow with every release you ship.** It is compared as
 a version: `1.0.0 < 1.0.1 < 1.1.0-rc.1 < 1.1.0`, and `2026.10.1` works too.
@@ -119,8 +122,10 @@ Use the default `initrd-flash` path. `--host-drive` relies on a
 `doexternal.sh` that meta-tegra's kirkstone branch does not ship, and the DATA
 partition's first filesystem is written by `initrd-flash`.
 
-After the first boot, slot A runs, slot B is empty, and `/data` fills the
-rest of the SSD (`boat-storage status`).
+After the first boot, slot A runs, slot B is not used, and `/data` fills
+the rest of the SSD (`boat-storage status`). (A flash does not write slot
+B: on a board that already had the A/B layout, the old slot B is still
+there, marked unusable, until the first update overwrites it.)
 
 ## Day to day: `boat-update`
 
@@ -134,6 +139,15 @@ boat-update history          # installs, trials and what became of them
 sudo boat-update rollback    # switch to the other slot (if it is usable) and reboot
 sudo boat-update debug-hold on|off    # next boot: stop for inspection after a failure, not reset
 ```
+
+`boat-update` exits 0 when it did what was asked, and 1 when it refused or
+failed (the message says why). `download` exits 2 when it ended without a
+ready bundle - waiting for an unmetered link, no progress, or nothing on
+offer - so `download && install --reboot` stops there. A command you type
+does not wait on the background check or download: it stops it (the
+download carries on from where it was at its next run) and goes ahead.
+`rollback` sets GRUB's state itself, so it works even when `/data`, and so
+RAUC, is what the new release broke.
 
 `install` runs as its own systemd unit, so losing the SSH session half way
 does not stop it; it still exits non-zero if the install fails. After the reboot the new slot is **on trial**. `boat-update
@@ -154,7 +168,10 @@ stick instead, and then neither slot runs.
   bundle is deleted, because the old slot, not the file, is what you go back
   to.
 - **It failed:** the board is back on the old slot.
-  - `boat-update history` and `/data/boat-update/last-result` say why.
+  - `boat-update history` and `/data/boat-update/last-result` say why:
+    the health check that failed, or - when the trial ended before
+    `boat-commit` could decide (a kernel panic, a hang, a power cut, a
+    slot GRUB could not load) - that it ended without a verdict.
   - `journalctl -b -1` shows the failed boot itself; the journal lives on
     `/data`.
   - That version is never offered to this board again - also when the
@@ -234,6 +251,15 @@ that RAUC refuses is **given up**, not counted as a failed trial: a new
 index (the next publish) tries it again. `status` shows when the channel
 last published.
 
+A check or download that fails shows in `status` as an **ALERT**, with its
+reason: an index that does not verify or is a replay, a channel whose
+certificate the board does not trust, a download `/data` has no room for.
+It stays until a check works again (a failed download: until a download
+finishes, or the offer goes away). A refusal that is only the board's
+state is not an alert, and the timer's run does not count it as failed: on
+trial, no network or a channel nothing answers for, the clock not set yet,
+another `boat-update` running.
+
 ### On the board: `/data/boat-update/channel.conf`
 
 The image ships defaults in `/etc/boat-update/channel.conf`. Put your
@@ -249,7 +275,9 @@ BOAT_UPDATE_RATE_LIMIT=""           # e.g. 200k
 ```
 
 - **Schedule.** The timer looks for updates four times a day, after every
-  network change, and after waking from sleep.
+  network change, and after waking from sleep. A check made before chrony
+  has set the clock (the board has no battery-backed clock) runs again a
+  few times within the hour.
 - **Downloads.** They run in ten-minute windows. Each one resumes where the
   last stopped, whether that was a dropped link, a sleep or a reboot.
 - **Disk space.** A download needs the bundle's size plus 2 GiB free on
@@ -269,9 +297,29 @@ boat-update download --allow-metered` overrides it once.
 
 **Access control.** A public channel is the default. Bundles hold nothing
 secret: the image's password hash is already in this repository. To restrict
-it, use a TLS client certificate: put `client.crt` and `client.key` in
-`/data/boat-update/`. Basic auth and bearer tokens are not supported, because
-they leak across redirects and into logs.
+it, use a TLS client certificate:
+
+```bash
+sudo install -m 644 client.crt /data/boat-update/client.crt
+sudo install -m 600 client.key /data/boat-update/client.key   # root's alone - checked
+```
+
+`boat-update` refuses a key anyone but root can read. Basic auth and bearer
+tokens are not supported, because they leak across redirects and into logs.
+
+**The channel's own certificate.** The board checks the channel's TLS
+certificate against the image's `ca-certificates`. A server whose
+certificate comes from a CA of its own - a bench server, or Caddy's
+`tls internal` for a LAN address - needs that CA on the board:
+
+```bash
+sudo install -m 644 server-ca.pem /data/boat-update/server-ca.pem
+```
+
+or `BOAT_UPDATE_SERVER_CA=<file>` in `channel.conf`. The board then trusts
+that CA, and only that CA, for the channel: downloads, checks and streams.
+Keep it on `/data`: a CA added to the running slot's `/etc/ssl` is gone
+after the next update, because the other slot is a fresh image.
 
 ### Streaming instead of downloading
 
@@ -291,16 +339,21 @@ ever followed, with the client certificate (which RAUC never sees, so the
 key stays root-only), and only over the link that was checked when the
 stream started. That link must not be metered unless `--allow-metered` is
 given (or `BOAT_UPDATE_METERED=yes`); either way the stream stays bound to
-it. The relay passes on only an answer for exactly the range RAUC asked
-for. If that link goes away mid-stream, the stream fails and the board
-stays on its slot; it never moves to another route. On top of that:
+it. The relay serves RAUC's streaming client alone - no other user or
+container on the board - and passes on only an answer for exactly the
+range RAUC asked for. If that link goes away mid-stream, the stream fails
+and the board stays on its slot; it never moves to another route. With a
+VPN as the default route that is not so - the tunnel follows whatever link
+carries it, metered or not - so a stream over a VPN needs
+`--allow-metered`; download, then install, instead. On top of that:
 
 - before RAUC starts, `boat-update` asks for the bundle's first byte and
   refuses to stream from a channel that redirects it or ignores Range
   requests;
-- after the stream, the other slot must hold exactly the release the index
-  offered (RAUC itself checks only the bundle's signature); otherwise it is
-  marked bad before anything boots it, and the install fails.
+- the bundle must be the release the index offered (RAUC itself checks
+  only its signature): RAUC's pre-install handler refuses any other before
+  anything is written, and the slot is checked again after the stream,
+  and marked bad before anything boots it if it is not.
 
 A stream is offered only what a download would be: newer than the running
 release, not a release that failed a trial here, and checked on the channel

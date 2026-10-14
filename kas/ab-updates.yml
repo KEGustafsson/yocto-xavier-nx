@@ -28,6 +28,10 @@ env:
   BOAT_KEYS_DIR: ""
   BOAT_RELEASE: ""
   BOAT_MIN_BUNDLE_VERSION: ""
+  # Bench images (docs/plans/ab-validation.md); scripts/env.sh's defaults.
+  BOAT_BENCH: "0"
+  BOAT_BENCH_KEYS_DIR: ""
+  BOAT_FAULT: ""
 
 local_conf_header:
   # kas writes these entries sorted by key, and this one has to come AFTER

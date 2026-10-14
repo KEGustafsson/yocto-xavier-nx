@@ -6,11 +6,14 @@
 #   BOAT_PUBLISH_DEST=/srv/www/boat-xavier-nx scripts/publish-update.sh ...
 #   BOAT_PUBLISH_DEST=user@host:/srv/www/boat-xavier-nx scripts/publish-update.sh ...
 #
-# Reads the bundle's own manifest (version, compatible, L4T release), gives
-# it a content-addressed name, writes the channel index and signs it with the
+# Checks the bundle the way a board's RAUC will - a verity bundle, signed
+# by a bundle-signing certificate under the update CA - and reads its
+# signed manifest (version, compatible, L4T release). Gives it a
+# content-addressed name, writes the channel index and signs it with the
 # index-signing key from scripts/gen-update-keys.sh into one attached
-# index.p7, then uploads the bundle FIRST and the index LAST - so a board
-# never sees an index naming a file that is not there yet.
+# index.p7, then uploads the bundle FIRST - checking the copy - and the
+# index LAST, so a board never sees an index naming a file that is not
+# there, or not whole. Any failure stops it before the index is published.
 #
 # BOAT_PUBLISH_DEST is a local directory (a web server's document root) or an
 # rsync target (host:path); either way it is the directory that holds one
@@ -27,7 +30,9 @@
 #
 # A bundle from a BOAT_BENCH build (its compatible ends in -bench) goes to
 # the 'bench' channel only, and nothing else does: its rootfs trusts the
-# bench CA (docs/plans/ab-validation.md).
+# bench CA (docs/plans/ab-validation.md). The bench channel's index is
+# signed with the bench keys (BOAT_BENCH_KEYS_DIR, which bench images
+# trust), so a bench host needs no fleet private key at all.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -55,22 +60,65 @@ CHANNEL="${ARGS[0]}"
 BUNDLE="${ARGS[1]}"
 [[ "${CHANNEL}" =~ ^[a-z][a-z0-9-]*$ ]] || die "channel must be a simple name like stable or testing, got '${CHANNEL}'"
 [[ -f "${BUNDLE}" ]] || die "no bundle at ${BUNDLE}"
+# The deploy directory's boat-bundle-<MACHINE>.raucb is a symlink, and
+# rsync without -L skips a symlink ("skipping non-regular file") and still
+# exits 0 - which would publish an index naming a bundle that never
+# arrived. Publish the file it points at.
+BUNDLE="$(readlink -f -- "${BUNDLE}")"
 : "${BOAT_PUBLISH_DEST:?set BOAT_PUBLISH_DEST to the channel root (a directory, or host:path for rsync)}"
 need openssl
-need unsquashfs
 need python3
 
-KEY="${BOAT_KEYS_DIR}/index-signing.key.pem"
-CERT="${BOAT_KEYS_DIR}/index-signing.cert.pem"
-[[ -f "${KEY}" && -f "${CERT}" ]] || die "no index-signing key in ${BOAT_KEYS_DIR} - run scripts/gen-update-keys.sh"
+# The keys this channel is published with: the bench's for 'bench', the
+# fleet's for every other channel.
+if [[ "${CHANNEL}" == bench ]]; then
+  KEYS="${BOAT_BENCH_KEYS_DIR}"
+  GEN="scripts/gen-update-keys.sh --bench"
+else
+  KEYS="${BOAT_KEYS_DIR}"
+  GEN="scripts/gen-update-keys.sh"
+fi
+KEY="${KEYS}/index-signing.key.pem"
+CERT="${KEYS}/index-signing.cert.pem"
+[[ -f "${KEY}" && -f "${CERT}" && -f "${KEYS}/ca.cert.pem" ]] \
+  || die "no index-signing key and CA in ${KEYS} - run ${GEN}"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
-# A verity bundle is a squashfs with the signature appended; the manifest is
-# a file inside it.
-unsquashfs -q -cat "${BUNDLE}" manifest.raucm > "${WORK}/manifest.raucm" 2>/dev/null \
-  || die "cannot read manifest.raucm from ${BUNDLE} - is it a RAUC bundle?"
+# The bundle, checked as a board's RAUC checks it - before any board spends
+# its link on it. RAUC 1.13's verity format appends a CMS signature that
+# carries the manifest, then the signature's size as 8 bytes, big-endian.
+# A plain bundle (detached signature), one signed under another CA or by a
+# key that is not a bundle-signing one, or no bundle at all, stops here.
+# The index is made from the manifest inside the verified signature.
+# Bench images trust both CAs, so a bench bundle may be signed under either.
+BUNDLE_CA="${WORK}/bundle-ca.pem"
+cat "${KEYS}/ca.cert.pem" > "${BUNDLE_CA}"
+if [[ "${CHANNEL}" == bench && -f "${BOAT_KEYS_DIR}/ca.cert.pem" ]]; then
+  cat "${BOAT_KEYS_DIR}/ca.cert.pem" >> "${BUNDLE_CA}"
+fi
+python3 - "${BUNDLE}" "${WORK}/bundle.sig" <<'PY' || die "${BUNDLE} is not a signed RAUC bundle (no signature at its end)"
+import struct, sys
+with open(sys.argv[1], "rb") as f:
+    end = f.seek(0, 2)
+    if end < 8:
+        sys.exit(1)
+    f.seek(end - 8)
+    size = struct.unpack(">Q", f.read(8))[0]
+    if not 0 < size <= min(64 * 1024, end - 8):
+        sys.exit(1)
+    f.seek(end - 8 - size)
+    sig = f.read(size)
+with open(sys.argv[2], "wb") as out:
+    out.write(sig)
+PY
+openssl cms -verify -inform DER -binary -in "${WORK}/bundle.sig" -out "${WORK}/manifest.raucm" \
+  -signer "${WORK}/bundle-signer.pem" -CAfile "${BUNDLE_CA}" -no-CApath -no-CAstore -purpose any \
+  2> "${WORK}/verify.err" \
+  || die "${BUNDLE}'s signature does not verify against ${KEYS}/ca.cert.pem, or it is not a verity bundle: $(tail -n 1 "${WORK}/verify.err")"
+openssl x509 -in "${WORK}/bundle-signer.pem" -noout -ext extendedKeyUsage 2>/dev/null | grep -q "Code Signing" \
+  || die "${BUNDLE} is signed by a certificate without the codeSigning extended key usage - not the bundle-signing key"
 
 SHA256="$(sha256sum "${BUNDLE}" | cut -d' ' -f1)"
 SIZE="$(stat -c %s "${BUNDLE}")"
@@ -80,7 +128,7 @@ SIZE="$(stat -c %s "${BUNDLE}")"
 # last serial + 1 and the time in seconds, so a lost or restored counter, or
 # a second publishing machine, can still never go back below what boards
 # have seen. A counter that is there but unreadable stops the publish.
-SERIAL_FILE="${BOAT_KEYS_DIR}/index-serial"
+SERIAL_FILE="${KEYS}/index-serial"
 LAST=0
 if [[ -e "${SERIAL_FILE}" ]]; then
   LAST="$(tr -d '[:space:]' < "${SERIAL_FILE}")"
@@ -96,6 +144,8 @@ import configparser, datetime, json, sys
 manifest, out, channel, serial, size, sha, reflash, notes = sys.argv[1:]
 cp = configparser.ConfigParser(interpolation=None, strict=False)
 cp.read(manifest)
+if cp.get("bundle", "format", fallback="plain") != "verity":
+    sys.exit("the bundle is not in RAUC's verity format, which boards require (bundle-formats=-plain)")
 version = cp.get("update", "version")
 doc = {
     "channel": channel,
@@ -128,12 +178,14 @@ openssl cms -sign -nodetach -binary -outform DER \
   -signer "${CERT}" -inkey "${KEY}" -in "${WORK}/index.json" -out "${WORK}/index.p7"
 # Check it the way a board will, before anything is uploaded.
 openssl cms -verify -inform DER -binary -in "${WORK}/index.p7" -out /dev/null \
-  -CAfile "${BOAT_KEYS_DIR}/ca.cert.pem" -no-CApath -no-CAstore -purpose smimesign -no_check_time 2>/dev/null \
-  || die "the signed index does not verify against ${BOAT_KEYS_DIR}/ca.cert.pem"
+  -CAfile "${KEYS}/ca.cert.pem" -no-CApath -no-CAstore -purpose smimesign -no_check_time 2>/dev/null \
+  || die "the signed index does not verify against ${KEYS}/ca.cert.pem"
 
 # Record the serial before anything is uploaded, atomically: a publish that
-# fails half way must not be followed by one that reuses its serial.
-printf '%s\n' "${SERIAL}" > "${SERIAL_FILE}.tmp" && mv "${SERIAL_FILE}.tmp" "${SERIAL_FILE}"
+# fails half way must not be followed by one that reuses its serial. Each
+# step its own command: under set -e, a failure inside an && list goes on.
+printf '%s\n' "${SERIAL}" > "${SERIAL_FILE}.tmp" || die "cannot write ${SERIAL_FILE}"
+mv "${SERIAL_FILE}.tmp" "${SERIAL_FILE}" || die "cannot write ${SERIAL_FILE}"
 
 log "publishing ${VERSION} to '${CHANNEL}' as ${NAME} (serial ${SERIAL}, $(( SIZE >> 20 )) MiB)"
 if [[ "${BOAT_PUBLISH_DEST}" == *:* ]]; then
@@ -145,7 +197,15 @@ if [[ "${BOAT_PUBLISH_DEST}" == *:* ]]; then
 else
   DEST="${BOAT_PUBLISH_DEST}/${CHANNEL}"
   mkdir -p "${DEST}"
-  cp "${BUNDLE}" "${DEST}/.${NAME}.tmp" && mv "${DEST}/.${NAME}.tmp" "${DEST}/${NAME}"
-  cp "${WORK}/index.p7" "${DEST}/.index.p7.tmp" && mv "${DEST}/.index.p7.tmp" "${DEST}/index.p7"
+  # Each step its own command, so any failure stops the publish (set -e
+  # does not stop at a failure inside an && list) - and the copy is checked
+  # before an index names it: a full disk can leave a short file.
+  cp "${BUNDLE}" "${DEST}/.${NAME}.tmp" || die "could not copy the bundle to ${DEST} - nothing published"
+  [[ "$(stat -c %s "${DEST}/.${NAME}.tmp")" == "${SIZE}" \
+     && "$(sha256sum "${DEST}/.${NAME}.tmp" | cut -d' ' -f1)" == "${SHA256}" ]] \
+    || die "the copy in ${DEST} is not the bundle (short or changed) - nothing published"
+  mv "${DEST}/.${NAME}.tmp" "${DEST}/${NAME}" || die "could not move the bundle into place - nothing published"
+  cp "${WORK}/index.p7" "${DEST}/.index.p7.tmp" || die "could not copy the index to ${DEST} - the bundle is there, the old index still in place"
+  mv "${DEST}/.index.p7.tmp" "${DEST}/index.p7" || die "could not move the index into place"
 fi
 log "published. Boards following '${CHANNEL}' see it at their next check ('boat-update check' to ask now)."
