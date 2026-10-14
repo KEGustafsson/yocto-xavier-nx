@@ -47,9 +47,21 @@ jobs:
           sudo apt-get install -y --no-install-recommends shellcheck python3-yaml \
             grub-emu gdisk dosfstools mtools
 
+      # The boat runs Python 3.10 (kirkstone); the runner's python3 is newer.
+      # A separate 3.10 - not put first on PATH - for lint.sh's check of
+      # the Python that ships to the boat.
+      - name: The boat's Python (3.10)
+        id: py310
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          update-environment: false
+
       # LINT_STRICT=1 turns "tool not installed" into a failure. Without it a
       # missing tool is only a warning, which is right for a developer laptop
       # and wrong for CI - a silently skipped check reads exactly like a
       # passing one.
       - name: Run checks
+        env:
+          BOAT_TARGET_PYTHON: ${{ steps.py310.outputs.python-path }}
         run: LINT_STRICT=1 ./scripts/lint.sh

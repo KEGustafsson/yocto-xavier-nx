@@ -71,10 +71,16 @@ do_install:prepend() {
 do_install[vardeps] += "BOAT_BUNDLE_COMPATIBLE BOAT_AB_DISK BOAT_AB_PARTNUM_APP_A \
     BOAT_AB_PARTNUM_APP_B BOAT_MIN_BUNDLE_VERSION"
 
-# min-bundle-version, checked as the build parses (kas builds as well as
-# scripts/02-configure-build.sh's): a version RAUC can read, and not above
-# this build's own release - or every board it is flashed on would refuse
-# this build's own bundles.
+# The update settings, checked as the build parses - kas builds pass them
+# straight in, past scripts/02-configure-build.sh's own checks:
+# - BOAT_RELEASE a version RAUC and boat-update can compare (a board whose
+#   release is not one cannot tell an older offer from a newer one);
+# - BOAT_KEYS_DIR absolute, and not inside this repository or the build
+#   directory (a clean-up deletes it, git commits it);
+# - min-bundle-version a version too, and not above this build's own
+#   release - or every board it is flashed on would refuse this build's own
+#   bundles.
+BOAT_RAUC_APPEND_DIR := "${THISDIR}"
 def boat_semver_le(a, b):
     """RAUC's r_semver_less_equal(a, b); ValueError if either does not parse."""
     def parse(v):
@@ -103,6 +109,22 @@ def boat_semver_le(a, b):
     return len(fa) <= len(fb)
 
 python () {
+    import os, re
+    release = d.getVar('BOAT_RELEASE') or ''
+    if release and not re.match(r'^[0-9]+(\.[0-9]+){0,2}(-[0-9A-Za-z.]+)?(\+[0-9A-Za-z.]+)?$', release):
+        bb.fatal("BOAT_RELEASE must be a version like 1.4.0 or 2026.10.1-rc.1 (no '-' inside the "
+                 "pre-release part: RAUC splits at the last one), got %r" % release)
+    keys = d.getVar('BOAT_KEYS_DIR') or ''
+    if keys:
+        if not os.path.isabs(keys):
+            bb.fatal("BOAT_KEYS_DIR must be an absolute path, got %r" % keys)
+        repo = os.path.realpath(os.path.join(d.getVar('BOAT_RAUC_APPEND_DIR'), *[os.pardir] * 6))
+        for inside in (repo, os.path.realpath(d.getVar('TOPDIR'))):
+            if (os.path.realpath(keys) + os.sep).startswith(inside + os.sep):
+                bb.fatal("BOAT_KEYS_DIR (%s) is inside %s - keep the update keys where a clean-up "
+                         "cannot delete them and git cannot commit them" % (keys, inside))
+    if (d.getVar('BOAT_BENCH') or '0') not in ('0', '1'):
+        bb.fatal("BOAT_BENCH must be 0 or 1, got %r" % d.getVar('BOAT_BENCH'))
     floor = d.getVar('BOAT_MIN_BUNDLE_VERSION') or ''
     release = d.getVar('BOAT_RELEASE_EFFECTIVE')
     if not floor:

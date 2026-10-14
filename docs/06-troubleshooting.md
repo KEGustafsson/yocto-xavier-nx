@@ -119,7 +119,8 @@ Start with `boat-update` (status) and `boat-update history`; the full guide is
 
 | Symptom | Fix |
 |---------|-----|
-| An update installed, the board rebooted, and it is back on the old version | The trial failed and GRUB fell back - working as designed. `boat-update history` and `/data/boat-update/last-result` give the reason; `journalctl -b -1 -u boat-commit` shows the failed boot. That version is not offered again. |
+| An update installed, the board rebooted, and it is back on the old version | The trial failed and GRUB fell back - working as designed. `boat-update history` and `/data/boat-update/last-result` give the reason: the health check that failed, or that the trial ended without a verdict (a panic, a hang, a power cut, an unloadable slot - then `journalctl -b -1` shows that boot, if it got that far). `journalctl -b -1 -u boat-commit` shows the health gate's run. That version is not offered again. |
+| `boat-update install` fails with "RAUC did not install ..." | The lines above it starting "RAUC's install handler:" say why (the wrong L4T release, a disk layout that does not match, ...). `journalctl -u rauc` has the rest. |
 | `status` says "booted OUTSIDE GRUB" | UEFI's `L4TDefaultBootMode` was reset (e.g. "load defaults" in the UEFI menu), so L4TLauncher booted slot A directly. `boat-bootmode-guard` has already set it back: reboot once. Updates are refused until then. |
 | `status` says "grubenv was torn and rebuilt" | A power cut hit a write of GRUB's boot state; the board kept the slot it booted. The other slot is marked unusable until the next update (unless this boot was a trial). Nothing to do. |
 | `/data` is not mounted | `journalctl -b -u boat-data-check -u data.mount` says why; `boat-storage status` shows the partitions. The board runs without `/data` (no Docker, no OTA) rather than refusing to boot. A DATA that holds no filesystem (e.g. after `--host-drive`) needs `sudo boat-storage format-data`, which asks first. |

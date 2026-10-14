@@ -37,11 +37,12 @@
 # barrel jack: "relay off; sleep 3; relay on" - it must return once power
 # is back), every Nth cycle (--power-cut-every N) runs it at a random
 # moment after the install starts (over the air: after the download).
-# Such a cycle waits for the cut to have happened, then only has to end
-# with the board up and committed on either slot - exactly what a power
-# cut may legitimately do - having booted after the cut (its uptime is
-# shorter than the time since). A cut command that fails, or an update the
-# board refused before the cut, fails the cycle.
+# Such a cycle installs without --reboot, so only the cut can reboot the
+# board; it waits for the cut to have happened, then only has to end with
+# the board up and committed on either slot - exactly what a power cut may
+# legitimately do - having booted after the cut (its uptime is shorter than
+# the time since). A cut command that fails, or one that cut nothing (no new
+# boot), or an update the board refused before the cut, fails the cycle.
 #
 # Results go to a CSV (default ab-soak-<time>.csv), with how each bundle
 # was delivered (ssh, ota or ota-stream) so the two soaks are recorded
@@ -200,6 +201,9 @@ for (( c = 1; c <= CYCLES; c++ )); do
       else
         install_cmd="boat-update install --reboot"
       fi
+    elif [[ ! "$(basename "${bundle}")" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.raucb$ ]]; then
+      # It goes into a command line the board's shell runs as root.
+      err "  $(basename "${bundle}") is not a plain bundle file name - rename it"
     else
       remote="/data/boat-update/incoming/$(basename "${bundle}")"
       # Copied over ssh rather than scp: BOAT_SSH_OPTS is written for ssh
@@ -209,6 +213,13 @@ for (( c = 1; c <= CYCLES; c++ )); do
       else
         err "  could not copy the bundle to the board"
       fi
+    fi
+    if [[ -n "${install_cmd}" && "${cut}" == yes ]]; then
+      # A cut cycle installs without --reboot, so the only way the board
+      # can come back with a new boot ID is the power cut: a cut command
+      # that does nothing (a stub, the wrong relay channel) fails the cycle
+      # instead of passing on the board's own reboot.
+      install_cmd="${install_cmd% --reboot}"
     fi
     if [[ -n "${install_cmd}" ]]; then
       if [[ "${cut}" == yes ]]; then

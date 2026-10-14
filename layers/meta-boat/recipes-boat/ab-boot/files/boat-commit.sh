@@ -19,8 +19,9 @@
 #     mounted; grubenv is valid; RAUC answers (when /data is there: RAUC's
 #     service waits for it).
 #   Tier 2, trial boots only (boat.trial=1): the critical units are active
-#     (health.conf), none of the listed units has failed, and - if the
-#     operator turned them on - the checks in /data/boat-update/health.d.
+#     (health.conf), none of the listed units has failed, the update client
+#     starts, and - if the operator turned them on - the checks in
+#     /data/boat-update/health.d.
 #
 # The checks are retried for BOAT_HEALTH_DEADLINE seconds, so units that
 # come up late are given the chance. Then:
@@ -145,6 +146,11 @@ tier2() {
             return 1
         fi
     done
+    # The update client, which every later update and every rollback
+    # needs: a release that breaks it must not commit.
+    if command -v boat-update >/dev/null 2>&1; then
+        boat-update --help >/dev/null 2>&1 || fail "the update client does not start (boat-update --help)" || return 1
+    fi
     if [ "$BOAT_HEALTH_CHECKS_D" = 1 ] && [ -d "$BOAT_HEALTH_CHECKS_DIR" ]; then
         for check in "$BOAT_HEALTH_CHECKS_DIR"/*; do
             [ -f "$check" ] && [ -x "$check" ] || continue

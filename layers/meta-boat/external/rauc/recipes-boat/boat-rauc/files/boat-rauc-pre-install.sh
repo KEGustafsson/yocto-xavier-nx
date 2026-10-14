@@ -6,7 +6,12 @@
 # non-zero exit stops the install with nothing changed. It refuses unless:
 #
 #   - the board came up through GRUB (rauc.slot= on the command line), from
-#     a slot that is committed: no install starts during a trial;
+#     a slot that is committed: no install starts during a trial. (GRUB's
+#     last resort, boat.lastresort=1, boots whatever there is - an install
+#     is how such a board is mended, so it may install.);
+#   - when boat-update runs the install, the bundle is the release it is
+#     installing (/run/boat-update/expect): a channel that serves another
+#     signed bundle than its index offered gets nothing written;
 #   - /data is the DATA partition (RAUC's data directory lives there);
 #   - every partition RAUC is about to write is the one this layout puts at
 #     that number (GPT name APP or APP_b), and is not the booted slot;
@@ -35,8 +40,27 @@ slot="$(booted_slot)"
 mountpoint -q "$BOAT_AB_ESP_MOUNT" || die "the ESP is not mounted at $BOAT_AB_ESP_MOUNT"
 check_layout || die "the disk does not match this image's A/B layout"
 grubenv_valid "$BOAT_AB_GRUBENV" || die "grubenv is not valid - reboot so boat-grubenv-guard can rebuild it"
-[ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_COMMITTED")" = 1 ] \
-    || die "slot $slot is still on trial - let it commit (or roll back) before installing"
+# On trial: booted as one and not committed yet this boot (boat-commit's
+# mark), or not committed in grubenv - as boat-update decides it.
+if booted_on_trial; then
+    [ -e "$BOAT_AB_RUNDIR/committed" ] \
+        || die "slot $slot is still on trial - let it commit (or roll back) before installing"
+elif ! booted_lastresort; then
+    [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_COMMITTED")" = 1 ] \
+        || die "slot $slot is still on trial - let it commit (or roll back) before installing"
+fi
+
+# boat-update writes "VERSION PID" while it runs an install; a file whose
+# writer is gone is left over and means nothing.
+expect=/run/boat-update/expect
+if [ -r "$expect" ]; then
+    want_release="" want_pid=""
+    read -r want_release want_pid < "$expect" || true
+    if [ -n "$want_pid" ] && [ -d "/proc/$want_pid" ] \
+            && [ "${RAUC_META_BOAT_RELEASE:-}" != "$want_release" ]; then
+        die "this bundle is release '${RAUC_META_BOAT_RELEASE:-?}', but boat-update is installing $want_release - refusing it"
+    fi
+fi
 
 # INI value: ini_get FILE SECTION KEY, blanks around it trimmed.
 ini_get() {

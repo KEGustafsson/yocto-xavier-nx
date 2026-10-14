@@ -61,9 +61,14 @@ FILES:${PN} = "\
 
 # The image's defaults; an update replaces them - the operator's settings
 # live in /data/boat-update/channel.conf, which no update touches.
+# python3-netserver (socketserver) and python3-html: http.server, for the
+# stream relay. boat-image has them only through docker-compose's requests;
+# boat-update ships in every A/B image.
 RDEPENDS:${PN} = "\
     python3-core \
     python3-json \
+    python3-netserver \
+    python3-html \
     python3-crypt \
     python3-fcntl \
     python3-shell \
@@ -79,4 +84,5 @@ RDEPENDS:${PN} = "\
 "
 # nmcli: the metered check. Without NetworkManager every link counts as
 # metered, which is the safe answer.
-RRECOMMENDS:${PN} = "networkmanager-nmcli"
+# chrony: the clock gate asks chronyc; without it, timedatectl.
+RRECOMMENDS:${PN} = "networkmanager-nmcli chrony"

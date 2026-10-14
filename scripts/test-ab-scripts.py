@@ -44,6 +44,11 @@ NV_GUID = "781e084c-a330-417c-b678-38e696380cb9"
 # How long the scripts wait for the A/B lock here (60 s on the board).
 LOCK_WAIT = 3
 
+# A process id that no longer runs: a finished child's.
+_dead = subprocess.Popen(["true"])
+_dead.wait()
+DEAD_PID = _dead.pid
+
 GOOD_ENV = dict(ORDER="A B", A_OK="1", A_TRY="1", A_COMMITTED="1",
                 B_OK="1", B_TRY="0", B_COMMITTED="1", BOAT_STAY="0")
 
@@ -68,10 +73,14 @@ class Board:
                  failed=(), rauc="ok", release="1.1.0", health_deadline=0,
                  late=(), editenv_fails=False, committed_mark=False,
                  failed_mark=False, system_state="running", efivars=None,
-                 efi_readonly=(), manifest=None, sysconf=None):
+                 efi_readonly=(), manifest=None, sysconf=None, expect=None,
+                 boat_update=None):
         """efivars: {name: bytes} in the fake efivarfs (attributes added).
         efi_readonly: variables efivar fails to write. manifest/sysconf:
-        the bundle's [update] and system.conf's [system] keys."""
+        the bundle's [update] and system.conf's [system] keys. expect:
+        (release, pid) in boat-update's /run/boat-update/expect.
+        boat_update: "ok" or "broken" - a boat-update that starts, or not
+        (None: there is none)."""
         self.root = root
         for d in ("bin", "proc", "run", "etc", "data", "boot/efi/EFI/BOOT",
                   "efivars", "bundle", "etc/rauc"):
@@ -97,6 +106,10 @@ class Board:
             # ... and that this boot's trial failed.
             self.write("run/boat-ab/trial-failed", "")
         self.write("system-state", system_state + "\n")
+        if expect is not None:
+            os.makedirs(os.path.join(root, "run/boat-update"), exist_ok=True)
+            self.write("run/boat-update/expect", "%s %d\n" % expect)
+        self.boat_update = boat_update
         for name, value in (efivars or {}).items():
             with open(os.path.join(root, "efivars", "%s-%s" % (name, NV_GUID)), "wb") as f:
                 f.write(b"\x07\x00\x00\x00" + value)
@@ -188,6 +201,9 @@ grep -qx "$var" %(r)s/efi-readonly && exit 1
 { printf '\\007\\000\\000\\000'; cat "$file"; } > "%(r)s/efivars/$var-${name%%-$var}"
 """ % dict(r=r))
         names = ["blkid", "mountpoint", "docker", "systemctl", "efivar"]
+        if self.boat_update is not None:
+            self.write("bin/boat-update", "#!/bin/sh\nexit %d\n" % (self.boat_update != "ok"))
+            names.append("boat-update")
         if self.editenv_fails:
             # An ESP that will not take the write: reading still works.
             self.write("bin/grub-editenv", """#!/bin/sh
@@ -242,7 +258,8 @@ esac
                              ("/etc/boat-update", r + "/etc/boat-update"),
                              ("/etc/boat-release", r + "/etc/boat-release"),
                              ("/etc/nv_tegra_release", r + "/etc/nv_tegra_release"),
-                             ("/data/boat-update", r + "/data/boat-update")):
+                             ("/data/boat-update", r + "/data/boat-update"),
+                             ("/run/boat-update", r + "/run/boat-update")):
                 text = text.replace(old, new)
             self.write(name, text)
 
@@ -426,6 +443,16 @@ CASES = [
          says=["NetworkManager.service is not active"],
          files={"data/boat-update/last-result": "FAILED",
                 "data/boat-update/failed-versions": "1.1.0"}),
+    case("commit: a trial whose update client does not start fails - it could never be updated again",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1",
+              env=env_with(ORDER="B A", B_TRY=1, B_COMMITTED=0), boat_update="broken"),
+         1, log=["systemctl reboot"], says=["the update client does not start"]),
+    case("commit: a working update client passes",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1",
+              env=env_with(ORDER="B A", B_TRY=1, B_COMMITTED=0), boat_update="ok"),
+         0, want_env=env_with(ORDER="B A", B_TRY=0, B_COMMITTED=1, BOAT_RETRY="")),
     case("commit: Docker down fails a trial when /data is mounted",
          "boat-commit.sh",
          dict(cmdline="rauc.slot=B boat.trial=1",
@@ -672,6 +699,32 @@ CASES = [
          0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""),
          want_bak_equal=True, says=["installing 1.1.0 into slot\\(s\\) B"],
          extra_env=RAUC_TARGET_B),
+    case("pre-install: refuses on a trial boot before boat-commit has committed it",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A boat.trial=1", env=env_with()),
+         1, unchanged=True, says=["on trial"], extra_env=RAUC_TARGET_B),
+    case("pre-install: the boot that committed its trial installs (no reboot needed)",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A boat.trial=1", env=env_with(), committed_mark=True),
+         0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""), extra_env=RAUC_TARGET_B),
+    case("pre-install: GRUB's last-resort boot of a never-committed slot may install - it mends the board",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A boat.lastresort=1", env=env_with(A_OK=0, A_COMMITTED=0, B_OK=0)),
+         0, want_env=env_with(A_OK=0, A_COMMITTED=0, B_OK=0, B_COMMITTED=0, BOAT_RETRY=""),
+         extra_env=RAUC_TARGET_B),
+    case("pre-install: refuses another release than the one boat-update is installing",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), expect=("1.2.0", os.getpid())),
+         1, unchanged=True, says=["release '1.1.0', but boat-update is installing 1.2.0"],
+         extra_env=RAUC_TARGET_B),
+    case("pre-install: the release boat-update is installing goes ahead",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), expect=("1.1.0", os.getpid())),
+         0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""), extra_env=RAUC_TARGET_B),
+    case("pre-install: a left-over expect file (its boat-update is gone) means nothing",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), expect=("1.2.0", DEAD_PID)),
+         0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""), extra_env=RAUC_TARGET_B),
     case("pre-install: a new install gets a fresh shutdown retry",
          "boat-rauc-pre-install.sh",
          dict(cmdline="rauc.slot=A", env=env_with(BOAT_RETRY="B")),

@@ -594,9 +594,12 @@ The order matches RAUC 1.13's `install.c`:
 
 - **No post-write read-back hash.** RAUC resizes the filesystem before slot
   hooks run, so a hash taken in the hook would never match.
-- **Manual rollback:** `boat-update rollback` runs
-  `rauc status mark-active other` and reboots. It refuses if the other slot
-  is `OK=0`. It is a slot switch; nothing is reinstalled.
+- **Manual rollback:** `boat-update rollback` writes what RAUC's
+  `mark-active other` would - `ORDER` with the other slot first, its `OK=1`
+  and `TRY=0` - itself, under the A/B lock, and reboots. Not through RAUC:
+  `rauc.service` needs `/data`, and a release that broke `/data` still
+  commits (the health gate never fails the OS over data). It refuses if
+  the other slot is `OK=0`. It is a slot switch; nothing is reinstalled.
 - **Transport:** OTA from the update channel (5.10) is the normal path.
   Fallbacks:
   - an SSH push to `/data` (`scripts/push-update.sh`);
@@ -875,7 +878,11 @@ headers (review M3).
 - **`check`:**
   1. **Gates.** It runs only when:
      - chrony reports a synchronised clock (TLS fails at 1970 anyway);
-     - the booted slot is committed (no OTA during a trial);
+     - the booted slot is not on trial (no OTA during a trial): booted as
+       one and not yet committed this boot (`/run/boat-ab/committed`), or
+       not committed in `grubenv`. The boot that committed its trial goes
+       on updating; GRUB's last-resort boot may install, since that is how
+       such a board is mended;
      - `/data` is mounted.
   2. **Fetch `index.p7`** with no redirects (`--max-redirs 0`), `https`
      only, `Cache-Control: no-cache`, and a 64 KiB size cap.
@@ -886,7 +893,11 @@ headers (review M3).
      - `compatible` matches;
      - `version` is newer than the booted slot (RAUC's relaxed-semver
        comparison, `reference.rst` "min-bundle-version");
-     - `version` is not already in the other slot. Only
+     - `version` is not already in the other slot - counted only when a
+       rollback would boot it: `<other>_OK=1`, and RAUC's last write there
+       did not fail (RAUC records a failed write with the new version,
+       status `failed`; a reflash leaves an old slot B in place, unusable).
+       Otherwise the release is offered, and installed, again. Only
        `rauc status --detailed --output-format=json` reports it, as the
        slot's `slot_status.bundle.version`; plain `--output-format=json`
        leaves `slot_status` out. A slot that was flashed rather than
@@ -918,7 +929,13 @@ headers (review M3).
       `Content-Length`, which a chunked body does not have.
     - It treats a `.part` larger than `size`, or a resume answered with
       416, as corrupt and deletes it. A resume answered with the whole
-      file (the server ignores Range) starts again from zero, uncounted.
+      file (the server ignores Range) starts again from zero, in one window
+      for the whole file, and counts as a re-fetch - so a server that keeps
+      doing it cannot keep a board downloading for ever.
+    - A complete download is recorded `ready` after RAUC has checked it; one
+      completed but never recorded (a power cut in between) is picked up
+      next time, not fetched again. An offer the channel withdraws takes
+      its download, or partial download, with it.
     - It keeps a `/data` free-space floor (bundle size + 2 GiB, because
       Docker shares `/data`) and re-checks it every window.
     - A bundle is **re-fetched from scratch at most 3 times**, then
@@ -951,16 +968,22 @@ headers (review M3).
 - Also triggered from the system-sleep `post` hook and from a
   NetworkManager dispatcher script on `up`/`connectivity-change`.
 - The service rate-limits itself with a stamp file on `/data`, so the extra
-  triggers cost nothing.
+  triggers cost nothing. Only a check that got past the gates stamps it,
+  and a stamp from the future does not count; a check the clock gate
+  refused runs again two minutes later (a transient timer), by when chrony
+  has normally set the clock.
+- A command a person types does not give up on the timer's run, which can
+  hold the lock for hours of downloading: it stops it (the download goes on
+  from where it was at the next run) and waits for the lock.
 
 **Configuration** (review M6) has two layers, and neither is carried over:
 
 - `/etc/boat-update/channel.conf`, shipped by the image: defaults such as
   the channel URL. An update can change these.
-- `/data/boat-update/channel.conf`, the operator's overrides and the
-  optional client certificate/key. It is shared by both slots, so a
-  credential rotated after an update is still right after a rollback. OTA
-  needs `/data` anyway.
+- `/data/boat-update/channel.conf`, the operator's overrides, the
+  optional client certificate/key and the optional channel CA. It is
+  shared by both slots, so a credential rotated after an update is still
+  right after a rollback. OTA needs `/data` anyway.
 
 | knob | default | meaning |
 |---|---|---|
@@ -970,6 +993,13 @@ headers (review M3).
 | `BOAT_UPDATE_METERED` | `no` | download over a metered link? (D14) |
 | `BOAT_UPDATE_RATE_LIMIT` | empty | curl `--limit-rate`; the stall threshold (`--speed-limit`) is kept below it |
 | client cert/key | none | TLS client authentication (D15) |
+| `BOAT_UPDATE_SERVER_CA` | `/data/boat-update/server-ca.pem` if present, else the image's `ca-certificates` | the CA the channel's TLS certificate must chain to (a bench server's own CA); for curl and the stream relay alike |
+
+A check or download that fails for a reason other than the board's own
+state (on trial, no network or no answer, the clock, another run) is kept
+in `state.json` and shown
+by `status` as an alert until a check works again, or for a download,
+until the bundle is ready or the offer goes away (tests 34, 38).
 
 **Metered detection** (review m1):
 
@@ -1010,12 +1040,23 @@ headers (review M3).
     a 502 to RAUC, which fails the install; RAUC checks `Content-Range`
     only on its first request. A link that goes away fails it too. RAUC
     gets no TLS options, so the key stays root-only and nothing
-    credential-bearing is on any command line.
+    credential-bearing is on any command line. The relay serves only RAUC's
+    streaming client: a socket held by its `rauc-stream` user (or root),
+    from `/proc/net/tcp`, *and* by a process in `rauc.service`'s own
+    cgroup, from the process's open files - a uid alone is not RAUC, since
+    a host-networked container can run as root, and no container's process
+    is in that cgroup, whatever namespaces it shares with the host. The URL
+    also carries a token made for this stream. It serves only ranges up to
+    64 MiB that end after they start, a few at a time; a request that fails
+    any check gets no relay slot. A VPN default route is refused without
+    `--allow-metered`: the tunnel follows whatever link carries it.
   - The bundle URL is the one from the verified index, on the channel the
     offer was checked on. A preflight request for the first byte refuses a
     redirecting or Range-less channel before RAUC marks the slot
-    unbootable, and the installed release is checked against the index
-    afterwards (5.7).
+    unbootable. `boat-update` tells RAUC's pre-install handler which release
+    it is installing (`/run/boat-update/expect`), so another signed bundle
+    served at that URL is refused before anything is written; the installed
+    release is checked against the index afterwards as well (5.7).
   - RAUC reads only the blocks it cannot find locally in either slot.
     RAUC's documentation reports **about 10% of the bundle** crossing the
     link for a small ext4 change.
@@ -1422,11 +1463,11 @@ All of them run from `lint.sh`, so they cover every PR.
 | 31 | OTA: channel offers a newer bundle, unmetered link | background download; `status` shows "ready"; no install or reboot happens by itself |
 | 32 | OTA: link dropped, SC7 sleep, and reboot, each mid-download | resumes from where it stopped; final SHA-256 matches; never a second full download |
 | 33 | OTA: truncated or corrupted download | SHA-256/`rauc info` mismatch → discarded and re-fetched; never offered for install |
-| 34 | OTA: index with a bad signature, signed by the bench CA on a boat image, or signed by a public CA certificate | ignored before any download; alert in `status` |
+| 34 | OTA: index with a bad signature, signed by the bench CA on a boat image, or signed by a public CA certificate | ignored before any download; alert in `status` ("the last check failed"), cleared by the next good check |
 | 35 | OTA: index offers an older version, the same version, the version already in the other slot, a version that failed its trial here, another `compatible`, or another L4T | nothing downloaded; the L4T case reports "reflash needed" only for a newer version |
 | 36 | OTA: cellular (metered) link, default policy | check only; download waits for an unmetered link; moving to cellular mid-download pauses at the next window |
 | 37 | OTA: clock at 1970 before NTP | check deferred, no TLS-error spam; runs after sync |
-| 38 | OTA: `/data` too full, or not mounted | download refused with the reason in `status`; rootfs never used |
+| 38 | OTA: `/data` too full, or not mounted | download refused, with the reason as an alert in `status`; rootfs never used |
 | 39 | OTA: client-certificate channel | works for check, download and stream; the certificate is never in the journal or `ps`; still works after an update and after a rollback (it lives on `/data`) |
 | 40 | OTA stream: adaptive install of a one-package change | commits; transferred bytes recorded (Phase 6) |
 | 41 | OTA stream: link drop mid-install | install aborts; current slot unaffected, target `OK=0`; retry succeeds |
@@ -1436,7 +1477,7 @@ All of them run from `lint.sh`, so they cover every PR.
 | 45 | OTA: the index-signing certificate past its expiry date | still accepted (`-no_check_time`, as RAUC does for bundles); revocation is by removing the CA |
 | 46 | OTA: the server streams an endless body, or more than `size` | aborted at `size`; the `/data` free-space floor is never crossed |
 | 47 | OTA: a redirect to another host or to `http` | refused; no credential leaves the board |
-| 48 | OTA: two downloads started at once (timer + manual) | the second waits on the lock |
+| 48 | OTA: two downloads started at once (timer + manual) | the manual one stops the timer's, which resumes at its next run, and goes ahead; two from the timer: the second exits |
 | 49 | OTA: checks across SC7 sleeps and after a link comes up | a check runs on resume and on link-up; at most one per rate-limit window |
 | 50 | OTA: check and download during a trial boot | neither runs until the slot is committed |
 | 51 | OTA: a 4G router on Ethernet marked metered in NetworkManager | treated as metered |
@@ -1739,6 +1780,34 @@ boot and fallback findings:
 | the trial deadline after a `boat.stay=1` failure overwrote the gate's reason and listed the release as failed twice | the deadline leaves a slot that is already failed alone |
 | plan 5.3 described a `grubenv` rebuild that consulted RAUC's status, which the guard never did | 5.3 describes the rules the guard implements, and what they mean for a rollback |
 | the GRUB harness ran no committed-slot load failure, no failing `initrd` or `boot`, no last resort with `B` committed, no `grub.cfg` failure, on an 8 MiB FAT; the scripts harness had no last-resort, lock or `boat-bootmode-guard` case; the initramfs, `boat-storage grow` and the layout generator had no test | all added: `test-grub-ab.py` (64 MiB FAT32, the built-in config), `test-ab-scripts.py`, `test-boat-storage.py`, and the new `test-ab-initramfs.py` and `test-ab-layout.py` |
+
+The update client and host tooling findings:
+
+| finding | resolution |
+|---|---|
+| the boot that committed a trial refused every OTA verb and install until the next reboot (`boat.trial=1` stays on the command line) | "on trial" is one rule everywhere: booted as one and not yet committed this boot, or not committed in `grubenv`; a last-resort boot may install (5.10) |
+| a failed slot write is recorded by RAUC with the new version, and a reflash leaves an old slot B in place: either way the release counted as "already in the other slot", which `rollback` then refused | the other slot's release counts only if a rollback would boot it (5.10) |
+| a server that ignores Range sent a bundle larger than one window into an endless download loop | one window for the whole file, counted as a re-fetch (5.10) |
+| the stream relay served any local process with the client certificate, and a reversed range made it read the whole bundle into memory | RAUC's streaming user and root only, and only from a process in `rauc.service`'s cgroup (a root process in a container is not RAUC, even one sharing the host's PID and network namespaces - CodeRabbit), on a URL with a per-stream token, valid ranges only, a few at a time (5.10) |
+| `publish-update.sh` published the index when the bundle copy failed, and published any squashfs | every step stops the publish; the copy is checked, and a bundle given as a symlink (the deploy directory's link, which rsync would skip) is published as the file it points at; the bundle's signature, CA, key usage and verity format are checked first, and the index is made from the signed manifest |
+| a streamed install checked the release only after RAUC had activated the slot | the pre-install handler refuses another release before anything is written (5.10) |
+| `boat-update` did not depend on what `http.server` imports, or on chrony | `python3-netserver`, `python3-html`; chrony recommended, `timedatectl` when it is missing; the health gate fails a trial whose `boat-update` does not start |
+| the rate-limit stamp was written before the clock gate, holding off checks for 30 minutes after a boot | stamped after the gates; a future stamp does not count; a check the clock refused runs again shortly, at 2 to 32 minutes, five times a boot (5.10) |
+| a trial that ended without a verdict left no reason, and a stale "committed" in `last-result` | `boat-update` records it, in `last-result` and history, as soon as anyone looks |
+| the client key's mode was not checked | a key others can read is refused, with the fix |
+| `push-update.sh` put the bundle's file name into a root shell command | only a plain bundle name is accepted (and in `ab-soak.sh`) |
+| a stream over a VPN default route could move onto a metered link | refused without `--allow-metered` |
+| a power cut or stop between finishing a download and recording it meant a full re-download; a withdrawn offer kept its download | picked up next time; withdrawn with the offer (5.10) |
+| `boat-update download` exited 0 without a ready bundle | exit 2 |
+| `rollback` went through `rauc.service`, which needs `/data` - a release that broke `/data` committed and could not be rolled back | `rollback` writes `grubenv` itself (5.6) |
+| a background download held the lock for hours and refused every other command | a person's command stops it (a running oneshot is `activating`, which `is-active` does not count) and goes ahead; a stop unwinds, so the other slot is never left mounted; test 48 says so |
+| a pre-install handler's refusal reached only `rauc.service`'s journal; the operator saw "exit 1" | `boat-update` shows the handler's lines from that journal |
+| `ab-soak.sh` passed a power-cut cycle when the cut command cut nothing | a cut cycle installs without `--reboot`, so only the cut can reboot the board |
+| a kas build skipped the release, key directory and bench checks, and a release that is not a version made boards take any offer as newer | the rauc bbappend checks them as the build parses; `boat-update` refuses to compare against a release that is not a version |
+| the harness never ran the file install, the wrapper's exit status, `auto`, the trial gates, rollback, a failed write, 416, the free-space or RAUC refusals | all added to `test-boat-update.py`, and the new `test-publish-update.py` |
+| CI ran the boat's Python under the runner's newer Python | `lint.sh` also compiles it and runs `test-boat-update.py` under 3.10 (CI installs it) |
+| a channel whose TLS certificate comes from its own CA (a bench server) could not be used: the board trusted only the slot's store, and a CA added there was gone after the first update | `BOAT_UPDATE_SERVER_CA`, by default `/data/boat-update/server-ca.pem`, for curl and the relay (5.10) |
+| tests 34 and 38 expected an alert in `status` that `boat-update` never showed: a refused check or download left only the journal | the last failure is kept and shown as an alert until it is resolved (5.10) |
 
 ### Your review
 

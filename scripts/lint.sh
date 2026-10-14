@@ -238,6 +238,43 @@ else
     fi
 fi
 
+# --- 3c. The boat's Python, under the boat's Python ----------------------
+# boat-update and boat-sleepd run under kirkstone's Python 3.10. The host's
+# python3 is newer, and accepts syntax and library calls 3.10 does not have -
+# which would pass here and fail on every boat (and boat-update is what
+# updates them). BOAT_TARGET_PYTHON (CI sets it), or a python3.10 on PATH,
+# compiles the shipped Python and runs boat-update's tests under 3.10.
+log "Python 3.10, as on the boat ..."
+TARGET_PY="${BOAT_TARGET_PYTHON:-$(command -v python3.10 || true)}"
+if [[ -z "${TARGET_PY}" ]]; then
+    if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+        fail_check "no Python 3.10 in CI (BOAT_TARGET_PYTHON) - the boat's Python is not checked"
+    else
+        soft_skip "no Python 3.10 (BOAT_TARGET_PYTHON, or python3.10 on PATH) - the boat's Python not checked under it"
+    fi
+elif ! "${TARGET_PY}" -c 'import sys; sys.exit(sys.version_info[:2] != (3, 10))'; then
+    fail_check "${TARGET_PY} is not Python 3.10"
+else
+    mapfile -t TARGET_PY_FILES < <(find layers -name '*.py' -print | sort)
+    target_rc=0
+    "${TARGET_PY}" -m py_compile "${TARGET_PY_FILES[@]}" || target_rc=$?
+    find layers scripts -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+    if [[ "${target_rc}" -ne 0 ]]; then
+        fail_check "  the boat's Python does not compile under 3.10"
+    else
+        # 77: a tool the test needs is missing - a skip, as in section 5.
+        test_rc=0
+        "${TARGET_PY}" scripts/test-boat-update.py >/dev/null 2>&1 || test_rc=$?
+        if [[ "${test_rc}" -eq 0 ]]; then
+            log "  ${#TARGET_PY_FILES[@]} Python file(s), and boat-update's tests, clean under $("${TARGET_PY}" -V)"
+        elif [[ "${test_rc}" -eq 77 ]]; then
+            skip_check "openssl, curl or grub-editenv is missing - boat-update's tests not run under 3.10 (${#TARGET_PY_FILES[@]} file(s) compiled)"
+        else
+            fail_check "  boat-update's tests fail under 3.10 (${TARGET_PY} scripts/test-boat-update.py)"
+        fi
+    fi
+fi
+
 # --- 4. Recipe file:// entries exist --------------------------------------
 # CONFIRMED WORTH HAVING: renaming a file under a recipe's files/ directory
 # without updating its SRC_URI is a real and easy mistake (this repo renamed
@@ -418,6 +455,26 @@ if [[ -z "${key_files}" ]]; then
 else
     printf '%s\n' "${key_files}" | sed 's/^/  /' >&2
     fail_check "a tracked file contains a private key - remove it, and treat the key as compromised"
+fi
+
+# --- 6a. Publishing to an update channel ------------------------------------
+# publish-update.sh decides what every boat on a channel is offered.
+# scripts/test-publish-update.py runs it with real keys against a scratch
+# channel: a bundle a board's RAUC would refuse, or a copy that fails half
+# way, must publish nothing.
+log "Publishing ..."
+if [[ "${HAVE_PYTHON}" == "0" ]]; then
+    skip_check "python3 not installed - publish-update.sh not run"
+else
+    pub_rc=0
+    python3 scripts/test-publish-update.py || pub_rc=$?
+    if [[ "${pub_rc}" -eq 0 ]]; then
+        log "  publish-update: clean"
+    elif [[ "${pub_rc}" -eq 77 ]]; then
+        skip_check "openssl is missing - publish-update.sh not run"
+    else
+        fail_check "publish-update.sh failed a case"
+    fi
 fi
 
 # --- 6b. The bundle's carry-over hook, run between two fake slots -----------
