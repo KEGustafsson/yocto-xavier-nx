@@ -16,8 +16,10 @@ What it does **not** do:
   be automatic; writing the other slot, and the reboot into it, always takes
   `boat-update install`, typed by a person.
 - **Update firmware.** QSPI firmware, the kernel DTB and anything else that
-  changes with a new L4T release still need a USB reflash at the dock. A
-  bundle built on another L4T release is refused.
+  changes with a new L4T release still need a USB reflash at the dock - and
+  so does a changed kernel DTB or device-tree overlay within one L4T
+  release (a meta-tegra or kernel update). A bundle built on another L4T
+  release, or against another DTB than the running slot's, is refused.
 - **Update the boot files on the ESP.** GRUB, its `grub.cfg` and the kernel
   command line (`KERNEL_ARGS`) reach a board only with a USB reflash. A
   release that needs newer ones says so in `status` once it runs ("the
@@ -113,6 +115,13 @@ Set it to the release with the fix, in that release's build: from then on a
 board running it refuses anything older. Empty means no floor; it can never
 be above `BOAT_RELEASE` (the build stops).
 
+Both reach the build only through `scripts/02-configure-build.sh`, which
+writes them into `local.conf`: after changing either (or `BOAT_KEYS_DIR`),
+run 02 again before 03. `03-build.sh` stops when a value set in your shell
+or `env.sh` is not the one `local.conf` has - for `BOAT_KEYS_DIR`, only one
+set in your shell, since `env.sh` always gives it a default - and says which
+release and floor it builds.
+
 **A slot holds about 12 GiB of image content.** Each slot is 16 GiB; the
 build adds 30 % and 512 MiB to the content and stops if the result no longer
 fits.
@@ -130,8 +139,10 @@ scripts/05-flash-nvme.sh
 ```
 
 Unpack first: `05-flash-nvme.sh` flashes whatever was unpacked last. It
-refuses an unpack whose layout does not match `AB_LAYOUT`, so an older
-single-slot unpack is not written back over the erased SSD.
+refuses an unpack whose layout is not the one the build directory is
+configured for (`local.conf`; `AB_LAYOUT` only without one), also in a new
+terminal where `AB_LAYOUT` is not exported, so an older single-slot unpack
+is not written back over the erased SSD.
 
 Use the default `initrd-flash` path. `--host-drive` relies on a
 `doexternal.sh` that meta-tegra's kirkstone branch does not ship, and the DATA
@@ -166,6 +177,26 @@ RAUC, is what the new release broke. A `rollback` from a slot still on
 trial is a verdict: that slot is marked bad, and the release is recorded as
 failed and not offered again.
 
+Board settings live in each slot (see "Storage on the A/B layout"), so after
+a `rollback` - or a fallback - the slot that runs lacks what you changed on
+the other one since its install: a Wi-Fi network added, a device paired, a
+key authorized. Add them again on this slot before the next install. That
+install overwrites the other slot; it first keeps what it holds that this
+slot lacks or has otherwise in `/data/boat-update/displaced/slot-<X>-<time>/`
+and raises an alert, so you can copy back what is still wanted. Only files
+changed there after the later of the two slots' installs (RAUC's install
+times) count: on an ordinary update the other slot is the older one, whose
+settings this slot started from, and nothing of it is kept. The rule needs
+the clock: a change made while the board's clock was not set can be missed.
+
+An install, by any path, needs a few MiB and some free inodes on `/data`
+for RAUC's own status, even streamed: RAUC marks the other slot unusable
+before it first saves there. The install is refused with nothing changed
+when `/data` is that full; free some space (`docker system prune`) first.
+A new Docker major version in the release is not refused, but warned
+about - in `status` until the reboot, and in the install's line in
+`boat-update history`: a fallback or rollback afterwards runs the old
+Docker on what the new one may have migrated in `/data/docker`.
 `install` runs as its own systemd unit, so losing the SSH session half way
 does not stop it; it still exits non-zero if the install fails. While it
 writes the other slot, shutdown is held off too: the power key and XFCE's
@@ -212,9 +243,13 @@ scripts/push-update.sh yocto/build/tmp/deploy/images/jetson-xavier-nx-devkit/boa
 
 That file is the link to the last bundle built; run it from the
 repository root. (A `boat-bundle-*` pattern names both the bundle and that
-link.) A second argument is the board, as `user@host`; without one,
-`wol/boat.conf` names it. It copies the bundle to the board, installs it,
-reboots, waits, and tells you which slot came back. From a USB stick, use exFAT or ext4 (a bundle over
+link.) A second argument is the board, as `user@host` (or a Host from
+`~/.ssh/config`); without one, `wol/boat.conf` names it. The user is root,
+or `boat`, whose passwordless sudo it then uses. It copies the bundle to
+the board over ssh (`BOAT_SSH_OPTS` are ssh options: `-p` is the port, a
+jump host works), installs it, reboots, waits for the board to answer over
+SSH with a new boot, and tells you which slot came back. The copy on
+`/data` is removed again, also when the install fails. From a USB stick, use exFAT or ext4 (a bundle over
 4 GiB does not fit on FAT32), then `sudo boat-update install /media/<stick>/<bundle>.raucb --reboot`.
 
 ## Over the air: the update channel
@@ -262,17 +297,63 @@ The script:
 
 1. reads the version and L4T release from the bundle itself;
 2. names it by its SHA-256;
-3. writes and signs the index with the index key and the next serial (at
-   least the time in seconds, so a restored key directory or a second
-   publishing machine never goes backwards);
-4. uploads the bundle **first** and the index **last**.
+3. writes and signs the index with the index key and the next serial: at
+   least the time in seconds, and above the serial of the index the
+   channel serves now (read back from the destination), so a restored key
+   directory or a second publishing machine - even one whose clock is
+   behind - never goes backwards. One publish at a time per key directory;
+4. uploads the bundle **first** and the index **last**, readable by the
+   web server (0644, directories 0755) whatever your umask.
+
+It needs OpenSSL 3 (Ubuntu 22.04 or newer) on the publishing host; rsync
+can be any version on either end. The destination directory (or, for
+`host:path`, its parent) must exist.
 
 To promote a release once it has committed on the `testing` board, publish
 the same bundle file to `stable` - not a rebuild, which would be a
 different file nobody has tried. Keep a copy of each bundle you publish:
 the next build of `boat-bundle` deletes it from the deploy directory.
-`--reflash` marks a BSP bump: boards are told to reflash at the dock
-instead of downloading it. `--notes FILE` attaches release notes.
+`--notes FILE` attaches release notes.
+
+To withdraw a release, publish the previous one again: a board that
+checks drops the download it holds, ready or not. Deleting `index.p7`
+withdraws nothing - boards keep what they downloaded, and show the failed
+check as an alert.
+
+**A BSP bump** (a release on a new L4T) cannot go over the air. A board
+running another L4T than a newer release's is told "reflash at the dock"
+instead of downloading it - with `--reflash` or without - and that is not
+an alert. `--reflash` changes nothing for a board already on the bundle's
+L4T: it takes the release over the air. So while a fleet is being
+reflashed boat by boat, keep publishing on the new L4T: boats not yet
+reflashed show "reflash at the dock" for each release. A fix for those
+boats can still go out on the old L4T on the same channel, because boats
+already reflashed see it as older (or give them a channel of their own).
+
+A bundle built against another kernel device tree than the channel's
+current release (a meta-tegra or kernel change within one L4T release)
+needs `--reflash` too - boards keep the DTB they were flashed with and
+refuse such a bundle - and the script stops without it. The index names
+the device tree (`firmware`), and a board flashed with another one is told
+"reflash at the dock" instead of downloading the release, not as an
+alert; a board already flashed with it takes it over the air. A board
+flashed before the device tree was recorded cannot tell: it downloads the
+release, and its install only warns.
+
+**Caches.** `index.p7` keeps its name, so nothing between the board and
+the channel may cache it: serve it with `Cache-Control: no-cache` from the
+origin, and keep a CDN or caching proxy from caching it. Bundles can be
+cached freely - their names are content-addressed. A CDN edge still
+serving an older index shows on the board as "a replayed or rolled-back
+index". For object storage, upload the bundle, wait until it is complete,
+then upload `index.p7` on its own - not one parallel sync of the
+directory, which can put the index up first.
+
+The bundle-signing key can live on a PKCS#11 token instead of in
+`BOAT_KEYS_DIR`: in `local.conf`, set `RAUC_KEY_FILE` to the key's
+`pkcs11:` URI and `RAUC_PKCS11_MODULE` to the token's module (for example
+OpenSC's `opensc-pkcs11.so`). A token that needs a PIN to sign is not
+supported by the build.
 
 ### What the board accepts
 
@@ -285,9 +366,11 @@ it only if all of these hold:
 - the index is for this channel;
 - its serial is above the last one accepted on this channel — so an old
   index cannot be replayed;
-- it is for this board and this L4T release;
+- it is for this board (its `compatible`);
 - it offers a version that is newer than the running one, not already in
-  the other slot, and not one that failed a trial here.
+  the other slot, and not one that failed a trial here;
+- that version is built on this board's L4T release - a newer one on
+  another L4T is reported as "reflash at the dock", not downloaded.
 
 RAUC checks the bundle's own signature again before it is installed. The
 channel host is not trusted for anything but availability: the worst it can
@@ -299,18 +382,30 @@ last published.
 
 A check or download that fails shows in `status` as an **ALERT**, with its
 reason: an index that does not verify or is a replay, a channel whose
-certificate the board does not trust, a download `/data` has no room for.
-It stays until a check works again (a failed download: until a download
-finishes, or the offer goes away). A refusal that is only the board's
-state is not an alert, and the timer's run does not count it as failed: on
-trial, no network or a channel nothing answers for, the clock not set yet,
-another `boat-update` running.
+certificate the board does not trust (or a captive portal answering in
+its place), a channel that redirects or does not have the bundle, a
+download `/data` has no room for. It stays until a check works again (a
+failed download: until a download finishes, or the offer goes away).
+`status` also says when `/data` is nearly full, and when `channel.conf`
+cannot be read. A refusal that is only the board's state is not an alert,
+and the timer's run does not count it as failed: on trial, no network, a
+channel nothing answers for or a link that drops before it answers, the
+clock not set yet, another `boat-update` running.
 
 ### On the board: `/data/boat-update/channel.conf`
 
 The image ships defaults in `/etc/boat-update/channel.conf`. Put your
 settings in **`/data/boat-update/channel.conf`**. That file is shared by both
 slots, so it stays right across updates and rollbacks.
+
+A USB flash empties `/data`, and with it these settings, the client
+certificate and `server-ca.pem`. Until they are back, the board gets no
+updates, and `status` only says "no channel configured". For a fleet,
+build the channel into the image instead - `BOAT_UPDATE_URL` (and
+`BOAT_UPDATE_CHANNEL`, if not `stable`) in `local.conf`, below the block
+`02-configure-build.sh` manages, or in the kas configuration - and keep a
+copy of the credentials off the board. A `BOAT_BENCH` image follows `bench`
+unless `BOAT_UPDATE_CHANNEL` says otherwise.
 
 ```bash
 BOAT_UPDATE_URL="https://updates.example/boat-xavier-nx"   # the final URL - redirects are not followed
@@ -329,17 +424,24 @@ BOAT_UPDATE_RATE_LIMIT=""           # e.g. 200k
 - **Disk space.** A download needs the bundle's size plus 2 GiB free on
   `/data`.
 
-**Metered links.** A download waits while the link the boat is using is
-metered: cellular, or anything NetworkManager guesses is. **A 4G router
-reached over Wi-Fi or Ethernet looks unmetered.** Mark that connection:
+**Metered links.** A download waits while the link to the channel is
+metered: anything NetworkManager marks or guesses metered, and a USB modem
+or a phone tethered over USB (NetworkManager sees those as Ethernet and
+guesses them unmetered; this image's NetworkManager has no ModemManager
+plugin, so no cellular link is ever its own kind). Mark one that is not
+metered with `connection.metered no`. **A 4G router reached over Wi-Fi or
+Ethernet looks unmetered.** Mark that connection:
 
 ```bash
 nmcli connection modify "<the router's connection>" connection.metered yes
 ```
 
-With a VPN as the default route, the board counts as metered if any of its
-links is. `status` shows "waiting for an unmetered link", and `sudo
-boat-update download --allow-metered` overrides it once.
+The link is the one the kernel routes the channel's address through -
+the main table's default route, a VPN's split-tunnel route, or a
+WireGuard default route in a table of its own - and transfers are bound to
+it. When that is a VPN, the board counts as metered if any of its links
+is. `status` shows "waiting for an unmetered link", and `sudo boat-update
+download --allow-metered` overrides it once.
 
 **Access control.** A public channel is the default. Bundles hold nothing
 secret: the image's password hash is already in this repository. To restrict
@@ -350,8 +452,10 @@ sudo install -m 644 client.crt /data/boat-update/client.crt
 sudo install -m 600 client.key /data/boat-update/client.key   # root's alone - checked
 ```
 
-`boat-update` refuses a key anyone but root can read. Basic auth and bearer
-tokens are not supported, because they leak across redirects and into logs.
+`boat-update` refuses a key anyone but root can read - also a key kept in
+`client.crt` itself, which then needs mode 600 too. Basic auth and bearer
+tokens are not supported, because they leak across redirects and into logs;
+a `BOAT_UPDATE_URL` with a user name or password in it is refused.
 
 **The channel's own certificate.** The board checks the channel's TLS
 certificate against the image's `ca-certificates`. A server whose
@@ -361,6 +465,9 @@ certificate comes from a CA of its own - a bench server, or Caddy's
 ```bash
 sudo install -m 644 server-ca.pem /data/boat-update/server-ca.pem
 ```
+
+Give it the root CA - for Caddy, `pki/authorities/local/root.crt`, not the
+intermediate, which Caddy replaces every week.
 
 or `BOAT_UPDATE_SERVER_CA=<file>` in `channel.conf`. The board then trusts
 that CA, and only that CA, for the channel: downloads, checks and streams.
@@ -389,9 +496,9 @@ it. The relay serves RAUC's streaming client alone - no other user or
 container on the board - and passes on only an answer for exactly the
 range RAUC asked for. If that link goes away mid-stream, the stream fails
 and the board stays on its slot; it never moves to another route. With a
-VPN as the default route that is not so - the tunnel follows whatever link
-carries it, metered or not - so a stream over a VPN needs
-`--allow-metered`; download, then install, instead. On top of that:
+VPN as that link it is not so - the tunnel follows whatever link carries
+it, metered or not - so a stream over a VPN needs `--allow-metered`;
+download, then install, instead. On top of that:
 
 - before RAUC starts, `boat-update` asks for the bundle's first byte and
   refuses to stream from a channel that redirects it or ignores Range
@@ -468,7 +575,18 @@ changed them**: `/etc/default/boat-power`, `/etc/default/boat-bluetooth`,
 `/etc/NetworkManager/conf.d/90-boat-wol.conf`, `/etc/docker/daemon.json` and
 `/etc/boat-update/health.conf`. One you never touched takes the new
 release's version, so a release can change its defaults; one you deleted
-stays deleted. (An image built before this rule carries them all, once.)
+stays deleted. One you changed is carried as it is - also at every later
+update, without the new release's changes. The release's own version is
+put beside it as `<file>.boat-default`: compare the two after an update,
+and copy the `.boat-default` over yours to go back to the release's.
+`health.conf`'s `BOAT_HEALTH_UNITS` is the exception: if your list names a
+unit the new release no longer has, every trial would fail on it, so the
+update appends a merged list - your units it still has, then the
+release's own. (An image built before this rule carries them all, and
+they then count as changed at every update: take the `.boat-default`
+versions you want, or reflash.)
+A setting the install could not carry is a warning in the install's
+output, and an ALERT in `status` until the trial is decided.
 
 **Any other edit under `/etc` does not survive an update.** Put it in
 `meta-boat`, or on `/data`.
@@ -542,12 +660,15 @@ whole SSD.
   drive unbootable. That marker is sticky. Recover with a USB reflash
   (`scripts/04-unpack-tegraflash.sh boat-image`, then
   `scripts/05-flash-nvme.sh`), which keeps nothing on the SSD: `/data` starts
-  empty. That is the only recovery known today. The UEFI menu may be able
+  empty - put the channel settings back afterwards (above). That is the
+  only recovery known today. The UEFI menu may be able
   to clear the marker without a reflash, but where is not known yet: the
   Phase 0 runbook (2.6) is where it gets found, and then it is written here
   and in [`06-troubleshooting.md`](06-troubleshooting.md).
-- **"BSP bump: reflash at the dock."** The new release is built on another
-  L4T. Flash it over USB. Like the first flash, **a USB flash empties
-  `/data`**: copy off what you need first.
+- **"... is a BSP bump for this board: reflash at the dock."** The new
+  release is built on another L4T (or, "built against another kernel
+  device tree", on another DTB of the same L4T). Flash it over USB. Like the first flash,
+  **a USB flash empties `/data`**: copy off what you need first, and put
+  the channel settings and credentials back afterwards.
 
 See also [`06-troubleshooting.md`](06-troubleshooting.md).

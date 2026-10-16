@@ -5,6 +5,8 @@
 - **x86-64 Linux, running natively.** Ubuntu 20.04 or 22.04 are the best-tested
   hosts for kirkstone + meta-tegra. Do **not** build or flash from a VM, WSL, an
   ARM machine, or macOS — flashing needs raw USB and NVIDIA's x86-64 binaries.
+  Publishing A/B updates (`scripts/publish-update.sh`) needs OpenSSL 3, so
+  Ubuntu 22.04 or newer for that step.
 - **Newer hosts (Ubuntu 24.04+, 26.04, …) also work**, but kirkstone (Yocto 4.0,
   ~2022) predates their toolchains and the build scripts compensate for it:
   - `scripts/02-configure-build.sh` points `-native` builds at `gcc-12`/`g++-12`

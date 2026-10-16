@@ -1,11 +1,13 @@
 SUMMARY = "RAUC install handlers for the boat computer's A/B layout"
 DESCRIPTION = "RAUC's system pre-install handler refuses an install unless \
-the board came up through GRUB from a committed slot, /data is mounted, \
-the target partitions are the ones the layout puts at those numbers, and \
-the bundle is for the running L4T release; it then marks the target slot \
-not committed, so it boots as a trial once RAUC activates it (RAUC itself \
-marks the slot unusable while it writes it). The post-install handler \
-keeps grubenv.bak in step and records the install. See \
+the board came up through GRUB from a committed slot, /data is mounted \
+with room for RAUC's status, the target partitions are the ones the \
+layout puts at those numbers, and the bundle is for the running L4T \
+release and kernel device tree; it keeps board settings the target slot \
+would lose, then marks the target slot not committed, so it boots as a \
+trial once RAUC activates it (RAUC itself marks the slot unusable while it \
+writes it). The post-install handler keeps grubenv.bak in step and records \
+the install, with any warning. See \
 docs/plans/ab-os-updates.md section 5.6."
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"

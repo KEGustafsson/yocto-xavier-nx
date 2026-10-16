@@ -12,6 +12,10 @@ each partition (GPT name, filesystem, label). mkswap, swapon, e2fsck,
 mkfs.ext4, resize2fs (which can report that it grew, or fail), df and sync
 are stubs that log how they were called,
 so each case checks exactly what would have been run - and what never was.
+It also renders the storage units the way boat-storage.bb installs them,
+with RAUC's drop-in, and checks the order systemd starts them in: every
+After=, Before=, Requires= and Requisite= DATA's check, mount, layout and
+bind mounts depend on, and that nothing early in the boot waits for DATA.
 
 Exit status: 0 = all passed, 1 = a case failed.
 """
@@ -21,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAYER = os.path.join(HERE, "..", "layers", "meta-boat")
@@ -360,11 +365,294 @@ def seed_journal_written():
         return errors
 
 
+# --- the order the board starts DATA's units in ------------------------------
+# The cases above run boat-storage's steps one by one; on the board systemd
+# runs them, in the order the unit files give. That order is checked here,
+# on the units as boat-storage.bb's do_install writes them (the templates
+# filled in, the drop-ins added) plus RAUC's drop-in: every After=, Before=,
+# Requires= the design leans on (plan 5.8) is asserted line by line, so
+# deleting one fails the harness.
+LAYER_CONF = os.path.join(LAYER, "conf", "layer.conf")
+RAUC_DIR = os.path.join(LAYER, "external", "rauc", "recipes-core", "rauc")
+# Two users, so a drop-in or loop that covers only the first one shows.
+HOME_USERS = "boat skipper"
+
+
+def render_units():
+    """Run boat-storage.bb's do_install into a scratch directory, with
+    layer.conf's values and the recipe's own Python for the unit names.
+    Returns ({unit: {key: [values]}}, the masked units, errors)."""
+    recipe = slurp(os.path.join(STORAGE, "boat-storage.bb"))
+    var = {"sbindir": "/usr/sbin", "libdir": "/usr/lib", "systemd_unitdir": "/lib/systemd",
+           "systemd_system_unitdir": "/lib/systemd/system", "VOLATILE_LOG_DIR": "yes",
+           "WORKDIR": os.path.join(STORAGE, "files")}
+    for text in (slurp(LAYER_CONF), recipe):
+        for name, op, value in re.findall(r'^(\w+) (\?\?=|\?=|=) "([^"\n]*)"$', text, re.M):
+            if op == "=" or name not in var:
+                var[name] = value
+    var["BOAT_AB_HOME_USERS"] = HOME_USERS
+
+    def fatal(msg):
+        raise ValueError(msg)
+    bb = types.SimpleNamespace(fatal=fatal, utils=types.SimpleNamespace(
+        to_boolean=lambda v: str(v).lower() in ("1", "yes", "y", "true", "t")))
+    ns = {"bb": bb}
+    ns["d"] = types.SimpleNamespace(getVar=lambda name: expand(var[name]))
+    func = re.search(r"^def boat_mount_unit\(.*?(?=^\S)", recipe, re.M | re.S)
+    if not func:
+        return {}, set(), ["boat-storage.bb has no boat_mount_unit()"]
+    exec(func.group(0), ns)
+
+    def expand(text):
+        while True:
+            new = re.sub(r"\$\{(\w+)\}", lambda m: var[m.group(1)], text)
+            new = re.sub(r"\$\{@([^}]*)\}", lambda m: str(eval(m.group(1), ns)), new)
+            if new == text:
+                return text
+            text = new
+
+    body = re.search(r"^do_install\(\) \{\n(.*?)^\}", recipe, re.M | re.S)
+    if not body:
+        return {}, set(), ["boat-storage.bb has no do_install"]
+    with tempfile.TemporaryDirectory(prefix="boat-units-") as dest:
+        var["D"] = dest
+        try:
+            script = "set -e\n" + expand(body.group(1))
+        except (KeyError, ValueError) as e:
+            return {}, set(), ["do_install names a value this harness cannot fill in: %s" % e]
+        p = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+        if p.returncode != 0:
+            return {}, set(), ["do_install failed: %s" % (p.stdout + p.stderr).strip()]
+        unitdir = dest + var["systemd_system_unitdir"]
+        found, masked, errors = {}, set(), []
+        for name in sorted(os.listdir(unitdir)):
+            full = os.path.join(unitdir, name)
+            if os.path.islink(full):
+                if os.readlink(full) == "/dev/null":
+                    masked.add(name)
+            elif os.path.isdir(full):
+                for conf in sorted(os.listdir(full)):
+                    parse_unit(slurp(os.path.join(full, conf)), found.setdefault(name[:-2], {}))
+            else:
+                text = slurp(full)
+                if re.search(r"@[A-Z_]+@", text):
+                    errors.append("%s keeps a placeholder after do_install" % name)
+                parse_unit(text, found.setdefault(name, {}))
+    # RAUC's drop-in comes from rauc_%.bbappend, which installs it as is.
+    append = slurp(os.path.join(RAUC_DIR, "rauc_%.bbappend"))
+    if not re.search(r"\$\{WORKDIR\}/10-boat-ab-rauc\.conf \\\n\s*"
+                     r"\$\{D\}\$\{systemd_system_unitdir\}/rauc\.service\.d/[^/\s]+\.conf$", append, re.M):
+        errors.append("rauc_%.bbappend no longer installs 10-boat-ab-rauc.conf into rauc.service.d")
+    parse_unit(slurp(os.path.join(RAUC_DIR, "files", "10-boat-ab-rauc.conf")),
+               found.setdefault("rauc.service", {}))
+    return found, masked, errors
+
+
+def parse_unit(text, unit):
+    """Adds TEXT's settings to UNIT, {"Section.Key": [values]}; an empty
+    assignment resets the list, as systemd does."""
+    section = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("["):
+            section = line.strip("[]")
+            continue
+        key, _, value = line.partition("=")
+        values = unit.setdefault("%s.%s" % (section, key.strip()), [])
+        if not value.strip():
+            del values[:]
+        values.extend(value.split() if key.strip() in SPLIT_KEYS else [value.strip()])
+
+
+SPLIT_KEYS = ("After", "Before", "Requires", "Requisite", "Wants", "BindsTo", "Conflicts",
+              "WantedBy", "RequiredBy")
+_units = []
+
+
+def units():
+    """render_units(), run once; each check gets its own error list."""
+    if not _units:
+        _units.append(render_units())
+    found, masked, errors = _units[0]
+    return found, masked, list(errors)
+
+
+JOURNAL = "/var/volatile/log/journal"
+JOURNAL_UNIT = "var-volatile-log-journal.mount"
+HOMES = ["home-%s.mount" % u for u in HOME_USERS.split()]
+DATA_CHAIN = ["boat-data-check.service", "data.mount", "boat-data-prepare.service",
+              JOURNAL_UNIT, "boat-journal-flush.service"] + HOMES
+# (unit, setting, value, what the design needs it for). Every line of the
+# unit files that orders or ties DATA's units together is here.
+WIRING = [
+    ("boat-data-check.service", "Unit.DefaultDependencies", "no",
+     "the check is not ordered after sysinit.target, which it would then hold up"),
+    ("boat-data-check.service", "Unit.Before", "data.mount", "DATA is checked before it is mounted"),
+    ("boat-data-check.service", "Unit.Before", "shutdown.target", "stopped before shutdown"),
+    ("boat-data-check.service", "Unit.Conflicts", "shutdown.target", "stopped before shutdown"),
+    ("boat-data-check.service", "Service.TimeoutStartSec", "infinity", "a long repair is not killed half way"),
+    ("data.mount", "Unit.Requires", "boat-data-check.service", "a failed check leaves DATA unmounted"),
+    ("data.mount", "Unit.After", "boat-data-check.service", "mounted only once the check has finished"),
+    ("data.mount", "Mount.What", "/dev/nvme0n1p18", "DATA by partition number, never by label"),
+    ("data.mount", "Mount.Where", "/data", "DATA on /data"),
+    ("data.mount", "Install.WantedBy", "local-fs.target", "mounted at every boot"),
+    ("boat-data-prepare.service", "Unit.DefaultDependencies", "no", "runs as early as /data is there"),
+    ("boat-data-prepare.service", "Unit.Requires", "data.mount", "lays out /data only on DATA"),
+    ("boat-data-prepare.service", "Unit.After", "data.mount", "lays out /data only once it is mounted"),
+    ("boat-data-prepare.service", "Unit.Before", "shutdown.target", "stopped before shutdown"),
+    ("boat-data-prepare.service", "Unit.Conflicts", "shutdown.target", "stopped before shutdown"),
+    ("boat-data-prepare.service", "Unit.Before", JOURNAL_UNIT,
+     "the journal's directory exists before it is bind-mounted (10-boat-ab-before.conf)"),
+    ("boat-data-prepare.service", "Unit.Before", "home-boat.mount",
+     "the home is seeded before it is bind-mounted (10-boat-ab-before.conf)"),
+    (JOURNAL_UNIT, "Unit.Requires", "boat-data-prepare.service", "no journal mount without DATA laid out"),
+    (JOURNAL_UNIT, "Unit.After", "boat-data-prepare.service", "mounted once its directory exists"),
+    (JOURNAL_UNIT, "Mount.What", "/data/log/journal", "the directory prepare-data makes on DATA"),
+    (JOURNAL_UNIT, "Mount.Where", JOURNAL, "the real path, not the /var/log symlink"),
+    (JOURNAL_UNIT, "Install.WantedBy", "local-fs.target", "mounted at every boot"),
+    ("boat-journal-flush.service", "Unit.DefaultDependencies", "no", "not held to sysinit.target's order"),
+    ("boat-journal-flush.service", "Unit.Requires", JOURNAL_UNIT, "flushes only onto DATA"),
+    ("boat-journal-flush.service", "Unit.After", JOURNAL_UNIT, "flushes once the journal's mount is up"),
+    ("boat-journal-flush.service", "Unit.After", "systemd-journald.service", "journald is there to flush"),
+    ("boat-journal-flush.service", "Unit.Before", "shutdown.target", "hands the journal back before shutdown"),
+    ("boat-journal-flush.service", "Unit.Conflicts", "shutdown.target", "hands the journal back before shutdown"),
+    ("boat-journal-flush.service", "Install.WantedBy", JOURNAL_UNIT, "pulled in by the mount itself"),
+    ("systemd-journal-flush.service", "Unit.ConditionPathIsMountPoint", JOURNAL,
+     "the stock flush is skipped, not held up, until DATA's journal mount is there"),
+    ("home-boat.mount", "Unit.Requires", "boat-data-prepare.service", "no home from DATA unless DATA is laid out"),
+    ("home-boat.mount", "Unit.After", "boat-data-prepare.service", "the home is seeded before it is mounted"),
+    ("home-boat.mount", "Unit.Before", "systemd-user-sessions.service",
+     "nobody logs into the slot's stale copy of the home"),
+    ("home-boat.mount", "Unit.ConditionPathIsDirectory", "/data/home/boat", "only a home that was seeded"),
+    ("home-boat.mount", "Mount.What", "/data/home/boat", "the home kept on DATA"),
+    ("home-boat.mount", "Mount.Where", "/home/boat", "the home kept on DATA"),
+    ("home-boat.mount", "Install.WantedBy", "local-fs.target", "mounted at every boot"),
+    ("boat-swap.service", "Unit.DefaultDependencies", "no", "swap.target comes before sysinit.target"),
+    ("boat-swap.service", "Unit.Before", "swap.target", "swap is on before swap.target"),
+    ("boat-swap.service", "Unit.Before", "shutdown.target", "stopped before shutdown"),
+    ("boat-swap.service", "Unit.Conflicts", "shutdown.target", "stopped before shutdown"),
+    ("boat-swap.service", "Install.WantedBy", "swap.target", "run at every boot"),
+    ("boat-storage-grow.service", "Unit.After", "local-fs.target", "grows / once it is mounted"),
+    ("boat-storage-grow.service", "Unit.After", "data.mount", "grows DATA once it is mounted"),
+    ("boat-storage-grow.service", "Install.WantedBy", "multi-user.target", "run at every boot"),
+    ("rauc.service", "Unit.Requisite", "data.mount", "RAUC never starts without /data"),
+    ("rauc.service", "Unit.After", "data.mount", "RAUC waits for a check and mount still under way"),
+]
+
+
+def wiring_lines():
+    """Every relation in WIRING is there."""
+    have, _, errors = units()
+    if errors:
+        return errors
+    for unit, key, value, why in WIRING:
+        if value not in have.get(unit, {}).get(key, []):
+            errors.append("%s lacks %s=%s: %s" % (unit, key.split(".")[1], value, why))
+    return errors
+
+
+def wiring_every_user():
+    """Each user in BOAT_AB_HOME_USERS gets the home unit's wiring, and the
+    prepare step's drop-in orders it before every one of them."""
+    have, _, errors = units()
+    if errors:
+        return errors
+    for unit in HOMES:
+        user = unit[len("home-"):-len(".mount")]
+        for key, value in (("Unit.After", "boat-data-prepare.service"),
+                           ("Unit.Requires", "boat-data-prepare.service"),
+                           ("Unit.Before", "systemd-user-sessions.service"),
+                           ("Mount.What", "/data/home/" + user)):
+            if value not in have.get(unit, {}).get(key, []):
+                errors.append("%s lacks %s=%s" % (unit, key.split(".")[1], value))
+        if unit not in have.get("boat-data-prepare.service", {}).get("Unit.Before", []):
+            errors.append("boat-data-prepare.service is not ordered before %s" % unit)
+    return errors
+
+
+def wiring_not_early():
+    """DATA never holds up the boot: its mounts are nofail (no Before= on
+    local-fs.target), nothing in its chain is ordered before an early
+    target, RAUC does not restart a failed check, and the SWAP unit
+    gpt-auto-generator would write is masked."""
+    have, masked, errors = units()
+    if errors:
+        return errors
+    early = {"sysinit.target", "local-fs.target", "local-fs-pre.target", "basic.target",
+             "multi-user.target", "graphical.target"}
+    for unit in ["data.mount", JOURNAL_UNIT] + HOMES:
+        options = ",".join(have.get(unit, {}).get("Mount.Options", [])).split(",")
+        if "nofail" not in options:
+            errors.append("%s is not nofail: local-fs.target, and the whole boot, would wait for DATA" % unit)
+    for unit in DATA_CHAIN:
+        for target in early & set(have.get(unit, {}).get("Unit.Before", []) +
+                                  have.get(unit, {}).get("Install.RequiredBy", [])):
+            errors.append("%s holds up %s" % (unit, target))
+    rauc = have.get("rauc.service", {})
+    if "data.mount" in rauc.get("Unit.Requires", []) + rauc.get("Unit.BindsTo", []) \
+            or "/data" in " ".join(rauc.get("Unit.RequiresMountsFor", [])):
+        errors.append("rauc.service requires data.mount: each 'rauc status' would rerun a failed check")
+    if "dev-nvme0n1p17.swap" not in masked:
+        errors.append("dev-nvme0n1p17.swap (gpt-auto-generator's unit for SWAP) is not masked")
+    return errors
+
+
+def ordered(have):
+    """The 'starts after' relation: (a, b) when b starts after a."""
+    edges = set()
+    for unit, settings in have.items():
+        edges |= {(unit, b) for b in settings.get("Unit.Before", [])}
+        edges |= {(a, unit) for a in settings.get("Unit.After", [])}
+    return edges
+
+
+def wiring_chain():
+    """The start order end to end: check, mount, prepare, the bind mounts,
+    the journal's flush; RAUC, the grow step and user sessions after the
+    mounts they need."""
+    have, _, errors = units()
+    if errors:
+        return errors
+    edges = ordered(have)
+
+    def after(a, b):
+        seen, todo = set(), [a]
+        while todo:
+            n = todo.pop()
+            for x, y in edges:
+                if x == n and y not in seen:
+                    seen.add(y)
+                    todo.append(y)
+        return b in seen
+    want = [("boat-data-check.service", "data.mount"), ("data.mount", "boat-data-prepare.service"),
+            ("boat-data-prepare.service", JOURNAL_UNIT), (JOURNAL_UNIT, "boat-journal-flush.service"),
+            ("data.mount", "rauc.service"), ("data.mount", "boat-storage-grow.service")]
+    want += [("boat-data-prepare.service", h) for h in HOMES]
+    want += [(h, "systemd-user-sessions.service") for h in HOMES]
+    for a, b in want:
+        if not after(a, b):
+            errors.append("%s does not start after %s" % (b, a))
+    for a, b in want:
+        if after(b, a):
+            errors.append("%s and %s are ordered both ways (a cycle)" % (a, b))
+    return errors
+
+
 FILE_CHECKS = [
     ("journald: SystemKeepFree is set, well below what boat-update keeps free on DATA",
      journal_keeps_free),
     ("seed: DATA's seed carries its journal as written zeros, and checks clean",
      seed_journal_written),
+    ("units: every After=/Before=/Requires= DATA's units, swap, grow and RAUC rely on is there",
+     wiring_lines),
+    ("units: each home kept on DATA is wired the same, and seeded before it is mounted",
+     wiring_every_user),
+    ("units: DATA holds up no early boot target, RAUC does not rerun its check, SWAP's generated unit is masked",
+     wiring_not_early),
+    ("units: check, mount, prepare, bind mounts, journal flush, RAUC and logins start in that order",
+     wiring_chain),
 ]
 
 

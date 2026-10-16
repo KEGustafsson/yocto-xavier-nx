@@ -77,6 +77,8 @@ module.exports = function (app) {
     start: async (settings) => {
       listener = await listen({
         key: settings.sleepKey,
+        // Not 9099 if this runs on the boat itself: see below.
+        port: settings.sleepPort,
         onSleep: (from) => app.debug(`suspend requested by ${from.address}`),
         // Structured events rather than preformatted strings, so the host
         // logs them the way it wants to.
@@ -88,9 +90,18 @@ module.exports = function (app) {
 };
 ```
 
-`listen()` never binds a port you did not ask for, never writes to stdout, and
-routes every line through `logger` — the three things that make a library
-unpleasant to embed.
+`listen()` never writes to stdout and routes every line through `logger`. It
+binds the port you give it - 9099 if you give none - and refuses
+(`EADDRINUSE`) a port another socket already holds rather than sharing it.
+
+**Not on the boat itself at 9099.** There, `boat-sleep-listener` already owns
+9099, and every sleep request must reach it: `boat-sleep` refuses to suspend
+during an A/B trial or an install, or with nothing armed to wake the board.
+So `listen()` belongs on another host, or on another port. An `onSleep` on
+the boat must hand off to `/usr/bin/boat-sleep` on the host (for instance
+through a root-only systemd socket or path unit), never to logind directly:
+root's own sleep inhibitors do not hold root back, so that would suspend in
+the middle of a trial or an install.
 
 ## Wire format (protocol v1, 60 bytes, big-endian)
 

@@ -12,15 +12,24 @@
 #   - when boat-update runs the install, the bundle is the release it is
 #     installing (/run/boat-update/expect): a channel that serves another
 #     signed bundle than its index offered gets nothing written;
-#   - /data is the DATA partition (RAUC's data directory lives there);
+#   - /data is the DATA partition (RAUC's data directory lives there), and
+#     has room for RAUC to save its status: RAUC marks the target unusable
+#     BEFORE its first save there, so a full /data would cost the fallback
+#     slot and install nothing;
 #   - every partition RAUC is about to write is the one this layout puts at
 #     that number (GPT name APP or APP_b), and is not the booted slot;
 #   - the bundle was built for the L4T release this board runs - a BSP bump
-#     changes firmware RAUC does not update, and needs a USB reflash;
+#     changes firmware RAUC does not update, and needs a USB reflash - and
+#     against the same kernel device tree as this slot (firmware.id): the
+#     kernel runs on the DTB written at flash, never on one from a slot;
 #   - RAUC's own checks that come after this handler will pass: the
 #     bundle's compatible is this board's, and its version is not below
 #     system.conf's min-bundle-version (an install forced past that with
 #     --ignore-version-limit is refused here too: lower the floor instead).
+#
+# Board settings changed in the target slot after the later of the two
+# slots' installs (a rollback or a fallback ran it) would be lost when it is
+# overwritten: they are kept in /data/boat-update/displaced, with an alert.
 #
 # Then it marks the target slot not committed - and only that. Nothing
 # should refuse the bundle after this, but if something does (a failed
@@ -34,6 +43,12 @@ set -eu
 SELF=boat-rauc-pre-install
 # shellcheck source=SCRIPTDIR/../../../../../recipes-boat/ab-boot/files/boat-ab-lib.sh
 . /usr/lib/boat-ab/lib.sh
+# A warning for this install's history line (boat-rauc-post-install): RAUC
+# shows a handler's output to nobody when the install succeeds.
+INSTALL_WARNING="$BOAT_AB_RUNDIR/install-warning"
+rm -f "$INSTALL_WARNING"
+# The running slot's files (its board settings are compared below).
+slot_root=/
 
 slot="$(booted_slot)"
 [ -n "$slot" ] || die "this boot did not come through GRUB (no rauc.slot=) - reboot first; installing now could leave nothing bootable"
@@ -144,6 +159,25 @@ fi
 data_dev="$(part_dev "$BOAT_AB_PART_DATA")"
 awk -v d="$data_dev" '$1 == d && $2 == "/data" { f = 1 } END { exit !f }' /proc/mounts \
     || die "/data is not mounted from DATA ($data_dev)"
+# RAUC marks the target unusable (OK=0) and only then saves its status to
+# /data/rauc, by writing a new file and renaming it - and again once the
+# slot is written. Without a free block or inode there it fails after the
+# mark: the fallback slot is gone and nothing is installed. A streamed
+# install needs no more room than this. df's figure leaves out the root
+# reserve, which RAUC could use too: the check errs on the safe side.
+data_kib="$(df -Pk /data 2>/dev/null | awk 'NR == 2 { print $4 }')"
+# A file system that does not count inodes has none in all.
+data_inodes="$(df -Pi /data 2>/dev/null | awk 'NR == 2 && $2 != 0 { print $4 }')"
+case "$data_kib" in
+    ''|*[!0-9]*) die "cannot read the free space on /data" ;;
+esac
+[ "$data_kib" -ge 8192 ] \
+    || die "/data has $((data_kib / 1024)) MiB free - RAUC needs a few MiB there to save its status, and would mark slot(s) unusable first: free some space (docker system prune, journalctl --vacuum-size) and try again"
+case "$data_inodes" in
+    ''|*[!0-9]*) ;;
+    *) [ "$data_inodes" -ge 64 ] \
+           || die "/data has $data_inodes free inodes - RAUC needs some to save its status, and would mark slot(s) unusable first: remove files (docker system prune) and try again" ;;
+esac
 
 # The L4T release, as "35.6.4", from nv_tegra_release's first line
 # ("# R35 (release), REVISION: 6.4, ...").
@@ -154,13 +188,30 @@ bundle_l4t="${RAUC_META_BOAT_L4T:-}"
 if [ "$bundle_l4t" != "$running_l4t" ]; then
     die "the bundle is for L4T $bundle_l4t, this board runs $running_l4t: a BSP change also changes firmware that only a USB reflash updates (scripts/05-flash-nvme.sh)"
 fi
+# The kernel runs on the device tree written at flash; a slot carries none.
+# Each image records the DTB and overlays it was built against, and every
+# install checks it against the running slot's - which was flashed with
+# them, or checked the same way - so a release built against another DTB
+# (a meta-tegra or kernel change within one L4T release) is refused.
+# Boards flashed before the record existed cannot check it.
+running_fw="$(cat /usr/lib/boat-ab/firmware.id 2>/dev/null || true)"
+bundle_fw="${RAUC_META_BOAT_FIRMWARE:-}"
+if [ -n "$running_fw" ] && [ -n "$bundle_fw" ] && [ "$bundle_fw" != "$running_fw" ]; then
+    die "the bundle was built against another kernel device tree (firmware.id $bundle_fw, this slot's $running_fw): a DTB change only reaches the board by a USB reflash at the dock (scripts/05-flash-nvme.sh) - publish such a release with --reflash: boat-update then tells boards flashed with the old one to reflash instead of offering it"
+elif [ -z "$running_fw" ] || [ -z "$bundle_fw" ]; then
+    warn "cannot check the kernel device tree: $([ -z "$running_fw" ] && echo "this slot" || echo "the bundle") has no firmware.id (built before it was recorded)"
+fi
 
 # Docker keeps its data on the shared /data: a newer major version may
 # migrate it in a way the other slot's Docker cannot read after a fallback.
 running_docker="$(docker --version 2>/dev/null | sed -n 's/^Docker version \([0-9]*\)\..*/\1/p')"
 bundle_docker="${RAUC_META_BOAT_DOCKER:-}"
 if [ -n "$running_docker" ] && [ -n "$bundle_docker" ] && [ "${bundle_docker%%.*}" != "$running_docker" ]; then
-    warn "Docker $running_docker -> ${bundle_docker}: a new major version may migrate /data/docker so that this slot's Docker cannot read it after a fallback"
+    # On a successful install RAUC shows this output to nobody: it goes to
+    # 'boat-update status' (an alert, until the reboot) and the history.
+    docker_warning="Docker $running_docker -> ${bundle_docker}: a new major version may migrate /data/docker so that this slot's Docker cannot read it after a fallback or rollback"
+    alert "$docker_warning"
+    { mkdir -p "$BOAT_AB_RUNDIR" && echo "$docker_warning" > "$INSTALL_WARNING"; } 2>/dev/null || true
 fi
 
 targets=""
@@ -181,6 +232,84 @@ for n in ${RAUC_TARGET_SLOTS:-}; do
     targets="$targets $bootname"
 done
 [ -n "$targets" ] || die "RAUC named no target slot"
+
+# Board settings live in each slot and are carried only at an install, from
+# the running slot. After a rollback or a fallback the target slot can hold
+# newer ones - a Wi-Fi network or a pairing added since - and overwriting it
+# would lose them for good. Keep what differs, and say so. Best effort: a
+# slot that will not mount (never written, half written) has nothing to keep.
+#
+# Only what changed there after the later of the two slots' installs counts.
+# On a forward update the target is the older slot: its settings are the
+# ones this slot was installed from, or older - stale copies (BlueZ
+# rewrites a pairing's info by itself), not displaced ones. After a
+# rollback the target was installed later, and what changed there since
+# never reached this slot. The times are RAUC's installed.timestamp from its
+# central status file: every RAUC install records it, also those made by
+# older bundles (a marker the bundle hook wrote would not be in a slot an
+# older bundle installed), and 'rauc status' cannot be asked while RAUC runs
+# this install. Neither slot recorded (a reflash empties /data and writes
+# only APP): the target holds what was there before the flash - stale.
+# The times are only as good as the clock was then: a file changed while
+# the clock read 1970 looks old, and an install made then makes every file
+# look new (kept, as before).
+rauc_status="$(ini_get "$sys_conf" system data-directory 2>/dev/null || true)"
+rauc_status="${rauc_status:-/data/rauc}/central.raucs"
+# installed_at BOOTNAME: when RAUC last installed that slot, in seconds
+# since the epoch; nothing if it has no record. system.conf's rootfs.0 is A.
+installed_at() {
+    case "$1" in A) name=rootfs.0 ;; *) name=rootfs.1 ;; esac
+    ts="$(ini_get "$rauc_status" "slot.$name" installed.timestamp 2>/dev/null || true)"
+    [ -n "$ts" ] || return 0
+    # RAUC writes 2026-10-16T12:00:00Z; busybox's date wants a space for the T.
+    ts="$(echo "$ts" | sed 's/T/ /; s/\.[0-9]*//; s/Z$//')"
+    date -u -d "$ts" +%s 2>/dev/null || true
+}
+keep_displaced() { # BOOTNAME DEVICE
+    since="$(installed_at "$slot")"
+    target_since="$(installed_at "$1")"
+    if [ -z "$since" ] || { [ -n "$target_since" ] && [ "$target_since" -gt "$since" ]; }; then
+        since="$target_since"
+    fi
+    [ -n "$since" ] || return 0
+    mnt="$BOAT_AB_RUNDIR/displaced-$1"
+    mkdir -p "$mnt" || return 0
+    # Read only, and nothing on it can run or open a device.
+    if ! mount -o ro,noload,nosuid,nodev,noexec -t ext4 "$2" "$mnt" 2>/dev/null; then
+        rmdir "$mnt" 2>/dev/null || true
+        return 0
+    fi
+    # Network connections, Bluetooth pairings and root's authorized keys:
+    # what someone set up, not what changes by itself (caches, known_hosts).
+    # find fails for a directory the slot does not have; the rest is listed.
+    ( cd "$mnt" || exit 0
+      find etc/NetworkManager/system-connections -type f 2>/dev/null || true
+      find var/lib/bluetooth -type f -name info 2>/dev/null || true
+      find home/root/.ssh -type f -name authorized_keys 2>/dev/null || true ) > "$mnt.list"
+    keep="/data/boat-update/displaced/slot-$1-$(date -u +%Y%m%dT%H%M%SZ)"
+    found=""
+    # Every file there changed after that, which this slot lacks or has
+    # with other contents.
+    while IFS= read -r f; do
+        [ "$(stat -c %Y "$mnt/$f" 2>/dev/null || echo 0)" -gt "$since" ] || continue
+        [ -f "$slot_root$f" ] \
+            && [ "$(sha256sum < "$mnt/$f")" = "$(sha256sum < "$slot_root$f")" ] && continue
+        (umask 077 && mkdir -p "$keep/$(dirname "$f")") && cp -a "$mnt/$f" "$keep/$f" \
+            && found="$found /$f"
+    done < "$mnt.list"
+    rm -f "$mnt.list"
+    # RAUC must not write a slot that is still mounted.
+    umount "$mnt" || die "could not unmount slot $1 ($mnt) after reading its settings - nothing changed"
+    rmdir "$mnt" 2>/dev/null || true
+    if [ -n "$found" ]; then
+        alert "slot $1 holds board settings this slot lacks or has otherwise (changed there after $(date -u -d "@$since" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "its install")):$found - kept in $keep before it is overwritten; copy back what is still wanted"
+    fi
+    return 0
+}
+for t in $targets; do
+    case "$t" in A) num="$BOAT_AB_PART_A" ;; *) num="$BOAT_AB_PART_B" ;; esac
+    keep_displaced "$t" "$(part_dev "$num")"
+done
 
 ab_lock || die "could not take the A/B lock - another grubenv writer is stuck; nothing changed"
 for t in $targets; do

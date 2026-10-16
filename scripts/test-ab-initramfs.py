@@ -16,10 +16,16 @@ for each. mount, blkid, sleep, reboot, switch_root and the rescue shell are
 stubs that log what they were asked to do, so each case checks what /init
 mounted, and whether it switched to it, reset the board or stopped.
 
+The board runs /init with busybox's ash, which this host may not have.
+Every case runs under each POSIX shell that is here - dash, bash --posix,
+and busybox's ash when it is installed (CI: apt-get install busybox) - so
+a construct one shell takes and another does not shows up as a failure.
+
 Exit status: 0 = all passed, 1 = a case failed.
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,6 +36,23 @@ FILES = os.path.join(HERE, "..", "layers", "meta-boat", "recipes-core",
 DISK = "/dev/nvme0n1"
 SLOT = {"A": DISK + "p1", "B": DISK + "p2"}
 NAMES = {"1": "APP", "2": "APP_b", "12": "esp"}
+
+
+def usable(cmd):
+    """A shell that is here - and, for busybox, one that runs the stubs on
+    PATH rather than its own applets (a standalone-shell build would not)."""
+    if not shutil.which(cmd[0]):
+        return False
+    if cmd[0] != "busybox":
+        return True
+    p = subprocess.run(cmd + ["-c", "PATH=/nonexistent; command -v mount"], capture_output=True)
+    return p.returncode != 0
+
+
+# The shells /init is run with: (name, command).
+SHELLS = [(n, c) for n, c in (("dash", ["dash"]), ("bash --posix", ["bash", "--posix"]),
+                              ("busybox ash", ["busybox", "sh"])) if usable(c)] \
+    or [("sh", ["sh"])]
 
 
 def slurp(path):
@@ -121,8 +144,8 @@ awk -v n="${last##*p}" '$1 == n { print $2; f = 1 } END { exit !f }' %(r)s/names
             init = init.replace(old, new)
         self.write("init", init)
 
-    def run(self):
-        p = subprocess.run(["sh", os.path.join(self.root, "init")],
+    def run(self, shell=("sh",)):
+        p = subprocess.run(list(shell) + [os.path.join(self.root, "init")],
                            capture_output=True, text=True, timeout=30)
         log = os.path.join(self.root, "log")
         return p.stdout + p.stderr, slurp(log).splitlines() if os.path.exists(log) else []
@@ -164,9 +187,9 @@ CASES = [
 ]
 
 
-def check(c, root):
+def check(c, root, shell):
     board = Board(root, c["cmdline"], **c["board"])
-    out, log = board.run()
+    out, log = board.run(shell)
     errors = []
     ends = [l.split()[0] for l in log if l.split()[0] in ("switch_root", "reboot", "shell")]
     if ends[:1] != [c["ends"]]:
@@ -186,20 +209,26 @@ def check(c, root):
 
 def main():
     failed = 0
+    print("shells: %s%s" % (", ".join(n for n, _ in SHELLS),
+                            "" if any(n == "busybox ash" for n, _ in SHELLS)
+                            else " (busybox not installed: the board's own ash not run)"))
     with tempfile.TemporaryDirectory(prefix="ab-initramfs-") as work:
         for i, c in enumerate(CASES):
-            root = os.path.join(work, str(i))
-            os.makedirs(root)
-            errors, out = check(c, root)
-            if errors:
-                failed += 1
-                print("FAIL: %s" % c["name"])
-                for e in errors:
-                    print("    " + e)
-                print("    output:\n" + "\n".join("      " + l for l in out.splitlines()))
-            else:
-                print("ok:   %s" % c["name"])
-    print("%d of %d cases passed" % (len(CASES) - failed, len(CASES)))
+            for j, (sh_name, shell) in enumerate(SHELLS):
+                root = os.path.join(work, "%d-%d" % (i, j))
+                os.makedirs(root)
+                errors, out = check(c, root, shell)
+                name = "%s (%s)" % (c["name"], sh_name)
+                if errors:
+                    failed += 1
+                    print("FAIL: %s" % name)
+                    for e in errors:
+                        print("    " + e)
+                    print("    output:\n" + "\n".join("      " + l for l in out.splitlines()))
+                else:
+                    print("ok:   %s" % name)
+    total = len(CASES) * len(SHELLS)
+    print("%d of %d cases passed" % (total - failed, total))
     return 1 if failed else 0
 
 

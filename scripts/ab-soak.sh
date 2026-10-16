@@ -25,8 +25,9 @@
 #   1. note the running slot and the kernel's boot ID;
 #   2. copy the bundle to /data and `boat-update install --reboot` - or,
 #      over the air, publish it and have the board fetch and install it;
-#   3. wait for the board to go down and come back (a faulty bundle can take
-#      ~25 minutes: the hang fault only ends at the 15-minute trial deadline);
+#   3. wait for the board to come back with a new boot ID, over SSH (a
+#      faulty bundle can take ~25 minutes: the hang fault only ends at the
+#      15-minute trial deadline);
 #   4. wait until the running slot is committed;
 #   5. pass if the board really rebooted (a new boot ID) and a good bundle
 #      came back on the OTHER slot, or a faulty one on the SAME slot it
@@ -102,8 +103,6 @@ fi
 if [[ -z "${TARGET}" ]]; then
   require_conf BOAT_HOST
   TARGET="${BOAT_SSH_USER}@${BOAT_HOST}"
-else
-  BOAT_HOST="${TARGET#*@}"
 fi
 need ssh
 
@@ -241,10 +240,11 @@ for (( c = 1; c <= CYCLES; c++ )); do
         err "  the board refused or failed the update (exit ${rc}):"
         tail -n 5 <<< "${out}" | sed 's/^/    /' >&2
       elif {
-        # After a cut the board may already be back up, so a cut cycle does
-        # not wait to see it go down: its uptime proves it booted after the cut.
-        [[ "${cut}" != no ]] || wait_for_state down 600 >/dev/null || true
-        ! wait_for_state up 2400 >/dev/null || ! settle 2400
+        # A new boot ID, over SSH - not ping, which a jump host or an
+        # ssh_config alias does not reach. After a cut the board may already
+        # be back up; its uptime below proves it booted after the cut. With
+        # no boot ID from before, the check below reports it never rebooted.
+        ! wait_for_new_boot "${boot}" 3000 >/dev/null || ! settle 2400
       }; then
         after="$(slot_now || true)"
         err "  the board did not come back to a committed slot"

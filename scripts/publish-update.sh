@@ -15,6 +15,11 @@
 # index.p7, then uploads the bundle FIRST - checking the copy - and the
 # index LAST, so a board never sees an index naming a file that is not
 # there, or not whole. Any failure stops it before the index is published.
+# The published files are world-readable (0644, directories 0755) whatever
+# the umask, so the web server can serve them.
+#
+# Needs OpenSSL 3 (Ubuntu 22.04 or newer) here; rsync of any version here
+# and on the far side.
 #
 # BOAT_PUBLISH_DEST is a local directory (a web server's document root) or an
 # rsync target (host:path); either way it is the directory that holds one
@@ -23,7 +28,10 @@
 #
 # Options:
 #   --reflash      mark the release as a BSP bump: boards are told to
-#                  reflash at the dock instead of downloading it
+#                  reflash at the dock instead of downloading it. Also
+#                  what a bundle built against another kernel device tree
+#                  than the channel's current release needs (its boards
+#                  would refuse it) - the script stops without it
 #   --notes FILE   release notes shown by `boat-update status`
 #
 # Promote a release from testing to stable by publishing the same bundle to
@@ -36,6 +44,9 @@
 # signed with the bench keys (BOAT_BENCH_KEYS_DIR, which bench images
 # trust), so a bench host needs no fleet private key at all.
 set -euo pipefail
+# Everything this writes - the index, the copies, the directories - is for a
+# web server running as another user.
+umask 022
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${HERE}/lib.sh"
@@ -70,6 +81,12 @@ BUNDLE="$(readlink -f -- "${BUNDLE}")"
 : "${BOAT_PUBLISH_DEST:?set BOAT_PUBLISH_DEST to the channel root (a directory, or host:path for rsync)}"
 need openssl
 need python3
+need flock
+# -no-CAstore below - trust the update CA and nothing from the system - is
+# OpenSSL 3's: an older openssl rejects the option, which would read as a
+# bundle that does not verify.
+[[ "$(openssl version | awk '{ print $2 }')" =~ ^[3-9]\. ]] \
+  || die "publishing needs OpenSSL 3.0 or newer (cms -no-CAstore); this host has '$(openssl version)' - use Ubuntu 22.04 or newer"
 
 # The keys this channel is published with: the bench's for 'bench', the
 # fleet's for every other channel.
@@ -84,6 +101,14 @@ KEY="${KEYS}/index-signing.key.pem"
 CERT="${KEYS}/index-signing.cert.pem"
 [[ -f "${KEY}" && -f "${CERT}" && -f "${KEYS}/ca.cert.pem" ]] \
   || die "no index-signing key and CA in ${KEYS} - run ${GEN}"
+# The same file is every image's keyring (rauc_%.bbappend refuses it too).
+! grep -q 'PRIVATE KEY' "${KEYS}/ca.cert.pem" \
+  || die "${KEYS}/ca.cert.pem holds a PRIVATE KEY - it must hold only CA certificates"
+
+# One publish at a time per key directory: two at once would compute the
+# same serial for different indexes, and boards take only the first.
+exec 8>>"${KEYS}/index-serial.lock" || die "cannot open ${KEYS}/index-serial.lock"
+flock -w 600 8 || die "another publish-update.sh holds ${KEYS}/index-serial.lock"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
@@ -118,18 +143,63 @@ PY
 openssl cms -verify -inform DER -binary -in "${WORK}/bundle.sig" -out "${WORK}/manifest.raucm" \
   -signer "${WORK}/bundle-signer.pem" -CAfile "${BUNDLE_CA}" -no-CApath -no-CAstore -purpose any \
   2> "${WORK}/verify.err" \
-  || die "${BUNDLE}'s signature does not verify against ${KEYS}/ca.cert.pem, or it is not a verity bundle: $(tail -n 1 "${WORK}/verify.err")"
+  || die "${BUNDLE}'s signature does not verify against ${KEYS}/ca.cert.pem, or it is not a verity bundle. openssl said: $(head -c 2000 "${WORK}/verify.err" | tr '\n' ' ')"
 openssl x509 -in "${WORK}/bundle-signer.pem" -noout -ext extendedKeyUsage 2>/dev/null | grep -q "Code Signing" \
   || die "${BUNDLE} is signed by a certificate without the codeSigning extended key usage - not the bundle-signing key"
 
 SHA256="$(sha256sum "${BUNDLE}" | cut -d' ' -f1)"
 SIZE="$(stat -c %s "${BUNDLE}")"
 
+# The index this channel publishes now, if it can be read back (a local
+# directory, or over rsync): its serial is a lower bound for the next one,
+# and its release says what the boards on this channel were last offered.
+PUBLISHED_SERIAL=0
+PUBLISHED_FIRMWARE=""
+PUBLISHED_VERSION=""
+if [[ "${BOAT_PUBLISH_DEST}" == *:* ]]; then
+  need rsync
+  # A channel with no index yet (its first publish) is the only failure to
+  # read it back that may go on: anything else - the host unreachable, no
+  # permission - would publish below the boards' serial, or past a device
+  # tree change, with nothing said. rsync says a source is missing with exit
+  # 23 and a link_stat error that names it; both must hold, for this file.
+  FETCH_RC=0
+  rsync -q "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7" "${WORK}/published.p7" 2> "${WORK}/fetch.err" || FETCH_RC=$?
+  if [[ ${FETCH_RC} -ne 0 ]]; then
+    if [[ ${FETCH_RC} -ne 23 ]] \
+       || ! grep -qF "${CHANNEL}/index.p7\" failed: No such file or directory" "${WORK}/fetch.err"; then
+      die "could not read back ${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7 to check the serial and device tree against it - nothing published. rsync exited ${FETCH_RC} and said: $(head -c 2000 "${WORK}/fetch.err" | tr '\n' ' ')"
+    fi
+    rm -f "${WORK}/published.p7"
+  fi
+elif [[ -f "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7" ]]; then
+  cp "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7" "${WORK}/published.p7"
+fi
+# An index that is there but does not verify under these keys, or cannot be
+# read, stops the publish too: going on would drop the serial and device-tree
+# checks against the release the boards were last offered. Boards trust only
+# this CA, so such an index is a wrong key directory or a damaged file, for
+# the operator to look at.
+if [[ -e "${WORK}/published.p7" ]]; then
+  openssl cms -verify -inform DER -binary -in "${WORK}/published.p7" -out "${WORK}/published.json" \
+          -CAfile "${KEYS}/ca.cert.pem" -no-CApath -no-CAstore -purpose smimesign -no_check_time \
+          2> "${WORK}/published.err" \
+    || die "the channel's current index, ${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7, does not verify against ${KEYS}/ca.cert.pem - nothing published. Check the key directory; replace that index by hand only if it is damaged. openssl said: $(head -c 2000 "${WORK}/published.err" | tr '\n' ' ')"
+  PUBLISHED="$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(int(d["serial"]), d.get("version", "?") or "?", d.get("firmware", "") or "")' "${WORK}/published.json")" \
+    || die "the channel's current index, ${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7, verifies but has no readable serial - nothing published"
+  read -r PUBLISHED_SERIAL PUBLISHED_VERSION PUBLISHED_FIRMWARE <<< "${PUBLISHED}"
+fi
+
 # The serial only ever grows: a board rejects an index whose serial is not
-# above the last one it accepted on that channel. It is the larger of the
-# last serial + 1 and the time in seconds, so a lost or restored counter, or
-# a second publishing machine, can still never go back below what boards
-# have seen. A counter that is there but unreadable stops the publish.
+# above the last one it accepted on that channel. It is the largest of the
+# last serial here + 1, the channel's current index's + 1 and the time in
+# seconds, so a lost or restored counter, or a second publishing machine
+# (even one whose clock is behind), can still never go back below what
+# boards have seen - as long as the channel's index can be read back. A
+# counter that is there but unreadable stops the publish.
 SERIAL_FILE="${KEYS}/index-serial"
 LAST=0
 if [[ -e "${SERIAL_FILE}" ]]; then
@@ -137,6 +207,7 @@ if [[ -e "${SERIAL_FILE}" ]]; then
   [[ "${LAST}" =~ ^[0-9]+$ ]] \
     || die "${SERIAL_FILE} holds '${LAST}', not a number - fix it first: boards refuse an index whose serial does not grow"
 fi
+(( PUBLISHED_SERIAL <= LAST )) || LAST="${PUBLISHED_SERIAL}"
 NOW="$(date +%s)"
 SERIAL=$(( LAST + 1 > NOW ? LAST + 1 : NOW ))
 
@@ -155,6 +226,7 @@ doc = {
     "compatible": cp.get("update", "compatible"),
     "version": version,
     "l4t": cp.get("meta.boat", "l4t", fallback=""),
+    "firmware": cp.get("meta.boat", "firmware", fallback=""),
     "bundle": "boat-bundle-%s-%s.raucb" % (version, sha[:12]),
     "size": int(size),
     "sha256": sha,
@@ -163,6 +235,8 @@ doc = {
 }
 if not doc["l4t"]:
     sys.exit("the bundle has no [meta.boat] l4t= - it was not built by meta-boat's boat-bundle")
+if not doc["firmware"]:
+    del doc["firmware"]
 if doc["compatible"].endswith("-bench") and channel != "bench":
     sys.exit("%r is a BOAT_BENCH build (its rootfs trusts the bench CA) - it goes to the 'bench' "
              "channel only, never to %r" % (doc["compatible"], channel))
@@ -174,10 +248,20 @@ if notes:
 with open(out, "w") as f:
     json.dump(doc, f, indent=1, sort_keys=True)
 PY
-read -r VERSION NAME < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["version"], d["bundle"])' "${WORK}/index.json")
+read -r VERSION NAME FIRMWARE < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["version"], d["bundle"], d.get("firmware", ""))' "${WORK}/index.json")
+
+# A slot carries no device tree: the kernel runs on the one written at
+# flash. Boards flashed for the channel's current release refuse a bundle
+# built against another DTB (their pre-install handler) - after each has
+# downloaded it. Such a release is a reflash.
+if [[ -n "${FIRMWARE}" && -n "${PUBLISHED_FIRMWARE}" && "${FIRMWARE}" != "${PUBLISHED_FIRMWARE}" ]] \
+   && [[ "${REFLASH}" != true ]]; then
+  die "${VERSION} was built against another kernel device tree than ${PUBLISHED_VERSION}, which '${CHANNEL}' publishes now (firmware.id ${FIRMWARE:0:12}, not ${PUBLISHED_FIRMWARE:0:12}): boards keep the DTB they were flashed with and would refuse it. Publish it with --reflash (boards are told to reflash at the dock), or rebuild against the same meta-tegra"
+fi
 
 openssl cms -sign -nodetach -binary -outform DER \
   -signer "${CERT}" -inkey "${KEY}" -in "${WORK}/index.json" -out "${WORK}/index.p7"
+chmod 0644 "${WORK}/index.p7"
 # Check it the way a board will, before anything is uploaded.
 openssl cms -verify -inform DER -binary -in "${WORK}/index.p7" -out /dev/null \
   -CAfile "${KEYS}/ca.cert.pem" -no-CApath -no-CAstore -purpose smimesign -no_check_time 2>/dev/null \
@@ -191,11 +275,16 @@ mv "${SERIAL_FILE}.tmp" "${SERIAL_FILE}" || die "cannot write ${SERIAL_FILE}"
 
 log "publishing ${VERSION} to '${CHANNEL}' as ${NAME} (serial ${SERIAL}, $(( SIZE >> 20 )) MiB)"
 if [[ "${BOAT_PUBLISH_DEST}" == *:* ]]; then
-  need rsync
+  # The channel directory first, the way any rsync can (--mkpath is
+  # 3.2.3's, on both ends): rsync makes a missing destination directory,
+  # and copying an empty directory makes the channel's below it.
+  mkdir -p "${WORK}/tree/${CHANNEL}"
+  rsync -r --perms --chmod=D0755 "${WORK}/tree/${CHANNEL}" "${BOAT_PUBLISH_DEST}/"
   # rsync to a temporary name and rename on the far side is what makes the
-  # index appear in one step; --partial-dir does that for us.
-  rsync --mkpath --partial-dir=.rsync-partial "${BUNDLE}" "${BOAT_PUBLISH_DEST}/${CHANNEL}/${NAME}"
-  rsync --mkpath --partial-dir=.rsync-partial "${WORK}/index.p7" "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7"
+  # index appear in one step; --partial-dir does that for us. --perms with
+  # --chmod: the far side's umask does not decide who can read them.
+  rsync --perms --chmod=D0755,F0644 --partial-dir=.rsync-partial "${BUNDLE}" "${BOAT_PUBLISH_DEST}/${CHANNEL}/${NAME}"
+  rsync --perms --chmod=D0755,F0644 --partial-dir=.rsync-partial "${WORK}/index.p7" "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7"
 else
   DEST="${BOAT_PUBLISH_DEST}/${CHANNEL}"
   mkdir -p "${DEST}"
@@ -203,6 +292,7 @@ else
   # does not stop at a failure inside an && list) - and the copy is checked
   # before an index names it: a full disk can leave a short file.
   cp "${BUNDLE}" "${DEST}/.${NAME}.tmp" || die "could not copy the bundle to ${DEST} - nothing published"
+  chmod 0644 "${DEST}/.${NAME}.tmp"
   [[ "$(stat -c %s "${DEST}/.${NAME}.tmp")" == "${SIZE}" \
      && "$(sha256sum "${DEST}/.${NAME}.tmp" | cut -d' ' -f1)" == "${SHA256}" ]] \
     || die "the copy in ${DEST} is not the bundle (short or changed) - nothing published"

@@ -3,7 +3,8 @@ DESCRIPTION = "A verity-format RAUC bundle carrying boat-image's rootfs, \
 installed with 'rauc install' (and, from Phase 5, boat-update). Its version \
 is BOAT_RELEASE, the same string the image writes to /etc/boat-release; its \
 [meta.boat] section names the L4T release and Docker version the image was \
-built with, for the board's pre-install checks; its hook carries the \
+built with, and the device tree it was built against, for the board's \
+pre-install checks; its hook carries the \
 board's own state into the new slot. Every bundle is stream-ready \
 (adaptive block-hash-index). See docs/plans/ab-os-updates.md 5.6-5.10."
 LICENSE = "MIT"
@@ -40,12 +41,30 @@ RAUC_META_SECTIONS = "boat"
 # bench CA: signing them with the fleet key would only mean that key - the
 # one every boat trusts - has to be wherever bench builds run.
 BOAT_BUNDLE_KEYS_DIR = "${@d.getVar('BOAT_BENCH_KEYS_DIR') if d.getVar('BOAT_BENCH') == '1' else d.getVar('BOAT_KEYS_DIR')}"
-RAUC_KEY_FILE = "${BOAT_BUNDLE_KEYS_DIR}/rauc-signing.key.pem"
+# The signing key can instead live on a PKCS#11 token: set RAUC_KEY_FILE in
+# local.conf to its pkcs11: URI and RAUC_PKCS11_MODULE to the token's
+# module, and RAUC asks the token for each signature (docs/07-updates.md).
+# Not a PIN: bitbake writes every exported variable's value into its
+# signature files, so a token that needs one at signing time is not
+# supported here.
+RAUC_KEY_FILE ?= "${BOAT_BUNDLE_KEYS_DIR}/rauc-signing.key.pem"
 RAUC_CERT_FILE = "${BOAT_BUNDLE_KEYS_DIR}/rauc-signing.cert.pem"
 RAUC_KEYRING_FILE = "${BOAT_BUNDLE_KEYS_DIR}/ca.cert.pem"
+export RAUC_PKCS11_MODULE
+# RAUC signs with a token through OpenSSL's pkcs11 engine (libp11), which it
+# must find in the native sysroot: native libcrypto's built-in engine path
+# is another recipe's sysroot.
+python () {
+    if (d.getVar('RAUC_KEY_FILE') or '').startswith('pkcs11:'):
+        d.appendVar('DEPENDS', ' libp11-native')
+        d.setVar('OPENSSL_ENGINES', d.expand('${STAGING_LIBDIR_NATIVE}/engines-3'))
+        d.setVarFlag('OPENSSL_ENGINES', 'export', '1')
+}
 # Their contents, not just their paths, belong in the signature: a renewed
 # signing certificate at the same path must produce a newly signed bundle.
-do_bundle[file-checksums] += "${RAUC_KEY_FILE}:True ${RAUC_CERT_FILE}:True ${RAUC_KEYRING_FILE}:True"
+# A key on a token is not a file: its URI is in the signature as text.
+# An unset key adds nothing here: boat_check_bundle_keys says what is missing.
+do_bundle[file-checksums] += "${@'' if (d.getVar('RAUC_KEY_FILE') or 'pkcs11:').startswith('pkcs11:') else d.getVar('RAUC_KEY_FILE') + ':True'} ${RAUC_CERT_FILE}:True ${RAUC_KEYRING_FILE}:True"
 
 DEPENDS += "e2fsprogs-native"
 
@@ -53,6 +72,12 @@ python boat_check_bundle_keys() {
     import os
     for var in ('RAUC_KEY_FILE', 'RAUC_CERT_FILE', 'RAUC_KEYRING_FILE'):
         f = d.getVar(var)
+        if var == 'RAUC_KEY_FILE' and f and f.startswith('pkcs11:'):
+            if not d.getVar('RAUC_PKCS11_MODULE'):
+                bb.fatal("RAUC_KEY_FILE is a PKCS#11 URI, but RAUC_PKCS11_MODULE (the token's "
+                         "PKCS#11 module, e.g. /usr/lib/x86_64-linux-gnu/pkcs11/opensc-pkcs11.so) "
+                         "is not set")
+            continue
         if not f or not os.path.isfile(f):
             bb.fatal("%s needs the update signing keys: %s (%r) does not exist. Run "
                      "scripts/gen-update-keys.sh once (--bench for the bench keys), keep the "
@@ -63,8 +88,9 @@ python boat_check_bundle_keys() {
 # Read what the bundle says about itself from the image it carries, so it
 # cannot disagree with it: the release in /etc/boat-release must be this
 # bundle's version, the L4T release comes from /etc/nv_tegra_release, the
-# Docker version from the image manifest - and the kernel and initrd GRUB
-# boots must be in /boot.
+# Docker version from the image manifest, the device tree it was built
+# against from /usr/lib/boat-ab/firmware.id (boat-image.bb) - and the kernel
+# and initrd GRUB boots must be in /boot.
 python boat_bundle_meta() {
     import os
     import re
@@ -102,6 +128,12 @@ python boat_bundle_meta() {
     if not m:
         bb.fatal("cannot read the L4T release from %s:/etc/nv_tegra_release" % image)
     d.setVarFlag('RAUC_META_boat', 'l4t', '%s.%s.%s' % m.groups())
+
+    rc, fw, err = debugfs_run("cat /usr/lib/boat-ab/firmware.id")
+    fw = fw.strip()
+    if not re.fullmatch(r'[0-9a-f]{64}', fw):
+        bb.fatal("%s has no /usr/lib/boat-ab/firmware.id - is it an A/B image (AB_LAYOUT=1)?" % image)
+    d.setVarFlag('RAUC_META_boat', 'firmware', fw)
 
     docker = ''
     manifest = d.expand("${DEPLOY_DIR_IMAGE}/${BOAT_BUNDLE_IMAGE}-${MACHINE}.manifest")

@@ -188,6 +188,11 @@ export function verify(
 
 export interface ListenerOptions {
   key: string | Buffer;
+  /**
+   * Default 9099 - the port boat-sleep-listener owns on the boat itself.
+   * There, listen() fails with EADDRINUSE: use another port, and never take
+   * the boat's sleep requests away from boat-sleep (see the README).
+   */
   port?: number;
   /** Bind address. Default 0.0.0.0; use 127.0.0.1 in tests. */
   address?: string;
@@ -302,7 +307,13 @@ export function listen(options: ListenerOptions): Promise<Listener> {
       }));
 
   return new Promise((resolveBind, rejectBind) => {
-    const socket: UdpSocket = createSocket({ type: 'udp4', reuseAddr: true });
+    // No reuseAddr: a port another socket holds must be refused, not shared.
+    // On the boat, boat-sleep-listener.socket holds 9099 with SO_REUSEADDR
+    // (systemd sets it); a second SO_REUSEADDR socket would bind beside it
+    // and, being the newer IPv4 one, receive every sleep request from then
+    // on - boat-sleep, with its refusals during a trial or an install, would
+    // never see one. EADDRINUSE is the honest answer.
+    const socket: UdpSocket = createSocket({ type: 'udp4' });
 
     socket.once('error', rejectBind);
 

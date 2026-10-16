@@ -13,6 +13,8 @@
 # Extra flags after the mode are passed through to the underlying script, e.g.
 #   scripts/05-flash-nvme.sh --skip-bootloader     # skip the slow QSPI firmware step
 set -euo pipefail
+# Whether AB_LAYOUT was given here, before env.sh defaults it to 0.
+AB_LAYOUT_GIVEN="${AB_LAYOUT-}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${HERE}/lib.sh"
@@ -29,13 +31,26 @@ source "${HERE}/env.sh"
 # ties it to the current build: an older single-slot unpack, flashed after
 # switching AB_LAYOUT on, erases the SSD - /data included - and writes the
 # old image back. The A/B layout is the one with a second rootfs slot.
+# What the build directory is configured for decides, not this shell: the
+# flash is often a new terminal, where the AB_LAYOUT exported for the build
+# is gone. AB_LAYOUT decides only without a configured build directory (an
+# unpack brought from elsewhere).
+expected_ab="${AB_LAYOUT}"
+expected_from="AB_LAYOUT=${AB_LAYOUT}"
+if [[ -f "${BUILD_DIR}/conf/local.conf" ]]; then
+  if grep -q '^BOAT_AB_LAYOUT = "1"' "${BUILD_DIR}/conf/local.conf"; then expected_ab=1; else expected_ab=0; fi
+  expected_from="${BUILD_DIR}/conf/local.conf"
+  if [[ -n "${AB_LAYOUT_GIVEN}" && "${AB_LAYOUT_GIVEN}" != "${expected_ab}" ]]; then
+    die "AB_LAYOUT=${AB_LAYOUT_GIVEN} here, but ${BUILD_DIR} is configured for $([[ ${expected_ab} == 1 ]] && echo "A/B" || echo "a single slot") - flash what was built, or configure and build what you mean (02, 03, 04)"
+  fi
+fi
 if [[ -e "${FLASH_DIR}/external-flash.xml.in" ]]; then
   if grep -q 'name="APP_b"' "${FLASH_DIR}/external-flash.xml.in"; then unpacked_ab=1; else unpacked_ab=0; fi
-  if [[ "${unpacked_ab}" != "${AB_LAYOUT}" ]]; then
-    if [[ "${AB_LAYOUT}" == 1 ]]; then
-      die "AB_LAYOUT=1, but ${FLASH_DIR} holds a single-slot image - unpack the A/B one: scripts/04-unpack-tegraflash.sh boat-image"
+  if [[ "${unpacked_ab}" != "${expected_ab}" ]]; then
+    if [[ "${expected_ab}" == 1 ]]; then
+      die "the build is A/B (${expected_from}), but ${FLASH_DIR} holds a single-slot image - unpack the A/B one: scripts/04-unpack-tegraflash.sh boat-image"
     fi
-    die "${FLASH_DIR} holds an A/B image, but AB_LAYOUT is not 1 - export AB_LAYOUT=1 to flash it, or unpack the image you meant"
+    die "${FLASH_DIR} holds an A/B image, but the build is single-slot (${expected_from}) - unpack the image you built, or configure for A/B (AB_LAYOUT=1, scripts/02-configure-build.sh)"
   fi
 fi
 cd "${FLASH_DIR}"

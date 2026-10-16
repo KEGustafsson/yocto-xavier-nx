@@ -1,5 +1,8 @@
-# Tier 0 CI: fast repository checks. No Yocto layers are fetched and bitbake
-# is never run, so this finishes in well under a minute.
+# Tier 0 CI: repository checks. No Yocto layers are fetched and bitbake is
+# never run, so this takes several minutes, not hours. The time goes on the
+# harnesses that run the shipped scripts (scripts/test-*.py); boat-update's,
+# against a local HTTPS channel, alone takes about 30 s on each of the two
+# Pythons it runs under.
 #
 # SCOPE, deliberately: this cannot catch recipe parse errors, unresolvable
 # RDEPENDS, or packaging QA failures (e.g. "An allarch packagegroup shouldn't
@@ -32,10 +35,10 @@ jobs:
   tier0:
     name: Shell, YAML, docs and recipe references
     runs-on: ubuntu-latest
-    # The whole job is seconds of work; anything past this is a hung apt
-    # mirror or a runner problem, and a 6-hour default timeout just holds a
-    # slot while saying nothing.
-    timeout-minutes: 10
+    # The whole job is several minutes of work; anything far past that is a
+    # hung apt mirror, a hung harness or a runner problem, and a 6-hour
+    # default timeout just holds a slot while saying nothing.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 

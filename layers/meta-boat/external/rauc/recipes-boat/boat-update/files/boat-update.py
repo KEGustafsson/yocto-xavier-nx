@@ -75,6 +75,8 @@ PATHS = {
     "grubenv": "/boot/efi/EFI/BOOT/grubenv",
     "release": "/etc/boat-release",
     "nv_release": "/etc/nv_tegra_release",
+    # The kernel device tree this slot was built against (boat-image.bb).
+    "firmware_id": "/usr/lib/boat-ab/firmware.id",
     "system_conf": "/etc/rauc/system.conf",
     "ca": "/etc/rauc/ca.cert.pem",
     "conf_image": "/etc/boat-update/channel.conf",
@@ -86,8 +88,11 @@ PATHS = {
     # handler: "VERSION PID" while this boat-update runs.
     "expect": "/run/boat-update/expect",
     "clock_retry": "/run/boat-update/clock-retry",
+    # The install unit's exit status, one file per install wrapper.
+    "install_result": "/run/boat-update/install-result",
     "net_tcp": "/proc/net/tcp",
     "proc": "/proc",
+    "sys_net": "/sys/class/net",
 }
 
 DEFAULTS = {
@@ -115,6 +120,14 @@ LOCK_WAIT = 60                   # seconds an interactive verb waits for the loc
 CLOCK_RETRY = 120                # seconds before a check refused for the clock runs again
 CLOCK_RETRIES = 5                # such retries per boot, each wait twice the last (2 to 32 min)
 VPN_KINDS = ("wireguard", "tun", "vpn", "ip-tunnel")
+# USB modems and phone tethering that the kernel shows as Ethernet. This
+# image's NetworkManager has no ModemManager plugin, so it guesses every
+# one of them unmetered.
+CELLULAR_DRIVERS = ("cdc_ether", "cdc_eem", "cdc_ncm", "huawei_cdc_ncm", "cdc_mbim", "qmi_wwan",
+                    "rndis_host", "ipheth")
+# curl exits that mean the link failed, not the channel: no name, no
+# connection, a timeout, or a connection cut off before any HTTP answer.
+NO_ANSWER_EXITS = (5, 6, 7, 18, 28, 35, 52, 55, 56)
 BUNDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*\.raucb$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -160,6 +173,33 @@ def write_atomic(p, text):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, p)
+
+
+def append_durably(p, text):
+    """Append text to p and fsync it, and its directory when p is new: a
+    line that must outlive a power cut (a failed version) has to be on disk
+    before state.json, fsynced right after, stops pointing at it."""
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    new = not os.path.exists(p)
+    with open(p, "a") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    if new:
+        d = os.open(os.path.dirname(p), os.O_RDONLY)
+        try:
+            os.fsync(d)
+        finally:
+            os.close(d)
+
+
+def file_size(p):
+    """p's size, or 0 if it is not there - also when a download renames or
+    deletes it in between."""
+    try:
+        return os.path.getsize(p)
+    except OSError:
+        return 0
 
 
 def run(cmd, **kw):
@@ -312,6 +352,12 @@ def running_l4t():
     return "%s.%s.%s" % m.groups() if m else None
 
 
+def running_firmware():
+    """This slot's firmware.id, or None: a slot built before it was
+    recorded (or a single-slot image) has none."""
+    return read(path("firmware_id")).strip() or None
+
+
 def system_compatible():
     cp = configparser.ConfigParser(interpolation=None, strict=False)
     try:
@@ -346,30 +392,31 @@ def slot_record(slot, slots):
     return (status.get("bundle") or {}).get("version"), status.get("status")
 
 
-def slot_version(slot, slots, may_mount=False):
+def slot_version(slot, slots, may_read=False):
     """The release a slot holds: RAUC's record of the bundle installed
     there, or - for a slot that was flashed, not installed - the
-    /etc/boat-release inside it, read through a read-only mount. Only a
-    caller holding the update lock may mount (may_mount): RAUC may be
-    writing that slot otherwise, and a mount there would fail its install."""
+    /etc/boat-release inside it, read with debugfs. Not through a mount: a
+    stop, a closed terminal or a busy mount point could leave the slot
+    mounted, and RAUC refuses to install into a mounted slot. Only a caller
+    holding the update lock may read it (may_read): RAUC may be writing that
+    slot otherwise."""
     if slots is None:
         return None
     v, _ = slot_record(slot, slots)
     if v:
         return v
-    if not may_mount or gpt_name(PART[slot]) != PART_NAME[slot]:
+    if not may_read or gpt_name(PART[slot]) != PART_NAME[slot]:
         return None
-    with tempfile.TemporaryDirectory(prefix="boat-update-") as mnt:
-        r = run(["mount", "-o", "ro,noload", "-t", "ext4", part_dev(PART[slot]), mnt])
-        if r.returncode != 0:
-            return None
-        try:
-            return read(os.path.join(mnt, "etc/boat-release")).strip() or None
-        finally:
-            run(["umount", mnt])
+    try:
+        r = run(["debugfs", "-R", "cat /etc/boat-release", part_dev(PART[slot])])
+    except FileNotFoundError:
+        return None
+    if r.returncode != 0:
+        return None
+    return printable(r.stdout).strip() or None
 
 
-def usable_version(slot, env, slots, may_mount=False):
+def usable_version(slot, env, slots, may_read=False):
     """The release in a slot a rollback would boot - GRUB has it usable,
     and RAUC's last write there did not fail - else None. A release that
     is only half written there, or in a slot GRUB gave up on (a reflash
@@ -380,7 +427,7 @@ def usable_version(slot, env, slots, may_mount=False):
     _, status = slot_record(slot, slots)
     if status not in (None, "", "ok"):
         return None
-    return slot_version(slot, slots, may_mount)
+    return slot_version(slot, slots, may_read)
 
 
 def failed_versions():
@@ -388,9 +435,7 @@ def failed_versions():
 
 
 def mark_failed(version):
-    os.makedirs(PATHS["state"], exist_ok=True)
-    with open(path("state", "failed-versions"), "a") as f:
-        f.write(version + "\n")
+    append_durably(path("state", "failed-versions"), version + "\n")
 
 
 def record_result(text):
@@ -399,8 +444,7 @@ def record_result(text):
     line = "%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), text)
     try:
         write_atomic(path("state", "last-result"), line)
-        with open(path("state", "history"), "a") as f:
-            f.write(line)
+        append_durably(path("state", "history"), line)
     except OSError as e:
         warn("could not record it in %s: %s" % (PATHS["state"], e.strerror))
 
@@ -422,20 +466,32 @@ def expecting(version):
 
 
 def rauc_handler_messages(since):
-    """What RAUC's install handlers said since `since` (a time): RAUC keeps
-    their output in its own journal and reports only an exit code."""
+    """What RAUC's install handlers and the bundle's slot hook said since
+    `since` (a time): RAUC keeps their output in its own journal and
+    reports only an exit code. RAUC prefixes a system handler's lines with
+    '# '; the slot hook's reach the journal as they are."""
     try:
         r = run(["journalctl", "-u", "rauc", "--since", "@%d" % since, "-o", "cat", "--no-pager"])
     except FileNotFoundError:
         return []
     if r.returncode != 0:
         return []
-    return [m.group(1) for m in (re.match(r"^# (boat-rauc-[a-z-]+: .*)$", l) for l in r.stdout.splitlines()) if m]
+    return [m.group(1) for m in (re.match(r"^(?:# )?((?:boat-rauc-[a-z-]+|boat-bundle-hook): .*)$", l)
+                                 for l in r.stdout.splitlines()) if m]
 
 
 def explain_rauc_failure(since):
     for line in rauc_handler_messages(since):
         warn("RAUC's install handler: %s" % line)
+
+
+def install_warnings(since):
+    """The slot hook's warnings from an install that worked - a setting it
+    could not carry into the new slot - shown now and kept for status."""
+    found = [printable(l) for l in rauc_handler_messages(since) if ": WARNING: " in l]
+    for line in found:
+        warn("RAUC's install handler: %s" % line)
+    return found
 
 
 def load_state():
@@ -475,21 +531,51 @@ def load_conf():
             default = path("state", name)
             if os.path.exists(default):
                 conf[key] = default
+    try:
+        u = urllib.parse.urlsplit(conf["BOAT_UPDATE_URL"])
+        userinfo = u.username is not None or u.password is not None
+    except ValueError:
+        raise UpdateError("BOAT_UPDATE_URL is not a URL (channel.conf)")
+    if userinfo:
+        # curl would send it as Basic auth, and it would show in ps,
+        # state.json and status. Not repeated here, for the same reason.
+        raise UpdateError("BOAT_UPDATE_URL carries a user name or password (channel.conf) - not supported: "
+                          "it would be readable by every local user; use a client certificate (client.crt, "
+                          "client.key) to restrict the channel")
     return conf
+
+
+def install_conf(rest):
+    """channel.conf for an install. Only a streamed one talks to the
+    channel: an install from a file (push-update.sh's, offline, or the
+    downloaded bundle) goes on with the defaults when channel.conf has a
+    typo or a URL it refuses."""
+    try:
+        return load_conf()
+    except UpdateError as e:
+        if "--stream" in rest:
+            raise
+        warn("%s - ignored: an install from a file does not use the channel" % e)
+        return dict(DEFAULTS)
 
 
 def client_key_problem(conf):
     """What is wrong with the channel's client key, or None. It is the
-    boat's credential for the channel: root's, and readable by root only."""
+    boat's credential for the channel: root's, and readable by root only.
+    With no key file of its own, curl and the relay take the key from the
+    certificate file, which then must be root's alone just the same."""
     key = conf["BOAT_UPDATE_CLIENT_KEY"]
     if not key:
-        return None
+        cert = conf["BOAT_UPDATE_CLIENT_CERT"]
+        if not cert or "PRIVATE KEY-----" not in read(cert):
+            return None
+        key = cert
     try:
         st = os.stat(key)
     except OSError as e:
         return "cannot read the client key %s: %s" % (key, e.strerror)
     if st.st_uid not in (0, os.geteuid()) or st.st_mode & 0o077:
-        return ("the client key %s can be read by others (mode %o) - 'chown root:root %s && chmod 600 %s'"
+        return ("the client key in %s can be read by others (mode %o) - 'chown root:root %s && chmod 600 %s'"
                 % (key, st.st_mode & 0o777, key, key))
     return None
 
@@ -502,10 +588,24 @@ def check_client_key(conf):
 
 # --- the link: which device, and is it metered ------------------------------
 
-def default_device():
-    r = run(["ip", "route", "show", "default"])
-    m = re.search(r"\bdev (\S+)", r.stdout)
-    return m.group(1) if m else None
+def route_device(conf):
+    """(device, why): the device the kernel routes the channel's host
+    through - a split-tunnel route, a policy-routed (WireGuard) default,
+    IPv6 - not just the main table's IPv4 default. Transfers are bound to
+    it, so it must be the one that reaches the channel."""
+    host = urllib.parse.urlsplit(conf["BOAT_UPDATE_URL"]).hostname
+    if not host:
+        return None, "no channel host"
+    try:
+        addrs = socket.getaddrinfo(host, 443, 0, socket.SOCK_STREAM)
+    except (OSError, UnicodeError) as e:
+        return None, "cannot resolve %s: %s" % (host, getattr(e, "strerror", None) or e)
+    for addr in dict.fromkeys(a[4][0] for a in addrs):
+        r = run(["ip", "route", "get", addr])
+        m = re.search(r"\bdev (\S+)", r.stdout)
+        if r.returncode == 0 and m:
+            return m.group(1), None
+    return None, "no route to %s" % host
 
 
 def nm_metered(dev):
@@ -524,21 +624,42 @@ def is_metered_value(v):
     return not v.startswith("no")
 
 
-def link():
-    """(device, metered, why). A VPN default route hides the link under it,
-    so then any metered active device makes the answer metered."""
-    dev = default_device()
-    if not dev:
-        return None, True, "no default route"
+def cellular_driver(dev):
+    """The USB modem or tethering driver behind dev, or None."""
+    try:
+        driver = os.path.basename(os.readlink(os.path.join(PATHS["sys_net"], dev, "device", "driver")))
+    except OSError:
+        return None
+    return driver if driver in CELLULAR_DRIVERS else None
+
+
+def device_metered(dev):
+    """(metered, NetworkManager's value, kind). NetworkManager guesses a USB
+    modem or a tethered phone unmetered - it looks like Ethernet - so only a
+    connection marked 'metered no' makes one of those unmetered."""
     value, kind = nm_metered(dev)
+    metered = is_metered_value(value)
+    if not metered and value != "no" and cellular_driver(dev):
+        metered, value = True, "%s, but a USB modem or phone (%s)" % (value, cellular_driver(dev))
+    return metered, value, kind
+
+
+def link(conf):
+    """(device, metered, why) for the route to the channel. A VPN hides the
+    link under it, so then any metered active device makes the answer
+    metered."""
+    dev, why = route_device(conf)
+    if not dev:
+        return None, True, why
+    metered, value, kind = device_metered(dev)
     if kind in VPN_KINDS:
         r = run(["nmcli", "-t", "-f", "DEVICE,STATE", "device"])
         for line in r.stdout.splitlines():
             d, _, st = line.rpartition(":")
-            if st == "connected" and d != dev and is_metered_value(nm_metered(d)[0]):
+            if st == "connected" and d != dev and device_metered(d)[0]:
                 return dev, True, "%s is metered (behind the VPN on %s)" % (d, dev)
         return dev, False, "VPN on %s, no metered link under it" % dev
-    return dev, is_metered_value(value), "%s: Metered=%s" % (dev, value or "unknown")
+    return dev, metered, "%s: Metered=%s" % (dev, value or "unknown")
 
 
 # --- the channel ------------------------------------------------------------
@@ -586,6 +707,19 @@ def curl_capped(cmd, out, limit, append=False):
     return rc, m.group(1) if m else "", re.sub(r"\s*HTTP_STATUS=\d*\s*", " ", text).strip(), over
 
 
+def transient_http(code):
+    """An HTTP status a busy server or proxy answers now and then: a window
+    that gets one is a stall, retried at the next window or run."""
+    return code in ("408", "429") or code.startswith("5")
+
+
+def no_answer(rc, code, err):
+    """curl got no answer from the channel: the link failed, not the
+    channel. A TLS alert is the server's answer (a client certificate it
+    wants, say), so it is not counted as none."""
+    return rc in NO_ANSWER_EXITS and code in ("", "000") and "alert" not in err.lower()
+
+
 def channel_url(conf, name):
     base = conf["BOAT_UPDATE_URL"].rstrip("/")
     if not base.startswith("https://"):
@@ -603,12 +737,22 @@ def fetch_index(conf, dev):
                                     channel_url(conf, "index.p7")], p7, INDEX_MAX)
         if over:
             raise UpdateError("the index is larger than %d bytes - refusing it" % INDEX_MAX)
-        if rc in (5, 6, 7, 28) and code in ("", "000"):
+        if no_answer(rc, code, err):
             # No answer at all - a name that does not resolve, nothing
-            # listening, a timeout: on a boat, usually just no internet.
+            # listening, a timeout, a link that drops mid-transfer: on a
+            # boat, usually just no internet, or a poor one.
             raise NotNow("cannot reach the channel (curl exit %d): %s" % (rc, err))
+        if rc in (51, 60):
+            raise UpdateError("cannot fetch the index: curl exit %d: %s - the channel's certificate is not "
+                              "trusted (server-ca.pem?), or a captive portal (a marina's Wi-Fi login page) "
+                              "answered in its place" % (rc, err))
         if rc != 0:
             raise UpdateError("cannot fetch the index: curl exit %d (HTTP %s): %s" % (rc, code or "-", err))
+        if code.startswith("3"):
+            raise UpdateError("the channel redirects the index (HTTP %s) - redirects are never followed: "
+                              "BOAT_UPDATE_URL must name the final location" % code)
+        if code != "200":
+            raise UpdateError("the channel answered HTTP %s for the index" % (code or "-"))
         # Every flag is load-bearing (plan 5.10): only our CA, never the
         # system store; the binary content as signed; the emailProtection
         # signer; no time check on a board without an RTC.
@@ -656,8 +800,10 @@ def validate_index(idx):
     if not isinstance(notes, str):
         raise UpdateError("index field 'notes' is not a string")
     idx["notes"] = printable(notes, keep_newlines=True)[:NOTES_MAX]
-    for key in ("published", "l4t", "compatible", "version", "channel"):
-        if printable(idx[key]) != idx[key]:
+    if not isinstance(idx.get("firmware", ""), str):
+        raise UpdateError("index field 'firmware' is not a string")
+    for key in ("published", "l4t", "compatible", "version", "channel", "firmware"):
+        if key in idx and printable(idx[key]) != idx[key]:
             raise UpdateError("index field %r holds control characters" % key)
 
 
@@ -672,10 +818,11 @@ def index_hash(idx):
     return hashlib.sha256(json.dumps(idx, sort_keys=True).encode()).hexdigest()
 
 
-def decide(idx, conf, state, booted_version, other_version, compatible, l4t, failed):
+def decide(idx, conf, state, booted_version, other_version, compatible, l4t, failed, firmware=None):
     """What to do about a verified, well-formed index: returns
     (offer, message). offer is the index when its bundle should be fetched,
-    else None. Pure, so it can be tested on its own."""
+    else None. firmware: this slot's firmware.id (None: not recorded).
+    Pure, so it can be tested on its own."""
     if idx["channel"] != conf["BOAT_UPDATE_CHANNEL"]:
         raise UpdateError("the index is for channel %r, this board follows %r - refusing it"
                           % (idx["channel"], conf["BOAT_UPDATE_CHANNEL"]))
@@ -687,7 +834,8 @@ def decide(idx, conf, state, booted_version, other_version, compatible, l4t, fai
     same = idx["serial"] == seen and index_hash(idx) == (state.get("index_hashes") or {}).get(idx["channel"])
     if idx["serial"] <= seen and not same:
         raise UpdateError("the index's serial %d is not above %d, the highest accepted - "
-                          "a replayed or rolled-back index" % (idx["serial"], seen))
+                          "a replayed or rolled-back index (or a CDN or proxy still serving an older "
+                          "index.p7)" % (idx["serial"], seen))
     if idx["compatible"] != compatible:
         raise UpdateError("the index is for %r, this board is %r" % (idx["compatible"], compatible))
     v = idx["version"]
@@ -709,9 +857,22 @@ def decide(idx, conf, state, booted_version, other_version, compatible, l4t, fai
         return None, ("%s was given up: %s - it is fetched again when the channel publishes "
                       "a new index" % (v, given_up))
     if idx["l4t"] != l4t:
-        if idx.get("requires_reflash"):
-            return None, "%s is a BSP bump (L4T %s): reflash at the dock (scripts/05-flash-nvme.sh)" % (v, idx["l4t"])
-        raise UpdateError("the index offers %s for L4T %s, this board runs %s" % (v, idx["l4t"], l4t))
+        # A newer release on another L4T is a BSP bump for this board, with
+        # requires_reflash or without: during a fleet's move to a new L4T,
+        # boards not yet reflashed see every later release this way. It
+        # needs a person at the dock, not an alert. (requires_reflash means
+        # nothing to a board already on that L4T: it takes it over the air.)
+        return None, ("%s is a BSP bump for this board (built on L4T %s, this board runs %s): reflash at "
+                      "the dock (scripts/05-flash-nvme.sh)" % (v, idx["l4t"], l4t))
+    if firmware and idx.get("firmware") and idx["firmware"] != firmware:
+        # The same L4T, but another kernel device tree (a meta-tegra or
+        # kernel change): the kernel runs on the DTB written at flash, and
+        # RAUC's pre-install handler refuses the bundle - after the board
+        # has downloaded it. Like a BSP bump, a person at the dock. A side
+        # that has no firmware.id cannot tell: the handler only warns then.
+        return None, ("%s was built against another kernel device tree than this board was flashed with "
+                      "(firmware.id %s, this board's %s): reflash at the dock (scripts/05-flash-nvme.sh)"
+                      % (v, idx["firmware"][:12], firmware[:12]))
     return idx, "%s is available (this slot runs %s)" % (v, booted_version)
 
 
@@ -801,26 +962,32 @@ def do_check(conf, state, quiet=False, stamp=False):
 
 
 def check_channel(conf, state, quiet, stamp):
-    """stamp: record the attempt for auto's rate limit, once the gates
-    have passed - a check the gates refused did nothing."""
+    """stamp: record the attempt for auto's rate limit, once the channel
+    has answered - a check the gates refused, or one that got no answer at
+    all, did nothing, and the next trigger (the link coming up properly)
+    tries again. A channel that answers badly is not asked on every one."""
     if not conf["BOAT_UPDATE_URL"]:
         raise NotNow("no update channel configured (BOAT_UPDATE_URL in channel.conf)")
     slot, env = gates()
     with contextlib.suppress(FileNotFoundError):
         os.unlink(path("clock_retry"))          # the clock is set: retries start over
     check_client_key(conf)
-    dev, metered, why = link()
+    dev, metered, why = link(conf)
     if not dev:
-        raise NotNow("no network (no default route) - nothing to check")
-    if stamp:
-        state["last_auto"] = int(time.time())
-        save_state(state)
-    idx = fetch_index(conf, dev)
+        raise NotNow("no network (%s) - nothing to check" % why)
+    try:
+        idx = fetch_index(conf, dev)
+    except NotNow:
+        raise
+    except UpdateError:
+        stamp_auto(state, stamp)
+        raise
+    stamp_auto(state, stamp)
     validate_index(idx)
     slots = rauc_slots()
     offer, message = decide(idx, conf, state, running_release(),
-                            usable_version(other(slot), env, slots, may_mount=True), system_compatible(),
-                            running_l4t(), failed_versions())
+                            usable_version(other(slot), env, slots, may_read=True), system_compatible(),
+                            running_l4t(), failed_versions(), running_firmware())
     # Like the serial, the index last accepted is kept per channel: coming
     # back to a channel whose index has not changed is the same index.
     h = index_hash(idx)
@@ -840,9 +1007,16 @@ def check_channel(conf, state, quiet, stamp):
     state["notes"] = idx["notes"]
     if offer:
         prev = state.get("offer") or {}
-        if prev.get("bundle") != offer["bundle"]:
+        if (prev.get("bundle"), prev.get("sha256")) != (offer["bundle"], offer["sha256"]):
             # Content-addressed names: a different name is a different file.
+            # So is the same name with another SHA-256 (a channel not
+            # published with publish-update.sh): its old bytes are no part
+            # of the new file.
             discard_downloads(keep=None)
+        if (state.get("ready") or {}).get("sha256") != offer["sha256"]:
+            # Downloaded for an earlier offer: not the file this one names.
+            # Kept, it would read as ready and stop the new download.
+            state.pop("ready", None)
         state["offer"] = {k: offer[k] for k in ("version", "bundle", "size", "sha256", "l4t", "channel")}
     else:
         # Nothing to fetch: a bundle downloaded, or half downloaded, for an
@@ -854,6 +1028,12 @@ def check_channel(conf, state, quiet, stamp):
     if not quiet:
         say(message)
     return offer
+
+
+def stamp_auto(state, stamp):
+    if stamp:
+        state["last_auto"] = int(time.time())
+        save_state(state)
 
 
 def downloads_dir():
@@ -897,17 +1077,37 @@ def refetch(state, offer, why):
     save_state(state)
 
 
-def do_download(conf, state, allow_metered=False, windows=None):
+def do_download(conf, state, allow_metered=False, windows=None, background=False):
     with noted("download", state):
-        ready_now = download_offer(conf, state, allow_metered, windows)
+        ready_now = download_offer(conf, state, allow_metered, windows, background)
     if ready_now:
         forget_failure(state, "download")
     return ready_now
 
 
-def download_offer(conf, state, allow_metered, windows):
+def still_allowed(conf, offer):
+    """For a background download, between windows: the configuration as it
+    is now (an operator may have edited it during an hours-long download),
+    or None when it no longer allows this download."""
+    try:
+        now = load_conf()
+    except UpdateError as e:
+        say("channel.conf has changed and cannot be read (%s) - stopping the background download" % e)
+        return None
+    if now["BOAT_UPDATE_AUTO"] != "download":
+        say("BOAT_UPDATE_AUTO is now %r - stopping the background download" % now["BOAT_UPDATE_AUTO"])
+        return None
+    if (now["BOAT_UPDATE_URL"], now["BOAT_UPDATE_CHANNEL"]) != (conf["BOAT_UPDATE_URL"], offer.get("channel")):
+        say("the channel has changed - stopping the background download until the next check")
+        return None
+    return now
+
+
+def download_offer(conf, state, allow_metered, windows, background=False):
     """Run download windows until the offered bundle is ready, the link may
-    not be used, or a window makes no progress. Returns True when ready."""
+    not be used, or a window makes no progress. Returns True when ready.
+    background: the timer's run, which follows channel.conf's policy as it
+    is at each window."""
     offer = state.get("offer")
     if not offer:
         say("nothing to download - %s" % state.get("message", "run 'boat-update check'"))
@@ -931,15 +1131,23 @@ def download_offer(conf, state, allow_metered, windows):
     n = 0
     while windows is None or n < windows:
         n += 1
+        if background and n > 1:
+            conf = still_allowed(conf, offer)
+            if conf is None:
+                return False
         gates()
-        dev, metered, why = link()
+        dev, metered, why = link(conf)
+        if not dev:
+            say("%s available, no network (%s) - the download resumes at the next run" % (offer["version"], why))
+            return False
         if metered and conf["BOAT_UPDATE_METERED"] != "yes" and not allow_metered:
             state["waiting"] = "metered link (%s)" % why
             save_state(state)
             say("%s available, waiting for an unmetered link (%s)" % (offer["version"], why))
             return False
-        state.pop("waiting", None)
-        have = os.path.getsize(part) if os.path.exists(part) else 0
+        if state.pop("waiting", None) is not None:
+            save_state(state)
+        have = file_size(part)
         if have > offer["size"]:
             os.unlink(part)
             refetch(state, offer, "the partial download is larger than the bundle")
@@ -959,7 +1167,20 @@ def download_offer(conf, state, allow_metered, windows):
                 cmd += ["--limit-rate", conf["BOAT_UPDATE_RATE_LIMIT"]]
             rc, code, err, over = curl_capped(cmd + [channel_url(conf, offer["bundle"])],
                                               part, offer["size"] - have, append=True)
-            now = os.path.getsize(part) if os.path.exists(part) else 0
+            if code != "416" and (code.startswith("3") or (rc == 22 and not transient_http(code))
+                                  or (rc == 0 and code not in ("200", "206"))):
+                # Not the bundle: a redirect (curl does not follow it, and
+                # wrote its body), a missing file, a refusal. Its bytes are
+                # no part of the bundle; the status is an alert, not a
+                # stall that repeats unseen for ever.
+                with contextlib.suppress(FileNotFoundError):
+                    os.truncate(part, have)
+                if code.startswith("3"):
+                    raise UpdateError("the channel redirects %s (HTTP %s) - redirects are never followed: "
+                                      "BOAT_UPDATE_URL must name the final location" % (offer["bundle"], code))
+                raise UpdateError("the channel answered HTTP %s for %s%s"
+                                  % (code or "-", offer["bundle"], " (no such file)" if code == "404" else ""))
+            now = file_size(part)
             if over:
                 # More than the index's size: never keep, never resume it.
                 os.unlink(part)
@@ -972,12 +1193,13 @@ def download_offer(conf, state, allow_metered, windows):
                     os.unlink(part)
                 refetch(state, offer, "the server refused to resume (HTTP 416)")
                 continue
-            if rc == 33:
+            if rc == 33 or (rc == 0 and code == "200" and have):
                 # The server answered the Range request with the whole file:
                 # it cannot resume, so a window that ends half way is wasted.
                 # Start again with one window for the whole file - and count
                 # it, so a server that keeps doing this gives the bundle up
-                # instead of downloading it over and over.
+                # instead of downloading it over and over. (A whole file no
+                # longer than what is here already: curl exits 0, unwritten.)
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(part)
                 refetch(state, offer, "the server does not resume downloads (it ignored the Range request)")
@@ -1103,6 +1325,10 @@ def housekeeping(state):
             state.pop("ready", None)
             changed = True
     if state.get("offer") and no_longer_wanted(state["offer"]["version"]):
+        # Its partial download goes with it: nothing else would delete it
+        # before the next check that reaches the channel.
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(os.path.join(downloads_dir(), state["offer"]["bundle"] + ".part"))
         state.pop("offer", None)
         changed = True
     if changed:
@@ -1155,6 +1381,14 @@ def resolve_bundle(state, bundle):
         bundle = ready_to_install(state)
         if not bundle:
             raise UpdateError("no bundle is ready - 'boat-update check' and 'download' first, or name one")
+        failed = state.get("last_error") or {}
+        if failed.get("stage") == "check":
+            # Only a signed index can withdraw an offer: a missing index
+            # (404) or a stale one leaves the download in place. Whoever
+            # installs it is told the channel's word on it is not current.
+            warn("the last check failed (%s) - the channel may have withdrawn %s since it was "
+                 "downloaded; 'boat-update check' first if in doubt"
+                 % (failed.get("message", "?"), state["ready"]["version"]))
     bundle = os.path.abspath(bundle)
     if not os.path.isfile(bundle):
         raise UpdateError("%s does not exist" % bundle)
@@ -1167,7 +1401,9 @@ def do_install(conf, state, bundle=None, reboot=False, stream=False, allow_meter
         if bundle is not None:
             raise UpdateError("--stream installs what the channel offers; it does not take a file")
         check_client_key(conf)
-        dev, metered, why = link()
+        dev, metered, why = link(conf)
+        if not dev:
+            raise UpdateError("no network (%s) - nothing to stream from" % why)
         if conf["BOAT_UPDATE_METERED"] != "yes" and not allow_metered:
             if metered:
                 raise UpdateError("the link is metered (%s) - --allow-metered to stream over it anyway" % why)
@@ -1197,31 +1433,45 @@ def do_install(conf, state, bundle=None, reboot=False, stream=False, allow_meter
         if stream:
             inner = ["systemd-inhibit", "--what=sleep:shutdown", "--who=boat-update",
                      "--why=streaming into the other A/B slot", "--mode=block"] + inner
+        # The unit's name is shared by every install, and another install's
+        # reset-failed can clear its Result: the inner run reports its exit
+        # status to a file only this wrapper knows.
+        result = "%s-%s" % (PATHS["install_result"], secrets.token_hex(8))
+        os.makedirs(os.path.dirname(result), mode=0o700, exist_ok=True)
         args = ["systemd-run", "--unit=" + unit, "--setenv=BOAT_UPDATE_INNER=1",
-                "--description=boat-update install"] + inner
+                "--setenv=BOAT_UPDATE_RESULT=" + result, "--description=boat-update install"] + inner
+        started = int(time.time())
         r = run(args)
         if r.returncode != 0:
             raise UpdateError("could not start the install unit: %s" % r.stderr.strip())
         say("installing in the background (unit %s); following its log - "
             "losing this session does not stop it" % unit)
-        follow = subprocess.Popen(["journalctl", "-f", "-o", "cat", "-u", unit])
+        # --since: the unit's journal also holds every earlier install's
+        # lines, and -f would start with the last of them.
+        follow = subprocess.Popen(["journalctl", "-f", "-o", "cat", "--since", "@%d" % started, "-u", unit])
         try:
-            while run(["systemctl", "is-active", "--quiet", unit]).returncode == 0:
+            while not os.path.exists(result) \
+                    and run(["systemctl", "is-active", "--quiet", unit]).returncode == 0:
                 time.sleep(2)
         finally:
             time.sleep(1)
             follow.terminate()
-        # A unit that failed stays loaded with its result (no --collect); one
-        # that succeeded is gone, and reads as Result=success.
-        result = run(["systemctl", "show", "-p", "Result", "--value", unit]).stdout.strip()
-        if result not in ("", "success"):
+        status = read(result).strip()
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(result)
+        if status != "0":
+            why = ("exit status %s" % status if status else
+                   "it ended without an exit status: %s" % (
+                       run(["systemctl", "show", "-p", "Result", "--value", unit]).stdout.strip() or "stopped"))
             run(["systemctl", "reset-failed", unit])
-            raise UpdateError("the install failed (%s) - see above; the board stays on this slot" % result)
+            raise UpdateError("the install failed (%s) - see above; the board stays on this slot" % why)
         return
     if stream:
+        started = time.time()
         version = stream_install(conf, state, slot, dev)
         # Remembered so a trial that never reaches boat-commit is still recorded.
         state["installed"] = {"version": version, "slot": other(slot)}
+        remember_warnings(state, started)
         save_state(state)
         if reboot:
             say("rebooting now")
@@ -1244,11 +1494,20 @@ def do_install(conf, state, bundle=None, reboot=False, stream=False, allow_meter
         raise UpdateError("RAUC did not install %s (exit %d) - the board stays on this slot" % (bundle, r.returncode))
     # Remembered so a trial that never reaches boat-commit is still recorded.
     state["installed"] = {"version": info.get("version", "?"), "slot": other(slot)}
+    remember_warnings(state, started)
     save_state(state)
     say("installed: the other slot boots as a trial on the next reboot, and falls back if it fails")
     if reboot:
         say("rebooting now")
         run(["systemctl", "reboot"])
+
+
+def remember_warnings(state, started):
+    """Keep the slot hook's warnings with the install, so status shows them
+    until its trial is decided."""
+    found = install_warnings(started)
+    if found:
+        state["installed"]["warnings"] = found
 
 
 class BoundHTTPS(http.client.HTTPSConnection):
@@ -1281,6 +1540,9 @@ RANGE_RE = re.compile(r"bytes=(\d+)-(\d+)$")
 CONTENT_RANGE_RE = re.compile(r"bytes\s+(\d+)-(\d+)/(?:\d+|\*)", re.IGNORECASE)
 RELAY_MAX = 64 << 20      # far above any one request RAUC's streaming client makes
 RELAY_CONCURRENT = 8      # requests in flight at once (RAUC's client uses curl multi)
+RELAY_CONNECTIONS = 32    # RAUC's connections held open at once
+RELAY_IDLE = 60           # seconds a connection may sit idle (curl reconnects)
+RELAY_WARNINGS = 5        # refusals logged per stream; a flood is not
 
 
 def relay_uids():
@@ -1356,20 +1618,73 @@ def start_relay(conf, url, dev):
     container can run as root - so the socket must also belong to a process
     in rauc.service's own cgroup (where RAUC runs its streaming client),
     which no container's process is, whatever namespaces it shares with the
-    host. And the URL carries a token made for this stream. A request that
-    fails any of these gets nothing, not even a relay slot. Returns
-    (server, the URL to hand RAUC)."""
+    host. And the URL carries a token made for this stream. A connection
+    from anyone else is closed as it is accepted, before it has a thread;
+    a request that fails a check closes its connection, and an idle one is
+    closed after RELAY_IDLE - so no local process can tie up the relay's
+    threads or file descriptors and starve RAUC. Returns (server, the URL
+    to hand RAUC)."""
     u = urllib.parse.urlsplit(url)
     expected = ("/%s%s" % (secrets.token_urlsafe(18), u.path)).encode()
     rauc = []                   # rauc.service's cgroup, read at the first request: RAUC runs by then
     ctx = ssl.create_default_context(cafile=conf["BOAT_UPDATE_SERVER_CA"] or None)
+    if conf["BOAT_UPDATE_SERVER_CA"]:
+        # Trust what curl --cacert trusts (curl sets this by default): a
+        # server-ca.pem holding an intermediate CA, as Caddy's is.
+        ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
     if conf["BOAT_UPDATE_CLIENT_CERT"]:
         ctx.load_cert_chain(conf["BOAT_UPDATE_CLIENT_CERT"], conf["BOAT_UPDATE_CLIENT_KEY"] or None)
     local = threading.local()
     in_flight = threading.BoundedSemaphore(RELAY_CONCURRENT)
+    lock = threading.Lock()
+    held = set()                # the connections that passed the check
+    refused = [0]
+
+    def note_refusal(why):
+        with lock:
+            refused[0] += 1
+            n = refused[0]
+        if n <= RELAY_WARNINGS:
+            warn("stream relay: %s" % why)
+        elif n == RELAY_WARNINGS + 1:
+            warn("stream relay: more refusals - not logged")
+
+    def from_rauc(client_address, server_address):
+        """(whether this connection's socket is held by a process of
+        rauc.service, its uid)."""
+        uid, inode = tcp_peer(client_address, server_address)
+        if uid not in relay_uids():
+            return False, uid
+        if not rauc:
+            rauc.append(rauc_cgroup())
+        return bool(rauc[0]) and rauc[0] in socket_cgroups(inode), uid
+
+    class Server(http.server.ThreadingHTTPServer):
+        daemon_threads = True
+
+        def verify_request(self, request, client_address):
+            with lock:
+                full = len(held) >= RELAY_CONNECTIONS
+            if full:
+                note_refusal("%d connections open already - one more refused" % RELAY_CONNECTIONS)
+                return False
+            ok, uid = from_rauc(client_address, self.server_address)
+            if not ok:
+                note_refusal("a connection from uid %s that is not RAUC's streaming client "
+                             "(rauc.service) - closed" % uid)
+                return False
+            with lock:
+                held.add(request)
+            return True
+
+        def shutdown_request(self, request):
+            with lock:
+                held.discard(request)
+            super().shutdown_request(request)
 
     class Relay(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        timeout = RELAY_IDLE
 
         def log_message(self, *args):
             pass
@@ -1377,27 +1692,17 @@ def start_relay(conf, url, dev):
         def refuse(self, code, why):
             self.send_response_only(code)
             self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
             self.end_headers()
-            warn("stream relay: %s" % why)
-
-        def from_rauc(self):
-            """Whether this connection's socket is held by a process of
-            rauc.service - found once per connection."""
-            if getattr(self, "rauc_peer", None) is None:
-                uid, inode = tcp_peer(self.client_address, self.server.server_address)
-                if not rauc:
-                    rauc.append(rauc_cgroup())
-                self.rauc_peer = (uid in relay_uids() and bool(rauc[0])
-                                  and rauc[0] in socket_cgroups(inode), uid)
-            return self.rauc_peer
+            self.close_connection = True
+            if code < 500:
+                note_refusal(why)
+            else:
+                warn("stream relay: %s" % why)       # RAUC's own request, failing: always said
 
         def do_GET(self):
-            ok, uid = self.from_rauc()
-            if not ok:
-                return self.refuse(403, "a request from uid %s that is not RAUC's streaming client "
-                                        "(rauc.service) - refused" % uid)
             if not hmac.compare_digest(self.path.encode("latin-1", "replace"), expected):
-                return self.refuse(403, "a request without this stream's token (uid %s) - refused" % uid)
+                return self.refuse(403, "a request without this stream's token - refused")
             m = RANGE_RE.match(self.headers.get("Range", ""))
             if not m or not 0 <= int(m.group(2)) - int(m.group(1)) < RELAY_MAX:
                 return self.refuse(400, "unexpected range %r" % self.headers.get("Range"))
@@ -1441,8 +1746,7 @@ def start_relay(conf, url, dev):
             self.end_headers()
             self.wfile.write(body)
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Relay)
-    server.daemon_threads = True
+    server = Server(("127.0.0.1", 0), Relay)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, "http://127.0.0.1:%d%s" % (server.server_address[1], expected.decode())
 
@@ -1597,14 +1901,22 @@ def noted(stage, state):
         yield
     except NotNow:
         raise
-    except UpdateError as e:
+    except (UpdateError, OSError) as e:
+        if isinstance(e, OSError):
+            # A full or read-only /data, a file gone mid-run: a failure
+            # like any other, not a traceback.
+            e = UpdateError(os_error(e))
         with contextlib.suppress(OSError):
             if data_mounted():
                 failed = load_state()
                 failed["last_error"] = {"stage": stage, "time": int(time.time()),
                                         "message": printable(str(e))}
                 save_state(failed)
-        raise
+        raise e
+
+
+def os_error(e):
+    return "%s%s" % ("%s: " % e.filename if getattr(e, "filename", None) else "", e.strerror or e)
 
 
 def forget_failure(state, stage):
@@ -1650,7 +1962,11 @@ def do_auto(conf, state):
         return
     # A stamp from the future (a clock that was ahead) does not count.
     since = time.time() - state.get("last_auto", 0)
-    if 0 <= since < AUTO_MIN_INTERVAL and not state.get("offer"):
+    if 0 <= since < AUTO_MIN_INTERVAL:
+        # Within the rate limit nothing asks the channel again; only a
+        # download that is not finished goes on (a link that came back).
+        if policy == "download" and state.get("offer") and not ready(state):
+            do_download(conf, state, background=True)
         return
     try:
         offer = do_check(conf, state, stamp=True)
@@ -1658,7 +1974,7 @@ def do_auto(conf, state):
         retry_after_clock_sync()
         raise
     if offer and policy == "download":
-        do_download(conf, state)
+        do_download(conf, state, background=True)
 
 
 def age(ts):
@@ -1671,7 +1987,7 @@ def age(ts):
     return "%d s ago" % s
 
 
-def do_status(conf, state):
+def do_status(conf, state, conf_problem=None):
     slot = booted_slot()
     env = grubenv()
     slots = rauc_slots()
@@ -1700,12 +2016,24 @@ def do_status(conf, state):
         print("  ALERT     GRUB found no usable slot: this is its last resort boot")
     if not data_mounted():
         print("  ALERT     /data is not mounted from DATA: no updates, and no Docker, until it is")
+    else:
+        # A full /data stops every check and download before either can
+        # record why, so it is looked at here, as it is now.
+        with contextlib.suppress(OSError):
+            free = shutil.disk_usage(PATHS["data"]).free
+            if free < FREE_FLOOR:
+                print("  ALERT     /data has only %d MiB free: no download fits (it needs its size plus "
+                      "2 GiB), and a full /data stops checks too" % (free >> 20))
     last = read(path("state", "last-result")).strip()
     if last:
         print("  last      %s" % last)
     if (env or {}).get("BOAT_STAY") == "1":
         print("  debug-hold is ON: failures stop for inspection instead of resetting")
+    for line in (state.get("installed") or {}).get("warnings", []):
+        print("  ALERT     the install of %s: %s" % (state["installed"].get("version", "?"), line))
     print("OTA")
+    if conf_problem:
+        print("  ALERT     %s - OTA is off until it is fixed" % conf_problem)
     if not conf["BOAT_UPDATE_URL"]:
         print("  no channel configured (BOAT_UPDATE_URL)")
         return
@@ -1726,8 +2054,7 @@ def do_status(conf, state):
         if r:
             print("  READY     %s - 'boat-update install --reboot' installs it" % offer["version"])
         else:
-            part = os.path.join(downloads_dir(), offer["bundle"] + ".part")
-            have = os.path.getsize(part) if os.path.exists(part) else 0
+            have = file_size(os.path.join(downloads_dir(), offer["bundle"] + ".part"))
             print("  download  %s: %d of %d MiB%s" % (offer["version"], have >> 20, offer["size"] >> 20,
                                                       ", waiting: " + state["waiting"] if state.get("waiting") else ""))
             print("  transfer  download-then-install: %d MiB more; 'install --stream': only the blocks"
@@ -1738,26 +2065,51 @@ def do_status(conf, state):
 
 
 def terminated(signum, frame):
-    """systemctl stop sends SIGTERM, which by default ends Python without
-    running a single finally: the other slot left mounted, which RAUC then
-    refuses to install into. Unwind instead."""
+    """systemctl stop sends SIGTERM, and closing the terminal SIGHUP, which
+    by default end Python without running a single finally: RAUC's expected
+    release left behind in /run, the install wrapper never told how the
+    install ended. Unwind instead."""
     raise SystemExit(128 + signum)
 
 
 def main(argv):
+    rc = 1
+    try:
+        rc = run_verb(argv)
+        return rc
+    finally:
+        tell_wrapper(rc)
+
+
+def tell_wrapper(rc):
+    """The install unit's run: leave its exit status where the wrapper that
+    started it looks (BOAT_UPDATE_RESULT) - also when it was stopped."""
+    report = os.environ.get("BOAT_UPDATE_RESULT")
+    if report and os.environ.get("BOAT_UPDATE_INNER") == "1":
+        with contextlib.suppress(OSError):
+            write_atomic(report, "%d\n" % rc)
+
+
+def run_verb(argv):
     args = argv[1:] or ["status"]
     verb, rest = args[0], args[1:]
     signal.signal(signal.SIGTERM, terminated)
+    signal.signal(signal.SIGHUP, terminated)
     if verb in ("-h", "--help", "help"):
         print(__doc__.split("\n\n")[0].split("\n", 1)[1])
         return 0
     try:
-        conf = load_conf()
-        state = load_state() if os.path.isdir(PATHS["state"]) else {}
+        # channel.conf is read only by the verbs that use it: a typo in it
+        # must not stop rollback, history, debug-hold or an install from a
+        # file - nor status, which shows it as an alert instead.
         if verb == "status":
             note_trial_outcome()
             state = load_state() if os.path.isdir(PATHS["state"]) else {}
-            do_status(conf, state)
+            try:
+                conf, problem = load_conf(), None
+            except UpdateError as e:
+                conf, problem = dict(DEFAULTS), str(e)
+            do_status(conf, state, problem)
         elif verb == "history":
             do_history()
         elif verb == "install" and os.environ.get("BOAT_UPDATE_INNER") != "1":
@@ -1768,13 +2120,14 @@ def main(argv):
             files = [a for a in rest if not a.startswith("--")]
             if len(files) > 1:
                 raise UpdateError("install takes at most one bundle")
-            do_install(conf, state, files[0] if files else None, reboot="--reboot" in rest,
+            do_install(install_conf(rest), {}, files[0] if files else None, reboot="--reboot" in rest,
                        stream="--stream" in rest, allow_metered="--allow-metered" in rest)
         elif verb in ("check", "download", "auto", "install"):
             if os.geteuid() != 0:
                 raise UpdateError("run as root")
             # The timer's run gives way; a person's command does not.
             with locked(interactive=verb != "auto"):
+                conf = install_conf(rest) if verb == "install" else load_conf()
                 state = load_state()
                 if verb == "check":
                     do_check(conf, state)
@@ -1804,6 +2157,9 @@ def main(argv):
         return 0 if verb == "auto" else 1
     except UpdateError as e:
         print("boat-update: %s" % e, file=sys.stderr)
+        return 1
+    except OSError as e:
+        print("boat-update: %s" % os_error(e), file=sys.stderr)
         return 1
     return 0
 

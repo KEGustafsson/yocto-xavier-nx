@@ -650,7 +650,7 @@ The order matches RAUC 1.13's `install.c`:
 | step | who | if power is lost here |
 |---|---|---|
 | 1. verify signature and verity format | RAUC | nothing changed |
-| 2. system `pre-install` handler: BSP/L4T and Docker-version checks from the bundle's `[meta.boat]` manifest section; step 3's checks done first (`compatible` against `system.conf`, `min-bundle-version` by RAUC's own version rules), so a bundle RAUC will refuse is refused here before anything changes; then set target `COMMITTED=0` (and nothing else: the target must stay a usable fallback if anything still fails) | ours | target merely marked not-committed |
+| 2. system `pre-install` handler: BSP/L4T, device-tree (`firmware=`) and Docker-version checks from the bundle's `[meta.boat]` manifest section; room on `/data` for RAUC's status file (RAUC marks the target `OK=0` before its first save there); step 3's checks done first (`compatible` against `system.conf`, `min-bundle-version` by RAUC's own version rules), so a bundle RAUC will refuse is refused here before anything changes; board settings the target holds and this slot does not are kept on `/data` (5.8); then set target `COMMITTED=0` (and nothing else: the target must stay a usable fallback if anything still fails) | ours | target merely marked not-committed |
 | 3. check `compatible` and `min-bundle-version` (5.7) | RAUC | as step 2: a bundle that fails here never got past step 2 |
 | 4. set target `OK=0` (through boat's `grub-editenv`: a locked copy and rename, 5.3) | RAUC grub backend | target unbootable; stay on current |
 | 5. write image into the target slot, `resize=true` | RAUC (`type=ext4`) | target half-written, `OK=0` |
@@ -720,12 +720,18 @@ The order matches RAUC 1.13's `install.c`:
   CA**, trusted only by images built with `BOAT_BENCH=1`. A boat image
   never trusts it.
 - **Production:** the CA private key stays offline, and the signing key can
-  live on a PKCS#11 token.
+  live on a PKCS#11 token (`RAUC_KEY_FILE` as a `pkcs11:` URI and
+  `RAUC_PKCS11_MODULE` in `local.conf`; `boat-bundle` then builds
+  `libp11-native`). A token that needs a PIN to sign is not supported:
+  bitbake would record it in its signature files.
 - **Compatibility and downgrade:** `compatible=boat-xavier-nx` rejects
   bundles for other boards. RAUC's `min-bundle-version` (D6) covers
   downgrades on every install path: `BOAT_MIN_BUNDLE_VERSION` in
   `scripts/env.sh` (or the kas environment), raised in the release after a
-  security fix; the build refuses a floor above its own `BOAT_RELEASE`. Falling back after a failed update is a slot switch, not an
+  security fix; it reaches the build through `02-configure-build.sh`
+  (`local.conf`), and `03-build.sh` refuses a floor or release there, or a
+  key directory exported in its shell, that `local.conf` does not have. The build refuses a
+  floor above its own `BOAT_RELEASE`. Falling back after a failed update is a slot switch, not an
   install, so the version policy never blocks a failover.
 - **Attack surface:** no new listening port. OTA is **pull-only**: the
   board makes outbound HTTPS requests to the channel and nothing connects
@@ -796,7 +802,15 @@ The order matches RAUC 1.13's `install.c`:
     matches is left as the new image has it, so a release can change its
     defaults (a renamed unit in the health gate's list, a `daemon.json` a
     new Docker needs). A file shipped in the image and later deleted
-    stays deleted. An image from before the record carries them all;
+    stays deleted. An edited file is carried as it is, never merged; the
+    new release's own version goes beside it as `<file>.boat-default`. The
+    one exception is `health.conf`'s unit list: when a carried list names a
+    unit the new slot does not have, the hook appends a merged list (the
+    board's units the new slot has, then the release's), or every trial
+    would fail on it. An image from before the record carries them all,
+    and the carried files then look edited at every later update too,
+    until someone takes the `.boat-default` or reflashes. `daemon.json` is
+    not checked: an edited one a new Docker rejects fails the trial;
   - the password hash fields of `root` and `boat`, merged (**D5**);
   - `/etc/nv_boot_control.conf`.
   - Not on this list: the OTA channel configuration. Its defaults ship in
@@ -829,9 +843,30 @@ The order matches RAUC 1.13's `install.c`:
     start an older Firefox on a profile a newer one wrote.
 - Documented consequence: local edits to any other `/etc` file do not
   survive an update. Put them in `meta-boat` or on `/data`.
+- The carry-over runs at an install, from the running slot. After a
+  rollback or a fallback, the slot that runs lacks what was changed in the
+  other one since its install (a Wi-Fi network, a pairing, a key). The
+  next install would overwrite those: the `pre-install` handler first
+  mounts the target read-only (`noload,nosuid,nodev,noexec`) and keeps
+  every connection, pairing and `authorized_keys` that differs from the
+  running slot's, and changed after the later of the two slots' installs,
+  in `/data/boat-update/displaced/slot-<X>-<time>/`, with an alert. The
+  install times are RAUC's `installed.timestamp` in its central status
+  file (`rauc status` cannot be asked during the install; a marker written
+  by the bundle hook would be missing from slots older bundles installed).
+  On a forward update the target is the older slot, whose files predate
+  this slot's install: stale copies, not kept. With neither slot recorded
+  (a reflash empties `/data` and does not write `APP_b`) nothing is kept.
+  Limit: the comparison trusts the clock at the install and at the change.
+  Copying them back is left to the operator; nothing merges them on its own.
 - `/data` is shared, so a newer Docker could migrate `/data/docker` in a way
   an older slot can't read. The `pre-install` handler warns when the Docker
-  major version differs.
+  major version differs: an alert in `status` until the reboot, and in the
+  install's line in `boat-update history` (RAUC shows a handler's output to
+  nobody on a successful install). It does not refuse, and `rollback`
+  does not check it. The same holds for other formats on `/data` a newer
+  slot may write: a systemd from 252 on writes compact journal files that
+  v250's `journalctl` cannot read.
 
 ### 5.9 What stays outside A/B, deliberately
 
@@ -845,6 +880,24 @@ The order matches RAUC 1.13's `install.c`:
 A BSP bump (new L4T) is therefore always a **full USB reflash**. The
 `pre-install` handler rejects a bundle whose `[meta.boat] l4t=` differs from
 the running `/etc/nv_tegra_release`.
+
+The same L4T release can still bring another kernel DTB: a meta-tegra or
+kernel change, or a device-tree overlay added in meta-boat. So each A/B
+image records the DTB and plugin-manager overlays it was built against -
+the deployed files the flash writes - as one SHA-256
+(`/usr/lib/boat-ab/firmware.id`), the bundle carries it as `[meta.boat]
+firmware=`, and the `pre-install` handler refuses a bundle whose value is
+not the running slot's (which was flashed with it, or checked the same
+way). `publish-update.sh` refuses a bundle whose value is not the channel's
+current release's unless it is published with `--reflash`. The index
+carries the value (`firmware`), and `boat-update` does not offer a release
+whose value is not the board's own: it says "reflash at the dock", as for a
+BSP bump and not as an alert (5.10), so no board downloads a bundle its
+handler would refuse. Limits: a board flashed before the record cannot
+check (a warning, and the release is offered); UEFI and the rest of
+QSPI are not in it, since nothing shows their builds are reproducible; and
+a product build should pin meta-tegra to a commit, as `01-fetch-layers.sh`
+says.
 
 **Every USB flash also rewrites `DATA`.** The flash writes the empty
 `boat-data` seed into it (5.2), so `/data` - Docker, the homes kept there,
@@ -885,11 +938,11 @@ expose a new index next to an old signature. Fields:
 |---|---|
 | `channel` | must equal the channel the board follows, so a `testing` index served at the `stable` URL is rejected |
 | `serial` | increases with every publish (at least the time in seconds, below 2^32). The board stores the highest serial it has accepted on each channel (on `/data`) and rejects lower ones, which stops a replayed or pulled old index. |
-| `compatible`, `version`, `l4t` | checked before any download (below) |
+| `compatible`, `version`, `l4t`, `firmware` | checked before any download (below); `firmware` (the bundle's device-tree record, 5.9) only when the index and the board both have one |
 | `bundle` | a bare file name: no `/`, no `..`, no scheme |
 | `size`, `sha256` | transport integrity of the download |
 | `published` | UTC. Shown in `status`, so a frozen channel is visible. |
-| `requires_reflash` | this release is a BSP bump, which cannot ship as a bundle (5.9). Only evaluated for a *newer* version. |
+| `requires_reflash` | this release is a BSP bump, which cannot ship as a bundle (5.9). Informational: a board on another L4T is told to reflash for any *newer* release on another L4T, flagged or not; a board already on the bundle's L4T takes it over the air. |
 | `notes` | display only. Size-capped, control characters stripped. |
 
 **Signing uses its own key** (review M1 on v3). An *index-signing* leaf
@@ -909,10 +962,14 @@ certificate sits under the same CA as the bundle signer:
   ```
 
   It uploads the **bundle first and `index.p7` last**, so the index never
-  points at a file that isn't there yet. `serial` is the larger of a
-  counter kept next to the keys (plus one) and the time in seconds, and is
-  recorded before anything is uploaded; an unreadable counter stops the
-  publish.
+  points at a file that isn't there yet. `serial` is the largest of a
+  counter kept next to the keys (plus one), the channel's current index's
+  serial (plus one; read back from the destination, best effort) and the
+  time in seconds, under a lock next to the counter, and is recorded
+  before anything is uploaded; an unreadable counter stops the publish.
+  The published files are 0644 and directories 0755 whatever the
+  publisher's umask. Publishing needs OpenSSL 3 (`-no-CAstore`); rsync
+  needs no particular version on either end (no `--mkpath`).
 - **Verify on the board.** Every flag below is load-bearing:
 
   ```text
@@ -985,13 +1042,20 @@ headers (review M3).
        slot's `slot_status.bundle.version`; plain `--output-format=json`
        leaves `slot_status` out. A slot that was flashed rather than
        installed has no bundle version, so for slot A as flashed the check
-       reads the `/etc/boat-release` inside it (mounted read-only) - the
-       same `BOAT_RELEASE` string a bundle carries;
+       reads the `/etc/boat-release` inside it with `debugfs`, not through
+       a mount (a mount left behind by a stop or a busy mount point would
+       make RAUC refuse that slot) - the same `BOAT_RELEASE` string a
+       bundle carries;
      - `version` is not on the board's list of versions that **failed a
        trial here**.
   5. **Then the L4T check.** `l4t` must match the running
-     `/etc/nv_tegra_release`. If it doesn't and `requires_reflash` is set,
-     report "BSP bump: reflash at the dock".
+     `/etc/nv_tegra_release`. If it doesn't, report "BSP bump: reflash at
+     the dock" - with `requires_reflash` or without, and not as an alert:
+     while a fleet is reflashed boat by boat, every later release on the
+     new L4T reaches the boats not yet reflashed this way. The same for a
+     `firmware` that is not the board's `/usr/lib/boat-ab/firmware.id`
+     (another kernel device tree on the same L4T, 5.9) - when both have
+     one: a board without the record is offered the release.
   6. **Record** the accepted `serial`, plus the result and the channel's
      `published` date, for `status`.
 - **`download`** writes to
@@ -1018,14 +1082,22 @@ headers (review M3).
     - A complete download is recorded `ready` after RAUC has checked it; one
       completed but never recorded (a power cut in between) is picked up
       next time, not fetched again. An offer the channel withdraws takes
-      its download, or partial download, with it.
+      its download, or partial download, with it; so does a new offer of
+      another file (another name, or the same name with another SHA-256).
+      Only a signed index withdraws: an index that is gone (404) or stale
+      leaves a ready download in place, as an alert, and `install` warns
+      that the channel may have withdrawn it. A board that never reaches
+      the channel again installs what it has.
     - It keeps a `/data` free-space floor (bundle size + 2 GiB, because
       Docker shares `/data`) and re-checks it every window.
     - A bundle is **re-fetched from scratch at most 3 times**, then
       **given up** (by its SHA-256) until the channel publishes a new
       index. A transfer fault is never recorded as a failed trial.
   - **Redirects:** none (`--max-redirs 0`). If the host redirects, the URL
-    in `channel.conf` must name the final location.
+    in `channel.conf` must name the final location. A redirect, or any
+    answer but the bundle (a 404, a 403), is an alert, and nothing of it
+    is kept in the `.part`; a 5xx, 408 or 429 counts as a window without
+    progress.
   - **Finish:**
     - At `size` it verifies `sha256`, renames the file, and runs `rauc info`
       on it (a local signature check), plus the `compatible` comparison,
@@ -1051,8 +1123,11 @@ headers (review M3).
 - Also triggered from the system-sleep `post` hook and from a
   NetworkManager dispatcher script on `up`/`connectivity-change`.
 - The service rate-limits itself with a stamp file on `/data`, so the extra
-  triggers cost nothing. Only a check that got past the gates stamps it,
-  and a stamp from the future does not count; a check the clock gate
+  triggers cost nothing. Only a check the channel answered stamps it (one
+  the gates refused, or that got no answer at all, did nothing), and a
+  stamp from the future does not count. Within the window an unfinished
+  download (policy `download`) resumes without a check; nothing else
+  runs. A check the clock gate
   refused runs again two minutes later (a transient timer), by when chrony
   has normally set the clock.
 - A command a person types does not give up on the timer's run, which can
@@ -1070,8 +1145,8 @@ headers (review M3).
 
 | knob | default | meaning |
 |---|---|---|
-| `BOAT_UPDATE_URL` | image default | channel base URL (final location; no redirects) |
-| `BOAT_UPDATE_CHANNEL` | `stable` | which channel to follow |
+| `BOAT_UPDATE_URL` | empty, or the build's `BOAT_UPDATE_URL` | channel base URL (final location; no redirects; no user name or password) |
+| `BOAT_UPDATE_CHANNEL` | `stable` (`bench` in a `BOAT_BENCH` image), or the build's `BOAT_UPDATE_CHANNEL` | which channel to follow |
 | `BOAT_UPDATE_AUTO` | `download` | `off` / `check` (notify only) / `download` (also fetch in background). **Never installs or reboots** (D12). |
 | `BOAT_UPDATE_METERED` | `no` | download over a metered link? (D14) |
 | `BOAT_UPDATE_RATE_LIMIT` | empty | curl `--limit-rate`; the stall threshold (`--speed-limit`) is kept below it |
@@ -1086,18 +1161,25 @@ until the bundle is ready or the offer goes away (tests 34, 38).
 
 **Metered detection** (review m1):
 
-- The board takes the default-route device's own NetworkManager `Metered`
-  property and binds curl to that device (`--interface`), so the bytes go
+- The board takes the device the kernel routes the channel's address
+  through (`ip route get`, so a VPN's split-tunnel route, a policy-routed
+  WireGuard default and IPv6 count - not only the main table's default),
+  uses that device's own NetworkManager `Metered` property, and binds curl
+  and the relay to it (`--interface`, `SO_BINDTODEVICE`), so the bytes go
   where the decision was made.
 - `yes`, `guess-yes` and `unknown` count as metered. `guess-no` counts as
   unmetered.
-- NetworkManager guesses `yes` for ModemManager (cellular) links. **A 4G
-  router reached over Ethernet or Wi-Fi reads `guess-no`**, so docs/07
-  tells you to mark that connection with
-  `nmcli connection modify <c> connection.metered yes`.
-- A VPN (WireGuard) default route hides the underlying link. With one
-  active, the board takes the conservative answer: metered if **any**
-  active device is metered.
+- NetworkManager guesses `yes` only for its own GSM/CDMA connections, and
+  this image's NetworkManager is built without the ModemManager plugin, so
+  it has none: a USB modem or a phone tethered over USB is Ethernet to it,
+  `guess-no`. The board counts a device on a USB modem or tethering driver
+  (`cdc_ether`, `cdc_ncm`, `qmi_wwan`, `rndis_host`, `ipheth`, ...) as
+  metered unless its connection says `metered no`. **A 4G router reached
+  over Ethernet or Wi-Fi reads `guess-no`**, so docs/07 tells you to mark
+  that connection with `nmcli connection modify <c> connection.metered yes`.
+- A VPN hides the underlying link. When the channel's route is a VPN, the
+  board takes the conservative answer: metered if **any** active device is
+  metered.
 - While metered and not allowed, `check` still runs (it is tiny), and
   `status` says "update X available, waiting for an unmetered link".
 
@@ -1130,9 +1212,14 @@ until the bundle is ready or the offer goes away (tests 34, 38).
     a host-networked container can run as root, and no container's process
     is in that cgroup, whatever namespaces it shares with the host. The URL
     also carries a token made for this stream. It serves only ranges up to
-    64 MiB that end after they start, a few at a time; a request that fails
-    any check gets no relay slot. A VPN default route is refused without
-    `--allow-metered`: the tunnel follows whatever link carries it.
+    64 MiB that end after they start, a few at a time. A connection from
+    anyone else is closed as it is accepted, before it gets a thread; a
+    refused request closes its connection, an idle one is closed after a
+    minute, and only so many are held open - so no local process can starve
+    RAUC of the relay. A VPN route to the channel is refused without
+    `--allow-metered`: the tunnel follows whatever link carries it. With
+    `server-ca.pem`, the relay trusts what curl trusts: an intermediate CA
+    in it is a trust anchor.
   - The bundle URL is the one from the verified index, on the channel the
     offer was checked on. A preflight request for the first byte refuses a
     redirecting or Range-less channel before RAUC marks the slot
@@ -1403,8 +1490,10 @@ exit criteria wait for the bench board.*
     bundle name; write `index.json`; sign it into one attached `index.p7`;
     upload the bundle first and the index last (5.10).
   - **`scripts/push-update.sh <bundle.raucb> [user@host]`**, the no-internet fallback:
-    copy to `/data`, install, reboot, then *wait and report which slot came
-    back*, in the style of `wol/boat-wake.sh`.
+    copy to `/data` (over ssh, so `BOAT_SSH_OPTS` stays ssh's), install,
+    reboot, then *wait for a new boot ID over SSH and report which slot
+    came back*; the copy is removed whatever happens. As root, or as
+    `boat` through its passwordless sudo.
 - **A bench update channel:** any local HTTPS server with Range support
   (e.g. Caddy) serving `bench` to the bench board (a `BOAT_BENCH` image),
   or `testing` to a board running a boat image. A LAN server's own TLS CA
@@ -1512,7 +1601,9 @@ pieces also run off-target:
   The OTA `check`/`download` logic also runs against a local Range-capable
   HTTP server, with cut-offs injected mid-transfer and a tampered index.
   `scripts/test-boat-storage.py` runs `boat-storage` against a fake board
-  and checks every command it would run on SWAP and DATA.
+  and checks every command it would run on SWAP and DATA, and the start
+  order of the storage units (and RAUC's drop-in) as the recipe installs
+  them.
   `scripts/test-ab-initramfs.py` runs the initramfs's root selection, and
   `scripts/test-ab-layout.py` the layout generator on a template in
   NVIDIA's shape (read back through meta-tegra's `nvflashxmlparse` when
@@ -1550,16 +1641,16 @@ All of them run from `lint.sh`, so they cover every PR.
 | 26 | `boat-update rollback` after commit | other slot boots and commits |
 | 27 | `boat-sleep` (and the UDP sleep listener), and root's own `systemctl suspend`, during install and during a trial | refused (`boat-sleep --status` says why) |
 | 28 | both slots broken | A, A, B, then UEFI stop (sticky recovery) is the documented end state; the USB reflash recovers it, and so does the UEFI-menu path once Phase 0 has found it and docs/06 describes it (open until then) |
-| 29 | carry-over | SSH host key, `/root/.ssh`, `/home`, Wi-Fi, BT pairing, hostname, `boat-sleep.key`, passwords (D5) are unchanged after update and after rollback |
+| 29 | carry-over | SSH host key, `/root/.ssh`, `/home`, Wi-Fi, BT pairing, hostname, `boat-sleep.key`, passwords (D5) are unchanged after update and after rollback. A Wi-Fi network added after the update, then a rollback and the next install: the network is missing on the old slot (documented), and the install keeps it in `/data/boat-update/displaced/` with an alert; an ordinary forward update keeps nothing and raises no alert |
 | 30 | SC7 + WoL on both slots | works |
 | 31 | OTA: channel offers a newer bundle, unmetered link | background download; `status` shows "ready"; no install or reboot happens by itself |
 | 32 | OTA: link dropped, SC7 sleep, and reboot, each mid-download | resumes from where it stopped; final SHA-256 matches; never a second full download |
 | 33 | OTA: truncated or corrupted download | SHA-256/`rauc info` mismatch → discarded and re-fetched; never offered for install |
 | 34 | OTA: index with a bad signature, signed by the bench CA on a boat image, or signed by a public CA certificate | ignored before any download; alert in `status` ("the last check failed"), cleared by the next good check |
 | 35 | OTA: index offers an older version, the same version, the version already in the other slot, a version that failed its trial here, another `compatible`, or another L4T | nothing downloaded; the L4T case reports "reflash needed" only for a newer version |
-| 36 | OTA: cellular (metered) link, default policy | check only; download waits for an unmetered link; moving to cellular mid-download pauses at the next window |
+| 36 | OTA: cellular (metered) link - a USB modem, a tethered phone, or a router connection marked metered - default policy | check only; download waits for an unmetered link; moving to cellular mid-download pauses at the next window |
 | 37 | OTA: clock at 1970 before NTP | check deferred, no TLS-error spam; runs after sync |
-| 38 | OTA: `/data` too full, or not mounted | download refused, with the reason as an alert in `status`; rootfs never used |
+| 38 | OTA: `/data` too full, or not mounted | download refused, with the reason as an alert in `status`; rootfs never used. An install by any path (stream, push, USB) with `/data` at 0 bytes or 0 inodes is refused by the `pre-install` handler: the other slot's `grubenv` entries are unchanged |
 | 39 | OTA: client-certificate channel | works for check, download and stream; the certificate is never in the journal or `ps`; still works after an update and after a rollback (it lives on `/data`) |
 | 40 | OTA stream: adaptive install of a one-package change | commits; transferred bytes recorded (Phase 6) |
 | 41 | OTA stream: link drop mid-install | install aborts; current slot unaffected, target `OK=0`; retry succeeds |
@@ -1621,7 +1712,7 @@ safe in-place conversion, and the plan does not attempt one.
 | `nvbootctrl verify` doesn't reset the count when booted from `APP_b` | M / H | Phase 1 exit criterion; if it fails, `boat-commit` resets it another way, or the budget becomes 1+1 |
 | `grubenv` torn on vfat | L / M | guard unit, `.bak`, defaults (5.3) |
 | ESP (vfat) damaged | L / H | rare, tiny writes; `fsck.fat` reported in `status`; recovery = USB reflash |
-| a shared `/data` written by a newer slot breaks an older one | L / M | Docker-version warning; Docker stays on the kirkstone major |
+| a shared `/data` written by a newer slot breaks an older one | L / M | Docker-version warning (an alert, and in the install's history line); Docker stays on the kirkstone major. A systemd from 252 on writes compact journal files v250 cannot read: a release that moves Yocto branch sets `SYSTEMD_JOURNAL_COMPACT=0` until both slots read them |
 | bundle size over cellular (several GB with CUDA) | H / M | metered policy (no background downloads on cellular by default); adaptive streaming (Phase 6); real sizes measured in Phases 3 and 6 |
 | a streamed install fails repeatedly on a weak link | M / L | safe by construction (5.6); `status` steers to download-then-install |
 | update channel down, or frozen by an attacker | L / M | the board simply stays on what it runs; channel age shown in `status` (5.7); SSH/USB fallbacks |

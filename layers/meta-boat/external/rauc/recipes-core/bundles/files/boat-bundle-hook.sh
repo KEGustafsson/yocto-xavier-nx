@@ -61,13 +61,21 @@ copy /var/lib/bluetooth
 copy /etc/hostname
 copy /etc/localtime
 copy /etc/nv_boot_control.conf
+# The sha256 of a file's contents.
+file_sha256() { sha256sum < "$1" | cut -d' ' -f1; }
+
 # copy_edited PATH: carry PATH only if this board's copy is not the one the
 # running slot's image shipped - someone changed it. A file nobody touched
 # is left as the new image has it, so a release can change its defaults (a
 # new health gate unit list, a daemon.json a new Docker needs), the way a
 # package manager treats a conffile. One the image shipped and someone
 # deleted stays deleted. Without the record (an older image), or for a file
-# the image never shipped, it is carried as before.
+# the image never shipped, it is carried as before - and then on every
+# later update too, since it is not the later image's default either.
+#
+# A carried file is never merged with the release's: the new release's own
+# version is kept next to it as PATH.boat-default (like dpkg's .dpkg-dist),
+# to compare with and to take back by copying it over.
 copy_edited() {
     shipped=""
     [ -r "$DEFAULTS" ] && shipped="$(awk -v p="$1" '$2 == p { print $1; exit }' "$DEFAULTS")"
@@ -84,7 +92,71 @@ copy_edited() {
         say "kept the new image's $1 (never changed on this board)"
         return 0
     fi
+    rm -f "$new$1.boat-default"
+    if [ -f "$new$1" ] && [ ! -L "$new$1" ] \
+            && ! { [ -f "$from$1" ] && [ "$(file_sha256 "$from$1")" = "$(file_sha256 "$new$1")" ]; }; then
+        cp -a "$new$1" "$new$1.boat-default" 2>/dev/null || true
+    fi
     copy "$1"
+    # A copy that failed left the release's own file: nothing beside it.
+    if [ -f "$new$1.boat-default" ] && [ "$(file_sha256 "$new$1")" = "$(file_sha256 "$new$1.boat-default")" ]; then
+        rm -f "$new$1.boat-default"
+    elif [ -f "$new$1.boat-default" ]; then
+        say "the new release's own $1 is beside it, as $1.boat-default"
+    fi
+}
+
+# unit_in_new UNIT: the new slot has UNIT (or its template, for an
+# instance; a bare name is a .service, as systemctl takes it).
+unit_in_new() {
+    u="$1"
+    case "$u" in *.*) ;; *) u="$u.service" ;; esac
+    t=""
+    case "$u" in *@?*.*) t="${u%%@*}@.${u##*.}" ;; esac
+    for d in lib/systemd/system usr/lib/systemd/system etc/systemd/system; do
+        for f in "$u" $t; do
+            if [ -e "$new/$d/$f" ] || [ -L "$new/$d/$f" ]; then
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+# health_units FILE: the BOAT_HEALTH_UNITS a health.conf sets ("-" if it
+# sets none) - read the way boat-commit reads it, by sourcing it.
+health_units() {
+    sh -c '. "$1" >/dev/null 2>&1; printf "%s\n" "${BOAT_HEALTH_UNITS--}"' health "$1" 2>/dev/null || echo -
+}
+
+# health.conf's BOAT_HEALTH_UNITS is a whole list, the release's units with
+# the board's own: one carried from this board can name a unit the new
+# release no longer has (renamed, dropped), and every trial would then fail
+# on it - the release marked failed on exactly the boards that extended the
+# gate. Such a list is merged with the new release's: this board's units
+# that the new slot has, then the release's own. It goes at the end of the
+# carried file, where it is what counts; the rest of the file stays as is.
+merge_health_units() {
+    conf="$new/etc/boat-update/health.conf"
+    [ -f "$conf.boat-default" ] || return 0
+    units="$(health_units "$conf")"
+    [ "$units" != - ] || return 0
+    keep="" missing=""
+    for u in $units; do
+        if unit_in_new "$u"; then keep="$keep $u"; else missing="$missing $u"; fi
+    done
+    [ -n "$missing" ] || return 0
+    release="$(health_units "$conf.boat-default")"
+    [ "$release" != - ] || release=""
+    for u in $release; do
+        case " $keep " in *" $u "*) ;; *) keep="$keep $u" ;; esac
+    done
+    if printf '\n# Added by an update: this release has no%s, so the list above is merged\n# with the release'"'"'s own (health.conf.boat-default).\nBOAT_HEALTH_UNITS="%s"\n' \
+            "$missing" "${keep# }" >> "$conf"; then
+        say "WARNING: /etc/boat-update/health.conf names$missing, which this release does not have - merged with its own list: ${keep# }"
+    else
+        say "WARNING: /etc/boat-update/health.conf names$missing, which this release does not have, and could not be fixed - its trial will fail"
+    fi
 }
 
 # Operator-edited configuration (the CONFFILES of the boat recipes).
@@ -95,6 +167,7 @@ copy_edited /etc/bluetooth/main.conf
 copy_edited /etc/default/boat-sleep-listener
 copy_edited /etc/docker/daemon.json
 copy_edited /etc/boat-update/health.conf
+merge_health_units
 # The sleep listener's port, if moved (systemctl edit boat-sleep-listener.socket):
 # only ever made on the board.
 copy /etc/systemd/system/boat-sleep-listener.socket.d

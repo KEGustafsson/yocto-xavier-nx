@@ -61,6 +61,11 @@
 # versions, so a later release must compare higher - e.g. 1.4.0, 2026.10.1.
 # Empty = "0.0.0-dev", fine for bench work but never offered over the air
 # (every dev build has that same version). Set it for anything you ship.
+# This and the two below reach bitbake only through
+# scripts/02-configure-build.sh (it writes them into local.conf): after a
+# change, run 02 again - 03-build.sh stops on a value local.conf lacks
+# (for the keys directory, only on one given in the shell, not the default
+# below).
 : "${BOAT_RELEASE:=}"
 # RAUC's min-bundle-version (plan D6): the oldest release an A/B image will
 # install, on every path - over the air, scripts/push-update.sh, a USB
