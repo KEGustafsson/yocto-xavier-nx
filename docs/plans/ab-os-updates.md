@@ -729,8 +729,8 @@ The order matches RAUC 1.13's `install.c`:
   downgrades on every install path: `BOAT_MIN_BUNDLE_VERSION` in
   `scripts/env.sh` (or the kas environment), raised in the release after a
   security fix; it reaches the build through `02-configure-build.sh`
-  (`local.conf`), and `03-build.sh` refuses a floor, release or key
-  directory there that `local.conf` does not have. The build refuses a
+  (`local.conf`), and `03-build.sh` refuses a floor or release there, or a
+  key directory exported in its shell, that `local.conf` does not have. The build refuses a
   floor above its own `BOAT_RELEASE`. Falling back after a failed update is a slot switch, not an
   install, so the version policy never blocks a failover.
 - **Attack surface:** no new listening port. OTA is **pull-only**: the
@@ -847,10 +847,18 @@ The order matches RAUC 1.13's `install.c`:
   rollback or a fallback, the slot that runs lacks what was changed in the
   other one since its install (a Wi-Fi network, a pairing, a key). The
   next install would overwrite those: the `pre-install` handler first
-  mounts the target read-only and keeps every connection, pairing and
-  `authorized_keys` that differs from the running slot's in
-  `/data/boat-update/displaced/slot-<X>-<time>/`, with an alert. Copying
-  them back is left to the operator; nothing merges them on its own.
+  mounts the target read-only (`noload,nosuid,nodev,noexec`) and keeps
+  every connection, pairing and `authorized_keys` that differs from the
+  running slot's, and changed after the later of the two slots' installs,
+  in `/data/boat-update/displaced/slot-<X>-<time>/`, with an alert. The
+  install times are RAUC's `installed.timestamp` in its central status
+  file (`rauc status` cannot be asked during the install; a marker written
+  by the bundle hook would be missing from slots older bundles installed).
+  On a forward update the target is the older slot, whose files predate
+  this slot's install: stale copies, not kept. With neither slot recorded
+  (a reflash empties `/data` and does not write `APP_b`) nothing is kept.
+  Limit: the comparison trusts the clock at the install and at the change.
+  Copying them back is left to the operator; nothing merges them on its own.
 - `/data` is shared, so a newer Docker could migrate `/data/docker` in a way
   an older slot can't read. The `pre-install` handler warns when the Docker
   major version differs: an alert in `status` until the reboot, and in the
@@ -881,8 +889,12 @@ the deployed files the flash writes - as one SHA-256
 firmware=`, and the `pre-install` handler refuses a bundle whose value is
 not the running slot's (which was flashed with it, or checked the same
 way). `publish-update.sh` refuses a bundle whose value is not the channel's
-current release's unless it is published with `--reflash`. Limits: a board
-flashed before the record cannot check (a warning); UEFI and the rest of
+current release's unless it is published with `--reflash`. The index
+carries the value (`firmware`), and `boat-update` does not offer a release
+whose value is not the board's own: it says "reflash at the dock", as for a
+BSP bump and not as an alert (5.10), so no board downloads a bundle its
+handler would refuse. Limits: a board flashed before the record cannot
+check (a warning, and the release is offered); UEFI and the rest of
 QSPI are not in it, since nothing shows their builds are reproducible; and
 a product build should pin meta-tegra to a commit, as `01-fetch-layers.sh`
 says.
@@ -926,7 +938,7 @@ expose a new index next to an old signature. Fields:
 |---|---|
 | `channel` | must equal the channel the board follows, so a `testing` index served at the `stable` URL is rejected |
 | `serial` | increases with every publish (at least the time in seconds, below 2^32). The board stores the highest serial it has accepted on each channel (on `/data`) and rejects lower ones, which stops a replayed or pulled old index. |
-| `compatible`, `version`, `l4t` | checked before any download (below) |
+| `compatible`, `version`, `l4t`, `firmware` | checked before any download (below); `firmware` (the bundle's device-tree record, 5.9) only when the index and the board both have one |
 | `bundle` | a bare file name: no `/`, no `..`, no scheme |
 | `size`, `sha256` | transport integrity of the download |
 | `published` | UTC. Shown in `status`, so a frozen channel is visible. |
@@ -1040,7 +1052,10 @@ headers (review M3).
      `/etc/nv_tegra_release`. If it doesn't, report "BSP bump: reflash at
      the dock" - with `requires_reflash` or without, and not as an alert:
      while a fleet is reflashed boat by boat, every later release on the
-     new L4T reaches the boats not yet reflashed this way.
+     new L4T reaches the boats not yet reflashed this way. The same for a
+     `firmware` that is not the board's `/usr/lib/boat-ab/firmware.id`
+     (another kernel device tree on the same L4T, 5.9) - when both have
+     one: a board without the record is offered the release.
   6. **Record** the accepted `serial`, plus the result and the channel's
      `published` date, for `status`.
 - **`download`** writes to
@@ -1131,7 +1146,7 @@ headers (review M3).
 | knob | default | meaning |
 |---|---|---|
 | `BOAT_UPDATE_URL` | empty, or the build's `BOAT_UPDATE_URL` | channel base URL (final location; no redirects; no user name or password) |
-| `BOAT_UPDATE_CHANNEL` | `stable` | which channel to follow |
+| `BOAT_UPDATE_CHANNEL` | `stable` (`bench` in a `BOAT_BENCH` image), or the build's `BOAT_UPDATE_CHANNEL` | which channel to follow |
 | `BOAT_UPDATE_AUTO` | `download` | `off` / `check` (notify only) / `download` (also fetch in background). **Never installs or reboots** (D12). |
 | `BOAT_UPDATE_METERED` | `no` | download over a metered link? (D14) |
 | `BOAT_UPDATE_RATE_LIMIT` | empty | curl `--limit-rate`; the stall threshold (`--speed-limit`) is kept below it |
@@ -1626,7 +1641,7 @@ All of them run from `lint.sh`, so they cover every PR.
 | 26 | `boat-update rollback` after commit | other slot boots and commits |
 | 27 | `boat-sleep` (and the UDP sleep listener), and root's own `systemctl suspend`, during install and during a trial | refused (`boat-sleep --status` says why) |
 | 28 | both slots broken | A, A, B, then UEFI stop (sticky recovery) is the documented end state; the USB reflash recovers it, and so does the UEFI-menu path once Phase 0 has found it and docs/06 describes it (open until then) |
-| 29 | carry-over | SSH host key, `/root/.ssh`, `/home`, Wi-Fi, BT pairing, hostname, `boat-sleep.key`, passwords (D5) are unchanged after update and after rollback. A Wi-Fi network added after the update, then a rollback and the next install: the network is missing on the old slot (documented), and the install keeps it in `/data/boat-update/displaced/` with an alert |
+| 29 | carry-over | SSH host key, `/root/.ssh`, `/home`, Wi-Fi, BT pairing, hostname, `boat-sleep.key`, passwords (D5) are unchanged after update and after rollback. A Wi-Fi network added after the update, then a rollback and the next install: the network is missing on the old slot (documented), and the install keeps it in `/data/boat-update/displaced/` with an alert; an ordinary forward update keeps nothing and raises no alert |
 | 30 | SC7 + WoL on both slots | works |
 | 31 | OTA: channel offers a newer bundle, unmetered link | background download; `status` shows "ready"; no install or reboot happens by itself |
 | 32 | OTA: link dropped, SC7 sleep, and reboot, each mid-download | resumes from where it stopped; final SHA-256 matches; never a second full download |

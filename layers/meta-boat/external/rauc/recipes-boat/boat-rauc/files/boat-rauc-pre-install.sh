@@ -27,9 +27,9 @@
 #     system.conf's min-bundle-version (an install forced past that with
 #     --ignore-version-limit is refused here too: lower the floor instead).
 #
-# Board settings changed in the target slot since it was last installed
-# (a rollback or a fallback ran it) would be lost when it is overwritten:
-# they are kept in /data/boat-update/displaced, with an alert.
+# Board settings changed in the target slot after the later of the two
+# slots' installs (a rollback or a fallback ran it) would be lost when it is
+# overwritten: they are kept in /data/boat-update/displaced, with an alert.
 #
 # Then it marks the target slot not committed - and only that. Nothing
 # should refuse the bundle after this, but if something does (a failed
@@ -197,7 +197,7 @@ fi
 running_fw="$(cat /usr/lib/boat-ab/firmware.id 2>/dev/null || true)"
 bundle_fw="${RAUC_META_BOAT_FIRMWARE:-}"
 if [ -n "$running_fw" ] && [ -n "$bundle_fw" ] && [ "$bundle_fw" != "$running_fw" ]; then
-    die "the bundle was built against another kernel device tree (firmware.id $bundle_fw, this slot's $running_fw): a DTB change only reaches the board by a USB reflash (scripts/05-flash-nvme.sh) - publish such a release with --reflash"
+    die "the bundle was built against another kernel device tree (firmware.id $bundle_fw, this slot's $running_fw): a DTB change only reaches the board by a USB reflash at the dock (scripts/05-flash-nvme.sh) - publish such a release with --reflash: boat-update then tells boards flashed with the old one to reflash instead of offering it"
 elif [ -z "$running_fw" ] || [ -z "$bundle_fw" ]; then
     warn "cannot check the kernel device tree: $([ -z "$running_fw" ] && echo "this slot" || echo "the bundle") has no firmware.id (built before it was recorded)"
 fi
@@ -238,10 +238,44 @@ done
 # newer ones - a Wi-Fi network or a pairing added since - and overwriting it
 # would lose them for good. Keep what differs, and say so. Best effort: a
 # slot that will not mount (never written, half written) has nothing to keep.
+#
+# Only what changed there after the later of the two slots' installs counts.
+# On a forward update the target is the older slot: its settings are the
+# ones this slot was installed from, or older - stale copies (BlueZ
+# rewrites a pairing's info by itself), not displaced ones. After a
+# rollback the target was installed later, and what changed there since
+# never reached this slot. The times are RAUC's installed.timestamp from its
+# central status file: every RAUC install records it, also those made by
+# older bundles (a marker the bundle hook wrote would not be in a slot an
+# older bundle installed), and 'rauc status' cannot be asked while RAUC runs
+# this install. Neither slot recorded (a reflash empties /data and writes
+# only APP): the target holds what was there before the flash - stale.
+# The times are only as good as the clock was then: a file changed while
+# the clock read 1970 looks old, and an install made then makes every file
+# look new (kept, as before).
+rauc_status="$(ini_get "$sys_conf" system data-directory 2>/dev/null || true)"
+rauc_status="${rauc_status:-/data/rauc}/central.raucs"
+# installed_at BOOTNAME: when RAUC last installed that slot, in seconds
+# since the epoch; nothing if it has no record. system.conf's rootfs.0 is A.
+installed_at() {
+    case "$1" in A) name=rootfs.0 ;; *) name=rootfs.1 ;; esac
+    ts="$(ini_get "$rauc_status" "slot.$name" installed.timestamp 2>/dev/null || true)"
+    [ -n "$ts" ] || return 0
+    # RAUC writes 2026-10-16T12:00:00Z; busybox's date wants a space for the T.
+    ts="$(echo "$ts" | sed 's/T/ /; s/\.[0-9]*//; s/Z$//')"
+    date -u -d "$ts" +%s 2>/dev/null || true
+}
 keep_displaced() { # BOOTNAME DEVICE
+    since="$(installed_at "$slot")"
+    target_since="$(installed_at "$1")"
+    if [ -z "$since" ] || { [ -n "$target_since" ] && [ "$target_since" -gt "$since" ]; }; then
+        since="$target_since"
+    fi
+    [ -n "$since" ] || return 0
     mnt="$BOAT_AB_RUNDIR/displaced-$1"
     mkdir -p "$mnt" || return 0
-    if ! mount -o ro,noload -t ext4 "$2" "$mnt" 2>/dev/null; then
+    # Read only, and nothing on it can run or open a device.
+    if ! mount -o ro,noload,nosuid,nodev,noexec -t ext4 "$2" "$mnt" 2>/dev/null; then
         rmdir "$mnt" 2>/dev/null || true
         return 0
     fi
@@ -254,8 +288,10 @@ keep_displaced() { # BOOTNAME DEVICE
       find home/root/.ssh -type f -name authorized_keys 2>/dev/null || true ) > "$mnt.list"
     keep="/data/boat-update/displaced/slot-$1-$(date -u +%Y%m%dT%H%M%SZ)"
     found=""
-    # Every file there that this slot lacks, or has with other contents.
+    # Every file there changed after that, which this slot lacks or has
+    # with other contents.
     while IFS= read -r f; do
+        [ "$(stat -c %Y "$mnt/$f" 2>/dev/null || echo 0)" -gt "$since" ] || continue
         [ -f "$slot_root$f" ] \
             && [ "$(sha256sum < "$mnt/$f")" = "$(sha256sum < "$slot_root$f")" ] && continue
         (umask 077 && mkdir -p "$keep/$(dirname "$f")") && cp -a "$mnt/$f" "$keep/$f" \
@@ -266,7 +302,7 @@ keep_displaced() { # BOOTNAME DEVICE
     umount "$mnt" || die "could not unmount slot $1 ($mnt) after reading its settings - nothing changed"
     rmdir "$mnt" 2>/dev/null || true
     if [ -n "$found" ]; then
-        alert "slot $1 holds board settings this slot lacks or has otherwise (changed there since it was installed):$found - kept in $keep before it is overwritten; copy back what is still wanted"
+        alert "slot $1 holds board settings this slot lacks or has otherwise (changed there after $(date -u -d "@$since" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "its install")):$found - kept in $keep before it is overwritten; copy back what is still wanted"
     fi
     return 0
 }

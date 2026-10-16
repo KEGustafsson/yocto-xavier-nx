@@ -5,6 +5,8 @@
 # Usage:   scripts/03-build.sh [image-name]
 #          IMAGE=boat-image scripts/03-build.sh
 set -euo pipefail
+# The keys directory this shell gave, before env.sh fills in its default.
+BOAT_KEYS_DIR_GIVEN="${BOAT_KEYS_DIR-}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${HERE}/lib.sh"
@@ -33,8 +35,14 @@ fi
 if grep -q '^BOAT_AB_LAYOUT = "1"' "${BUILD_DIR}/conf/local.conf"; then
   configured() { sed -n "s/^$1 = \"\\(.*\\)\"\$/\\1/p" "${BUILD_DIR}/conf/local.conf" | tail -n 1; }
   for var in BOAT_RELEASE BOAT_MIN_BUNDLE_VERSION BOAT_KEYS_DIR; do
-    if [[ -n "${!var}" && "${!var}" != "$(configured "${var}")" ]]; then
-      die "${var}=${!var} here, but ${BUILD_DIR}/conf/local.conf has '$(configured "${var}")' - bitbake reads it from there: run scripts/02-configure-build.sh again"
+    # env.sh leaves the release and the floor empty, but gives the keys
+    # directory a default, which is no choice: that one counts only when
+    # this shell gave it, so a build directory configured for other keys
+    # builds from a new terminal.
+    value="${!var}"
+    [[ "${var}" != BOAT_KEYS_DIR ]] || value="${BOAT_KEYS_DIR_GIVEN}"
+    if [[ -n "${value}" && "${value}" != "$(configured "${var}")" ]]; then
+      die "${var}=${value} here, but ${BUILD_DIR}/conf/local.conf has '$(configured "${var}")' - bitbake reads it from there: run scripts/02-configure-build.sh again"
     fi
   done
   log "A/B release '$(configured BOAT_RELEASE)', min-bundle-version '$(configured BOAT_MIN_BUNDLE_VERSION)' (from ${BUILD_DIR}/conf/local.conf)"

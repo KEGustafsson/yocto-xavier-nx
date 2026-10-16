@@ -30,10 +30,10 @@ what a READY bundle becomes when the channel withdraws it, loses or serves
 a stale index, rebuilds its version or moves past a withdrawal the board
 missed, and a trial that died before boat-commit, and that a refused check or
 download shows in status as an alert until it works again. So do the
-guards on what the board accepts (another compatible or L4T, a CA only in
-the system's trust store, an expired index certificate), the metered rules
-(a VPN, a USB modem), what the rate limit holds back, a typo in
-channel.conf, and the relay's defences against other local processes. It
+guards on what the board accepts (another compatible, L4T or device tree,
+a CA only in the system's trust store, an expired index certificate), the
+metered rules (a VPN, a USB modem), what the rate limit holds back, a typo
+in channel.conf, and the relay's defences against other local processes. It
 also checks the pure parts (version order as RAUC defines it, index
 validation) directly.
 
@@ -238,13 +238,28 @@ def main():
                 sha256="0" * 64, published="2026-10-13T00:00:00Z")
     for field, value in (("bundle", "../etc/passwd.raucb"), ("bundle", "sub/x.raucb"),
                          ("bundle", "x.tar"), ("sha256", "ABC"), ("serial", "5"),
-                         ("version", "one"), ("size", 0), ("requires_reflash", "yes")):
+                         ("version", "one"), ("size", 0), ("requires_reflash", "yes"), ("firmware", 5)):
         idx = dict(base, **{field: value})
         try:
             bu.validate_index(idx)
             check("index with %s=%r is refused" % (field, value), False, "accepted")
         except bu.UpdateError:
             check("index with %s=%r is refused" % (field, value), True)
+
+    # The recipe's channel default: a bench image follows the bench channel.
+    recipe = open(os.path.join(os.path.dirname(TOOL), "..", "boat-update.bb")).read()
+    m = re.search(r'^BOAT_UPDATE_CHANNEL \?\?= "\$\{@(.*)\}"$', recipe, re.M)
+
+    class Datastore:
+        def __init__(self, values):
+            self.values = values
+
+        def getVar(self, name):
+            return self.values.get(name)
+    got = [eval(m.group(1), {}, {"d": Datastore(v)}) if m else None
+           for v in ({"BOAT_BENCH": "1"}, {"BOAT_BENCH": "0"}, {})]
+    check("the image's channel is bench for a BOAT_BENCH image, stable otherwise",
+          got == ["bench", "stable", "stable"], str(got))
 
     work = tempfile.mkdtemp(prefix="boat-update-test-")
     try:
@@ -465,6 +480,7 @@ esac
             "cmdline": board + "/proc/cmdline", "mounts": board + "/proc/mounts",
             "grubenv": env, "release": board + "/etc/boat-release",
             "nv_release": board + "/etc/nv_tegra_release",
+            "firmware_id": board + "/usr/lib/boat-ab/firmware.id",
             "system_conf": board + "/etc/rauc/system.conf", "ca": board + "/etc/rauc/ca.cert.pem",
             "conf_image": board + "/etc/boat-update/channel.conf", "data": board + "/data",
             "state": board + "/data/boat-update", "run_ab": board + "/run/boat-ab",
@@ -1541,6 +1557,32 @@ esac
         check("an index signed by a certificate past its expiry date is accepted, as RAUC does (row 45)",
               expired and err is None, str(err))
 
+        # --- another kernel device tree on the same L4T: a reflash too --------
+        # RAUC's pre-install handler would refuse it after the download.
+        firmware_id = board + "/usr/lib/boat-ab/firmware.id"
+        write(firmware_id, "a" * 64 + "\n")
+        publish(26, version="1.5.0", firmware="b" * 64, requires_reflash=True)
+        offer, err = run_check()
+        msg = bu.load_state().get("message", "")
+        check("a release built against another device tree than the board's is not offered: "
+              "reflash at the dock, no alert",
+              offer is None and err is None and "another kernel device tree" in msg
+              and "reflash at the dock" in msg and "offer" not in bu.load_state()
+              and "the last check failed" not in status(), "%s / %s" % (err, msg))
+        publish(27, version="1.5.0", firmware="a" * 64)
+        offer, err = run_check()
+        check("... one built against the board's own device tree is offered",
+              offer is not None and err is None, "%s / %s" % (err, bu.load_state().get("message")))
+        publish(28, version="1.5.0")
+        offer, err = run_check()
+        check("... and so is one whose index names no firmware.id (the handler only warns)",
+              offer is not None and err is None, "%s / %s" % (err, bu.load_state().get("message")))
+        os.unlink(firmware_id)
+        publish(29, version="1.5.0", firmware="b" * 64)
+        offer, err = run_check()
+        check("... and one for a board flashed before firmware.id was recorded",
+              offer is not None and err is None, "%s / %s" % (err, bu.load_state().get("message")))
+
         # --- a link that drops mid-handshake: not an alert ----------------------
         rst = socket.socket()
         rst.bind(("127.0.0.1", 0))
@@ -1600,6 +1642,32 @@ esac
         check("... status shows it as an alert, and the timer's run fails",
               re.search(r"ALERT +.*cannot parse", out) is not None and rc_auto == 1, "%s\n%s" % (rc_auto, out))
         check("closing the terminal unwinds as a stop does", hangup)
+        # An install from a file never talks to the channel: push-update.sh's
+        # offline install goes on past the same typo, outer wrapper and inner run.
+        write(board + "/data/boat-update/channel.conf", 'BOAT_UPDATE_URL="https://updates.example/boat\n')
+        write(board + "/rauc-serves", "1.1.0")
+        with open(board + "/rauc.log", "w"):
+            pass
+        said = io.StringIO()
+        with as_root(), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(said):
+            rc_outer = bu.main(["boat-update", "install", incoming])
+            os.environ["BOAT_UPDATE_INNER"] = "1"
+            try:
+                rc_inner = bu.main(["boat-update", "install", incoming])
+            finally:
+                del os.environ["BOAT_UPDATE_INNER"]
+        os.unlink(board + "/data/boat-update/channel.conf")
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+        check("a typo in channel.conf does not stop an install from a file, which warns about it",
+              rc_outer == 0 and rc_inner == 0
+              and ("rauc install %s\n" % incoming) in open(board + "/rauc.log").read()
+              and "cannot parse" in said.getvalue() and "does not use the channel" in said.getvalue(),
+              "%s %s %s" % (rc_outer, rc_inner, said.getvalue()))
+        st = bu.load_state()
+        st.pop("installed", None)
+        bu.save_state(st)
+        setenv(ORDER="A B", B_OK="1", B_TRY="0", B_COMMITTED="1")
 
         # --- trial outcomes, seen as soon as anyone looks ------------------------
         setenv(ORDER="A B", B_OK="0", B_TRY="0", B_COMMITTED="0")

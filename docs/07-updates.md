@@ -118,8 +118,9 @@ be above `BOAT_RELEASE` (the build stops).
 Both reach the build only through `scripts/02-configure-build.sh`, which
 writes them into `local.conf`: after changing either (or `BOAT_KEYS_DIR`),
 run 02 again before 03. `03-build.sh` stops when a value set in your shell
-or `env.sh` is not the one `local.conf` has, and says which release and
-floor it builds.
+or `env.sh` is not the one `local.conf` has - for `BOAT_KEYS_DIR`, only one
+set in your shell, since `env.sh` always gives it a default - and says which
+release and floor it builds.
 
 **A slot holds about 12 GiB of image content.** Each slot is 16 GiB; the
 build adds 30 % and 512 MiB to the content and stops if the result no longer
@@ -182,7 +183,11 @@ the other one since its install: a Wi-Fi network added, a device paired, a
 key authorized. Add them again on this slot before the next install. That
 install overwrites the other slot; it first keeps what it holds that this
 slot lacks or has otherwise in `/data/boat-update/displaced/slot-<X>-<time>/`
-and raises an alert, so you can copy back what is still wanted.
+and raises an alert, so you can copy back what is still wanted. Only files
+changed there after the later of the two slots' installs (RAUC's install
+times) count: on an ordinary update the other slot is the older one, whose
+settings this slot started from, and nothing of it is kept. The rule needs
+the clock: a change made while the board's clock was not set can be missed.
 
 An install, by any path, needs a few MiB and some free inodes on `/data`
 for RAUC's own status, even streamed: RAUC marks the other slot unusable
@@ -328,7 +333,12 @@ already reflashed see it as older (or give them a channel of their own).
 A bundle built against another kernel device tree than the channel's
 current release (a meta-tegra or kernel change within one L4T release)
 needs `--reflash` too - boards keep the DTB they were flashed with and
-refuse such a bundle - and the script stops without it.
+refuse such a bundle - and the script stops without it. The index names
+the device tree (`firmware`), and a board flashed with another one is told
+"reflash at the dock" instead of downloading the release, not as an
+alert; a board already flashed with it takes it over the air. A board
+flashed before the device tree was recorded cannot tell: it downloads the
+release, and its install only warns.
 
 **Caches.** `index.p7` keeps its name, so nothing between the board and
 the channel may cache it: serve it with `Cache-Control: no-cache` from the
@@ -394,7 +404,8 @@ updates, and `status` only says "no channel configured". For a fleet,
 build the channel into the image instead - `BOAT_UPDATE_URL` (and
 `BOAT_UPDATE_CHANNEL`, if not `stable`) in `local.conf`, below the block
 `02-configure-build.sh` manages, or in the kas configuration - and keep a
-copy of the credentials off the board.
+copy of the credentials off the board. A `BOAT_BENCH` image follows `bench`
+unless `BOAT_UPDATE_CHANNEL` says otherwise.
 
 ```bash
 BOAT_UPDATE_URL="https://updates.example/boat-xavier-nx"   # the final URL - redirects are not followed
@@ -655,7 +666,8 @@ whole SSD.
   Phase 0 runbook (2.6) is where it gets found, and then it is written here
   and in [`06-troubleshooting.md`](06-troubleshooting.md).
 - **"... is a BSP bump for this board: reflash at the dock."** The new
-  release is built on another L4T. Flash it over USB. Like the first flash,
+  release is built on another L4T (or, "built against another kernel
+  device tree", on another DTB of the same L4T). Flash it over USB. Like the first flash,
   **a USB flash empties `/data`**: copy off what you need first, and put
   the channel settings and credentials back afterwards.
 

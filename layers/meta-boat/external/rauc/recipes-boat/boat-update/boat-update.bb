@@ -21,9 +21,11 @@ S = "${WORKDIR}"
 # The fleet's update channel, built into /etc/boat-update/channel.conf, so a
 # board is back on it after a USB reflash has emptied /data (the operator's
 # /data/boat-update/channel.conf still overrides it). Set them in local.conf
-# or the kas configuration; an empty URL ships no channel.
+# or the kas configuration; an empty URL ships no channel. A BOAT_BENCH
+# image follows the bench channel by default: its bundles go only there,
+# and it refuses every stable index (another compatible) as an alert.
 BOAT_UPDATE_URL ??= ""
-BOAT_UPDATE_CHANNEL ??= "stable"
+BOAT_UPDATE_CHANNEL ??= "${@'bench' if d.getVar('BOAT_BENCH') == '1' else 'stable'}"
 
 inherit allarch systemd
 

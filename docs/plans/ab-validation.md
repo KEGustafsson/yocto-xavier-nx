@@ -102,8 +102,8 @@ itself only behave like the real thing on the real thing.
 4. **A channel** for the OTA rows. Use any local HTTPS server with Range
    support, such as Caddy, serving the `bench` channel, and publish to it
    with `scripts/publish-update.sh bench <bundle>`. In the board's
-   `/data/boat-update/channel.conf`, set `BOAT_UPDATE_URL` to it and
-   `BOAT_UPDATE_CHANNEL=bench`.
+   `/data/boat-update/channel.conf`, set `BOAT_UPDATE_URL` to it (a bench
+   image follows `BOAT_UPDATE_CHANNEL=bench` already).
 
    A server on the bench LAN usually has a certificate from a CA of its
    own - Caddy's internal CA, which Caddy uses for an IP address, a

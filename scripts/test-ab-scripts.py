@@ -78,7 +78,8 @@ class Board:
                  failed_mark=False, system_state="running", efivars=None,
                  efi_readonly=(), manifest=None, sysconf=None, expect=None,
                  boat_update=None, data_free=(10 ** 7, 10 ** 6, 10 ** 6), firmware=None,
-                 settings=None, target_settings=None, run_files=None, setup=None):
+                 settings=None, target_settings=None, target_age=0, installed=None,
+                 run_files=None, setup=None):
         """efivars: {name: bytes} in the fake efivarfs (attributes added).
         efi_readonly: variables efivar fails to write. manifest/sysconf:
         the bundle's [update] and system.conf's [system] keys. expect:
@@ -89,7 +90,10 @@ class Board:
         firmware: the running slot's /usr/lib/boat-ab/firmware.id (None:
         none). settings/target_settings: {path: text} board settings in the
         running slot / in the slot about to be written (target_settings
-        None: that slot does not mount). run_files: {path under /run: text}.
+        None: that slot does not mount), the latter last changed target_age
+        seconds ago. installed: {bootname: seconds from now} - when RAUC's
+        status file says it installed that slot (None: no status file).
+        run_files: {path under /run: text}.
         setup: called with the board once it is laid out, to add to it."""
         self.root = root
         for d in ("bin", "proc", "run", "etc", "data", "boot/efi/EFI/BOOT",
@@ -130,10 +134,20 @@ class Board:
             # What the target slot's file system holds, mounted by the stub.
             slot_dir = os.path.join(root, "slots", "nvme0n1p2")
             os.makedirs(slot_dir)
+            changed = time.time() - target_age
             for rel, text in target_settings.items():
                 os.makedirs(os.path.dirname(os.path.join(slot_dir, rel)), exist_ok=True)
                 with open(os.path.join(slot_dir, rel), "w") as f:
                     f.write(text)
+                os.utime(os.path.join(slot_dir, rel), (changed, changed))
+        if installed is not None:
+            # RAUC's central status file, as RAUC 1.13 writes it.
+            os.makedirs(os.path.join(root, "data/rauc"), exist_ok=True)
+            self.write("data/rauc/central.raucs", "".join(
+                "[slot.rootfs.%d]\nbundle.version=1.0.0\nstatus=ok\ninstalled.timestamp=%s\n"
+                "installed.count=1\n\n" % ("AB".index(b), time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + offset)))
+                for b, offset in sorted(installed.items())))
         for rel, text in (run_files or {}).items():
             os.makedirs(os.path.dirname(os.path.join(root, "run", rel)), exist_ok=True)
             self.write(os.path.join("run", rel), text)
@@ -145,7 +159,8 @@ class Board:
         update.update(manifest or {})
         self.write("bundle/manifest.raucm", "[update]\n" + "".join(
             "%s=%s\n" % kv for kv in update.items()) + "\n[image.rootfs]\nfilename=rootfs.ext4\n")
-        system = dict(compatible="boat-xavier-nx", bootloader="grub")
+        system = {"compatible": "boat-xavier-nx", "bootloader": "grub",
+                  "data-directory": os.path.join(root, "data/rauc")}
         system.update(sysconf or {})
         self.write("etc/rauc/system.conf", "[system]\n" + "".join(
             "%s=%s\n" % kv for kv in system.items()))
@@ -896,10 +911,11 @@ CASES = [
          0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""),
          says=["cannot check the kernel device tree: this slot has no firmware.id"],
          extra_env=dict(RAUC_TARGET_B, RAUC_META_BOAT_FIRMWARE="b" * 64)),
-    # After a rollback the target slot can hold settings newer than ours.
+    # After a rollback the target slot can hold settings newer than ours:
+    # it was installed after this one, and changed since.
     case("pre-install: settings only the target slot has are kept on /data, with an alert",
          "boat-rauc-pre-install.sh",
-         dict(cmdline="rauc.slot=A", env=env_with(),
+         dict(cmdline="rauc.slot=A", env=env_with(), installed={"A": -7200, "B": -3600},
               settings={"etc/NetworkManager/system-connections/home.nmconnection": "[wifi]\nhome\n"},
               target_settings={"etc/NetworkManager/system-connections/home.nmconnection": "[wifi]\nhome\n",
                                "etc/NetworkManager/system-connections/new marina.nmconnection": "[wifi]\nnew\n",
@@ -913,11 +929,40 @@ CASES = [
          absent=["data/boat-update/displaced/slot-B-*/etc/NetworkManager/system-connections/home.nmconnection",
                  "data/boat-update/displaced/slot-B-*/home/root/.ssh/known_hosts",
                  "run/boat-ab/displaced-B"],
-         log=["mount -o ro,noload -t ext4 %sp2" % DISK, "umount"],
+         log=["mount -o ro,noload,nosuid,nodev,noexec -t ext4 %sp2" % DISK, "umount"],
+         extra_env=RAUC_TARGET_B),
+    case("pre-install: ... also when this slot was flashed, not installed (no record of it)",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), installed={"B": -3600},
+              target_settings={"home/root/.ssh/authorized_keys": "ssh-ed25519 AAAA new\n"}),
+         0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""),
+         says=["slot B holds board settings this slot lacks"],
+         files={"data/boat-update/displaced/slot-B-*/home/root/.ssh/authorized_keys": "AAAA new"},
+         extra_env=RAUC_TARGET_B),
+    # A forward update: the target is the older slot, which this one was
+    # installed from - its settings are stale copies, changed before then.
+    case("pre-install: a forward update keeps nothing of the older slot's stale settings, and raises no alert",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), installed={"A": -3600, "B": -86400},
+              target_age=7200,
+              settings={"etc/NetworkManager/system-connections/home.nmconnection": "[wifi]\npsk=new\n"},
+              target_settings={"etc/NetworkManager/system-connections/home.nmconnection": "[wifi]\npsk=old\n",
+                               "etc/NetworkManager/system-connections/removed.nmconnection": "[wifi]\n",
+                               "var/lib/bluetooth/00:11:22:33:44:55/info": "[General]\nold\n",
+                               "home/root/.ssh/authorized_keys": "ssh-ed25519 AAAA revoked\n"}),
+         0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""), not_says=["holds board settings"],
+         absent=["data/boat-update/displaced", "run/boat-ab/health-alert", "run/boat-ab/displaced-B"],
+         log=["umount"], extra_env=RAUC_TARGET_B),
+    case("pre-install: after a reflash (no install recorded) the other slot's old settings are not kept",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(),
+              target_settings={"home/root/.ssh/authorized_keys": "ssh-ed25519 AAAA old\n"}),
+         0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""), not_says=["holds board settings"],
+         absent=["data/boat-update/displaced", "run/boat-ab/displaced-B"], not_log=["mount -o"],
          extra_env=RAUC_TARGET_B),
     case("pre-install: a target slot with the same settings keeps nothing",
          "boat-rauc-pre-install.sh",
-         dict(cmdline="rauc.slot=A", env=env_with(),
+         dict(cmdline="rauc.slot=A", env=env_with(), installed={"A": -7200, "B": -3600},
               settings={"etc/NetworkManager/system-connections/home.nmconnection": "[wifi]\n"},
               target_settings={"etc/NetworkManager/system-connections/home.nmconnection": "[wifi]\n"}),
          0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""), not_says=["holds board settings"],

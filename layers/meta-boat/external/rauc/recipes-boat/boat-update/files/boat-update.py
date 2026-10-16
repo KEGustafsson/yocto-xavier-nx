@@ -75,6 +75,8 @@ PATHS = {
     "grubenv": "/boot/efi/EFI/BOOT/grubenv",
     "release": "/etc/boat-release",
     "nv_release": "/etc/nv_tegra_release",
+    # The kernel device tree this slot was built against (boat-image.bb).
+    "firmware_id": "/usr/lib/boat-ab/firmware.id",
     "system_conf": "/etc/rauc/system.conf",
     "ca": "/etc/rauc/ca.cert.pem",
     "conf_image": "/etc/boat-update/channel.conf",
@@ -350,6 +352,12 @@ def running_l4t():
     return "%s.%s.%s" % m.groups() if m else None
 
 
+def running_firmware():
+    """This slot's firmware.id, or None: a slot built before it was
+    recorded (or a single-slot image) has none."""
+    return read(path("firmware_id")).strip() or None
+
+
 def system_compatible():
     cp = configparser.ConfigParser(interpolation=None, strict=False)
     try:
@@ -535,6 +543,20 @@ def load_conf():
                           "it would be readable by every local user; use a client certificate (client.crt, "
                           "client.key) to restrict the channel")
     return conf
+
+
+def install_conf(rest):
+    """channel.conf for an install. Only a streamed one talks to the
+    channel: an install from a file (push-update.sh's, offline, or the
+    downloaded bundle) goes on with the defaults when channel.conf has a
+    typo or a URL it refuses."""
+    try:
+        return load_conf()
+    except UpdateError as e:
+        if "--stream" in rest:
+            raise
+        warn("%s - ignored: an install from a file does not use the channel" % e)
+        return dict(DEFAULTS)
 
 
 def client_key_problem(conf):
@@ -778,8 +800,10 @@ def validate_index(idx):
     if not isinstance(notes, str):
         raise UpdateError("index field 'notes' is not a string")
     idx["notes"] = printable(notes, keep_newlines=True)[:NOTES_MAX]
-    for key in ("published", "l4t", "compatible", "version", "channel"):
-        if printable(idx[key]) != idx[key]:
+    if not isinstance(idx.get("firmware", ""), str):
+        raise UpdateError("index field 'firmware' is not a string")
+    for key in ("published", "l4t", "compatible", "version", "channel", "firmware"):
+        if key in idx and printable(idx[key]) != idx[key]:
             raise UpdateError("index field %r holds control characters" % key)
 
 
@@ -794,10 +818,11 @@ def index_hash(idx):
     return hashlib.sha256(json.dumps(idx, sort_keys=True).encode()).hexdigest()
 
 
-def decide(idx, conf, state, booted_version, other_version, compatible, l4t, failed):
+def decide(idx, conf, state, booted_version, other_version, compatible, l4t, failed, firmware=None):
     """What to do about a verified, well-formed index: returns
     (offer, message). offer is the index when its bundle should be fetched,
-    else None. Pure, so it can be tested on its own."""
+    else None. firmware: this slot's firmware.id (None: not recorded).
+    Pure, so it can be tested on its own."""
     if idx["channel"] != conf["BOAT_UPDATE_CHANNEL"]:
         raise UpdateError("the index is for channel %r, this board follows %r - refusing it"
                           % (idx["channel"], conf["BOAT_UPDATE_CHANNEL"]))
@@ -839,6 +864,15 @@ def decide(idx, conf, state, booted_version, other_version, compatible, l4t, fai
         # nothing to a board already on that L4T: it takes it over the air.)
         return None, ("%s is a BSP bump for this board (built on L4T %s, this board runs %s): reflash at "
                       "the dock (scripts/05-flash-nvme.sh)" % (v, idx["l4t"], l4t))
+    if firmware and idx.get("firmware") and idx["firmware"] != firmware:
+        # The same L4T, but another kernel device tree (a meta-tegra or
+        # kernel change): the kernel runs on the DTB written at flash, and
+        # RAUC's pre-install handler refuses the bundle - after the board
+        # has downloaded it. Like a BSP bump, a person at the dock. A side
+        # that has no firmware.id cannot tell: the handler only warns then.
+        return None, ("%s was built against another kernel device tree than this board was flashed with "
+                      "(firmware.id %s, this board's %s): reflash at the dock (scripts/05-flash-nvme.sh)"
+                      % (v, idx["firmware"][:12], firmware[:12]))
     return idx, "%s is available (this slot runs %s)" % (v, booted_version)
 
 
@@ -953,7 +987,7 @@ def check_channel(conf, state, quiet, stamp):
     slots = rauc_slots()
     offer, message = decide(idx, conf, state, running_release(),
                             usable_version(other(slot), env, slots, may_read=True), system_compatible(),
-                            running_l4t(), failed_versions())
+                            running_l4t(), failed_versions(), running_firmware())
     # Like the serial, the index last accepted is kept per channel: coming
     # back to a channel whose index has not changed is the same index.
     h = index_hash(idx)
@@ -2066,8 +2100,8 @@ def run_verb(argv):
         return 0
     try:
         # channel.conf is read only by the verbs that use it: a typo in it
-        # must not stop rollback, history or debug-hold - nor status, which
-        # shows it as an alert instead.
+        # must not stop rollback, history, debug-hold or an install from a
+        # file - nor status, which shows it as an alert instead.
         if verb == "status":
             note_trial_outcome()
             state = load_state() if os.path.isdir(PATHS["state"]) else {}
@@ -2086,14 +2120,14 @@ def run_verb(argv):
             files = [a for a in rest if not a.startswith("--")]
             if len(files) > 1:
                 raise UpdateError("install takes at most one bundle")
-            do_install(load_conf(), {}, files[0] if files else None, reboot="--reboot" in rest,
+            do_install(install_conf(rest), {}, files[0] if files else None, reboot="--reboot" in rest,
                        stream="--stream" in rest, allow_metered="--allow-metered" in rest)
         elif verb in ("check", "download", "auto", "install"):
             if os.geteuid() != 0:
                 raise UpdateError("run as root")
             # The timer's run gives way; a person's command does not.
             with locked(interactive=verb != "auto"):
-                conf = load_conf()
+                conf = install_conf(rest) if verb == "install" else load_conf()
                 state = load_state()
                 if verb == "check":
                     do_check(conf, state)

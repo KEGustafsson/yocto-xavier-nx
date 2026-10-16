@@ -292,8 +292,9 @@ class Board:
     validate_index, then decide, recording what it accepted the way
     check_channel does."""
 
-    def __init__(self, bu, channel, booted, other=""):
+    def __init__(self, bu, channel, booted, other="", firmware=None):
         self.bu, self.channel, self.booted, self.other = bu, channel, booted, other
+        self.firmware = firmware
         self.state = {}
 
     def check(self, idx):
@@ -302,7 +303,8 @@ class Board:
         try:
             self.bu.validate_index(idx)
             offer, msg = self.bu.decide(idx, {"BOAT_UPDATE_CHANNEL": self.channel}, self.state,
-                                        self.booted, self.other, "boat-xavier-nx", "35.6.4", set())
+                                        self.booted, self.other, "boat-xavier-nx", "35.6.4", set(),
+                                        self.firmware)
         except self.bu.UpdateError as e:
             return "error", str(e)
         self.state.setdefault("serials", {})[idx["channel"]] = idx["serial"]
@@ -554,6 +556,13 @@ def main():
         check("... unless it is published as a reflash",
               rc == 0 and isinstance(idx, dict) and idx["requires_reflash"] is True
               and idx.get("firmware") == "e" * 64, "%d %s %s" % (rc, idx, out))
+        if isinstance(idx, dict):
+            got = Board(bu, "stable", "1.2.0", firmware="f" * 64).check(idx)
+            check("... which a board flashed with the old device tree is told to reflash for, not offered",
+                  got[0] is None and "another kernel device tree" in got[1] and "reflash at the dock" in got[1],
+                  got)
+            got = Board(bu, "stable", "1.2.0", firmware="e" * 64).check(idx)
+            check("... and a board already flashed with the new one takes over the air", got[0] == "1.3.0", got)
 
         # A keyring that holds a private key: publish refuses, and so does the image build.
         bad = os.path.join(work, "bad-keys")
