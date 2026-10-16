@@ -39,7 +39,9 @@
 #     The failed slot is marked unusable (OK=0) here, as GRUB would have,
 #     and it is an alert.
 #   - boat.esp=N: the version of the boot files on the ESP, which only a USB
-#     reflash changes. Older than this release's BOAT_ESP is an alert.
+#     reflash changes. Older than BOAT_ESP_MIN, what these scripts need, is
+#     an alert; older than BOAT_ESP, the newest, is only noted - a reflash
+#     empties /data, so it is never pressed on a board for an improvement.
 #
 # See docs/plans/ab-os-updates.md section 5.3 ("grubenv integrity").
 set -eu
@@ -47,9 +49,12 @@ SELF=boat-grubenv-guard
 # shellcheck source=SCRIPTDIR/boat-ab-lib.sh
 . /usr/lib/boat-ab/lib.sh
 
-# The ESP version (boat.esp= from grub.cfg) this release's scripts rely on.
-# Bumped together with boat_esp in boat-grub-esp's grub.cfg.in.
+# ESP versions (boat.esp= from grub.cfg). BOAT_ESP is the newest, bumped
+# together with boat_esp in boat-grub-esp's grub.cfg.in. BOAT_ESP_MIN is the
+# oldest these scripts work with: raise it only when a release comes to
+# depend on a change there.
 BOAT_ESP=1
+BOAT_ESP_MIN=0
 
 mkdir -p "$BOAT_AB_RUNDIR"
 trap '[ "$?" = 0 ] || alert "boat-grubenv-guard failed - the A/B boot state may be wrong (journalctl -b -u boat-grubenv-guard)"' EXIT
@@ -63,8 +68,10 @@ if [ -n "$slot" ]; then
         case "$arg" in boat.esp=*) esp="${arg#boat.esp=}" ;; esac
     done
     case "$esp" in ''|*[!0-9]*) esp=0 ;; esac
-    if [ "$esp" -lt "$BOAT_ESP" ]; then
-        alert "the boot files on the ESP are version $esp, and this release expects $BOAT_ESP: GRUB and grub.cfg only change with a USB reflash - reflash at the dock"
+    if [ "$esp" -lt "$BOAT_ESP_MIN" ]; then
+        alert "the boot files on the ESP are version $esp, and this release needs $BOAT_ESP_MIN: GRUB and grub.cfg only change with a USB reflash - reflash at the dock"
+    elif [ "$esp" -lt "$BOAT_ESP" ]; then
+        echo "$SELF: the boot files on the ESP are version $esp; the newest is $BOAT_ESP. This release works with them; a USB reflash would bring the newer GRUB and grub.cfg."
     fi
     if cmdline_has boat.handover=1; then
         alert "GRUB could not load slot $(other_slot "$slot") and could not record that, so it booted slot $slot instead, uncounted - slot $(other_slot "$slot") stays unusable until an update rewrites it; if the ESP refuses writes, reflash at the dock"

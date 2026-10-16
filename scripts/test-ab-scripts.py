@@ -23,6 +23,7 @@ Exit status: 0 = all passed, 1 = a case failed, 77 = grub-editenv missing
 (scripts/lint.sh reports that as a skip).
 """
 import fcntl
+import hashlib
 import os
 import shutil
 import subprocess
@@ -278,6 +279,14 @@ esac
         p = subprocess.run(["sh", os.path.join(self.root, name)] + args,
                            capture_output=True, text=True, env=env)
         return p.returncode, p.stdout + p.stderr
+
+    def edit_script(self, name, old, new):
+        """Change one line of a script in the fake root, as a later release would."""
+        path = os.path.join(self.root, name)
+        text = slurp(path)
+        assert old in text, "%s has no %r" % (name, old)
+        with open(path, "w") as f:
+            f.write(text.replace(old, new))
 
     def read(self, rel):
         path = os.path.join(self.root, rel)
@@ -855,11 +864,17 @@ CASES += [
               editenv_fails=True),
          0, want_env=env_with(B_TRY=0),
          files={"run/boat-ab/health-alert": "could not mark slot A unusable"}),
-    case("guard: an ESP older than this release expects is an alert",
+    case("guard: an ESP older than the newest, but enough for this release - noted, no alert",
          "boat-grubenv-guard.sh",
          dict(cmdline="rauc.slot=A", env=env_with(A_TRY=0)),
-         0, want_env=env_with(A_TRY=0),
-         files={"run/boat-ab/health-alert": "boot files on the ESP are version 0, and this release expects 1"}),
+         0, want_env=env_with(A_TRY=0), absent=["run/boat-ab/health-alert"],
+         says=["the boot files on the ESP are version 0; the newest is 1"]),
+    dict(case("guard: an ESP older than this release needs is an alert",
+              "boat-grubenv-guard.sh",
+              dict(cmdline="rauc.slot=A", env=env_with(A_TRY=0)),
+              0, want_env=env_with(A_TRY=0),
+              files={"run/boat-ab/health-alert": "boot files on the ESP are version 0, and this release needs 1"}),
+         setup=lambda b: b.edit_script("boat-grubenv-guard.sh", "BOAT_ESP_MIN=0", "BOAT_ESP_MIN=1")),
     case("guard: the ESP this release expects - no alert",
          "boat-grubenv-guard.sh",
          dict(cmdline="rauc.slot=A boat.esp=1", env=env_with(A_TRY=0)),
@@ -1053,6 +1068,63 @@ def install_firefox(installed=True, data=True):
     return setup
 
 
+def firefox_upgrade(fail_swap=False, fail_download=False, stale_old=False):
+    """install_firefox(), with 149.0 on /data and a real 150.0 tarball the
+    curl stub serves, checksum and all. fail_swap: the move of the new tree
+    into place fails. fail_download: the download fails. stale_old: an
+    earlier run left <prefix>.old behind."""
+    base = install_firefox()
+
+    def setup(b):
+        base(b)
+        r = b.root
+        b.write("data/opt/firefox/application.ini", "[App]\nVersion=149.0\n")
+        src = os.path.join(r, "tarsrc")
+        os.makedirs(os.path.join(src, "firefox"))
+        executable(os.path.join(src, "firefox", "firefox"), "#!/bin/sh\n")
+        with open(os.path.join(src, "firefox", "application.ini"), "w") as f:
+            f.write("[App]\nVersion=150.0\n")
+        tarball = os.path.join(r, "firefox-150.0.tar.xz")
+        subprocess.run(["tar", "-C", src, "-cJf", tarball, "firefox"], check=True)
+        with open(tarball, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        executable(os.path.join(r, "bin/curl"), """#!/bin/sh
+out=""; url=""
+while [ $# -gt 0 ]; do
+    case "$1" in -o) out="$2"; shift ;; http*) url="$1" ;; esac
+    shift
+done
+case "$url" in
+    *SHA256SUMS) echo "%s  linux-aarch64/en-US/firefox-150.0.tar.xz" ;;
+    *.tar.xz) [ %d = 1 ] && exit 22; cp %s "$out" ;;
+    *) echo 'https://download-installer.cdn.mozilla.net/pub/firefox/releases/150.0/linux-aarch64/en-US/firefox-150.0.tar.xz' ;;
+esac
+""" % (digest, int(fail_download), tarball))
+        if fail_swap:
+            executable(os.path.join(r, "bin/mv"), """#!/bin/sh
+for last; do :; done
+case "$last" in */data/opt/firefox) case "$1" in */.boat-firefox.*) exit 1 ;; esac ;; esac
+exec %s "$@"
+""" % shutil.which("mv"))
+        if stale_old:
+            os.makedirs(os.path.join(r, "data/opt/firefox.old"))
+            b.write("data/opt/firefox.old/application.ini", "[App]\nVersion=148.0\n")
+    return setup
+
+
+def firefox_version(want):
+    def check(b):
+        got = b.read("data/opt/firefox/application.ini")
+        errors = [] if "Version=%s" % want in got else [
+            "/data/opt/firefox holds %r, expected Firefox %s" % (got, want)]
+        leftovers = [n for n in os.listdir(os.path.join(b.root, "data/opt"))
+                     if n.startswith(".boat-firefox.")]
+        if leftovers:
+            errors.append("working copies left behind: %s" % leftovers)
+        return errors
+    return check
+
+
 def firefox_linked(b):
     r = b.root
     errors = []
@@ -1098,6 +1170,11 @@ TRIAL_CASES = [
          "boat-commit.sh",
          dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL, editenv_fails=True),
          1, unchanged=True, files={"run/boat-ab/commit-failed": "could not write grubenv"}),
+    case("commit: a commit grubenv.bak will not take is not a commit - and the record says it was the copy",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL, bak=ON_TRIAL, setup=bak_copy_fails),
+         1, absent=["run/boat-ab/committed"],
+         files={"run/boat-ab/commit-failed": "could not copy the commit to grubenv.bak"}),
     case("deadline: a trial that passed but could not commit is failed - as a possible board fault",
          "boat-commit.sh",
          dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
@@ -1145,6 +1222,17 @@ TRIAL_CASES = [
               setup=add_conf('BOAT_HEALTH_FAILED_UNITS="${BOAT_NO_SUCH_SETTING}"\n')),
          0, want_env=TRIAL_PASSED,
          files={"run/boat-ab/health-alert": "health.conf cannot be read"}),
+    case("commit: a health.conf with a syntax error is an alert, and the gate decides on its defaults",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              setup=add_conf('if [ -x /x ]; then\n')),
+         0, want_env=TRIAL_PASSED,
+         files={"run/boat-ab/health-alert": "health.conf cannot be read"}),
+    case("commit: a health.conf whose last line is a false test is read, not replaced by the defaults",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              setup=add_conf('[ -x /no/such/tool ] && BOAT_HEALTH_UNITS="$BOAT_HEALTH_UNITS no-such.service"\n')),
+         0, want_env=TRIAL_PASSED, absent=["run/boat-ab/health-alert"]),
     # --- health.d -----------------------------------------------------------
     case("health.d: a check that passes lets the trial commit; its output reaches the journal",
          "boat-commit.sh",
@@ -1167,7 +1255,7 @@ TRIAL_CASES = [
     case("health.d: the checks never run past boat-commit.service's own time limit",
          "boat-commit.sh",
          dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
-              setup=health_d({"10-first": "echo '688.00 688.00' > @ROOT@/proc/uptime\n",
+              setup=health_d({"10-first": "echo '683.00 683.00' > @ROOT@/proc/uptime\n",
                               "20-slow": "sleep 30 </dev/null >/dev/null 2>&1\n"})),
          1, want_env=TRIAL_FAILED, says=["20-slow did not finish within 2 s"]),
     case("health: a unit listed as needing /data is required when /data is mounted",
@@ -1343,6 +1431,18 @@ esac
          "boat-install-firefox.sh",
          dict(cmdline="rauc.slot=B", env=env_with(), setup=install_firefox(installed=False, data=False)),
          1, args=["--install"], says=["is not mounted - on the A/B layout Firefox is installed there"]),
+    case("firefox: an upgrade on /data swaps the new tree in, and leaves no working copy",
+         "boat-install-firefox.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(), setup=firefox_upgrade()),
+         0, args=["--install"], check=firefox_version("150.0")),
+    case("firefox: a swap that fails puts the previous Firefox back",
+         "boat-install-firefox.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(), setup=firefox_upgrade(fail_swap=True)),
+         1, args=["--install"], says=["restored the previous Firefox"], check=firefox_version("149.0")),
+    case("firefox: a failed download leaves the installed Firefox alone, whatever an earlier run left",
+         "boat-install-firefox.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(), setup=firefox_upgrade(fail_download=True, stale_old=True)),
+         1, args=["--install"], not_says=["restored the previous Firefox"], check=firefox_version("149.0")),
 ]
 CASES += TRIAL_CASES
 

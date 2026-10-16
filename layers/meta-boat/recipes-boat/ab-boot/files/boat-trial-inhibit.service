@@ -12,12 +12,14 @@
 # Shutdown and reboot are not held off - the skipper must always be able to
 # turn the computer off. Instead, stopping this unit during a shutdown,
 # before the verdict, gives the trial its attempt back, once (boat-commit
-# --shutdown). After= the ESP and the guard, so it stops before either.
+# --shutdown). After= the ESP and the guard, so it stops before either, and
+# after /data, whose history and failed-versions the verdict is written to
+# (ordering only: a board without /data still holds off sleep).
 [Unit]
 Description=Hold off sleep until the A/B trial is committed
 Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md
 ConditionKernelCommandLine=boat.trial=1
-After=boot-efi.mount boat-grubenv-guard.service
+After=boot-efi.mount boat-grubenv-guard.service data.mount
 
 [Service]
 ExecStart=/usr/bin/systemd-inhibit --what=sleep --who=boat-commit --why="A/B update on trial until committed" --mode=block sleep infinity

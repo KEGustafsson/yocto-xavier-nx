@@ -246,7 +246,12 @@ fi
 
 TARBALL="firefox-${LATEST}.tar.xz"
 URL="${CDN}/${LATEST}/linux-aarch64/en-US/${TARBALL}"
-WORK="$(mktemp -d /var/tmp/boat-firefox.XXXXXX)"
+# The working copy lives beside the install, on the same file system, so the
+# swap below is a rename. Across file systems (the slot's /var/tmp to /data on
+# the A/B layout) `mv` copies, and a full disk leaves a half-copied tree.
+mkdir -p "$(dirname "$PREFIX")"
+WORK="$(mktemp -d "$(dirname "$PREFIX")/.boat-firefox.XXXXXX")"
+SWAP=none
 # Leave nothing behind on any exit path, including a failed download - and put
 # back the previous install if the swap below did not complete. Without that
 # rollback, a `mv` that fails (ENOSPC on the 16 GiB rootfs, or on a full
@@ -254,7 +259,10 @@ WORK="$(mktemp -d /var/tmp/boat-firefox.XXXXXX)"
 # unmentioned at <prefix>.old - which the next run then starts by deleting.
 cleanup() {
     rm -rf "$WORK"
-    if [ -d "${PREFIX}.old" ] && [ ! -d "$PREFIX" ]; then
+    if [ "$SWAP" = started ] && [ -d "${PREFIX}.old" ]; then
+        # This run moved the old install aside; whatever is at $PREFIX now is
+        # not a confirmed install.
+        rm -rf "$PREFIX"
         mv "${PREFIX}.old" "$PREFIX" 2>/dev/null \
             && echo "${SELF}: install failed - restored the previous Firefox" >&2
     fi
@@ -310,11 +318,15 @@ say "installing to ${PREFIX}"
 # missing rather than the destination's directory.
 mkdir -p "$(dirname "$PREFIX")"
 rm -rf "${PREFIX}.old"
-[ -d "$PREFIX" ] && mv "$PREFIX" "${PREFIX}.old"
+if [ -d "$PREFIX" ]; then
+    mv "$PREFIX" "${PREFIX}.old"
+    SWAP=started
+fi
 # If this fails, the EXIT trap puts ${PREFIX}.old back - which is why .old is
 # only removed AFTER the new tree is confirmed in place, not before the move.
 mv "${WORK}/firefox" "$PREFIX" || die "could not move the new Firefox into ${PREFIX}"
 [ -x "${PREFIX}/firefox" ] || die "${PREFIX}/firefox is not there after the move"
+SWAP=finished
 rm -rf "${PREFIX}.old"
 
 link_launcher

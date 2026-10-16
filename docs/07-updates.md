@@ -21,7 +21,8 @@ What it does **not** do:
 - **Update the boot files on the ESP.** GRUB, its `grub.cfg` and the kernel
   command line (`KERNEL_ARGS`) reach a board only with a USB reflash. A
   release that needs newer ones says so in `status` once it runs ("the
-  boot files on the ESP are version ...").
+  boot files on the ESP are version ..."); one that merely has newer ones
+  only notes it in `journalctl -u boat-grubenv-guard`.
 
 The design, and why it is shaped this way, is in
 [`plans/ab-os-updates.md`](plans/ab-os-updates.md).

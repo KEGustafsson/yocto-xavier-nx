@@ -32,9 +32,10 @@ set superusers="boat-locked"
 
 # The version of the boot files on the ESP - this file, the config built
 # into grubaa64.efi, GRUB and KERNEL_ARGS - passed to Linux as boat.esp=.
-# They change only with a USB reflash, never with an update. When a release
-# comes to depend on a change here, bump this together with BOAT_ESP in
-# boat-grubenv-guard, which raises an alert on a board whose ESP is older.
+# They change only with a USB reflash, never with an update. Bump this with
+# any change here, together with BOAT_ESP in boat-grubenv-guard; when a
+# release comes to depend on the change, raise BOAT_ESP_MIN there too, and
+# boards whose ESP is older then raise an alert.
 set boat_esp=1
 
 # The slots live on the drive GRUB itself was loaded from (the NVMe ESP), and

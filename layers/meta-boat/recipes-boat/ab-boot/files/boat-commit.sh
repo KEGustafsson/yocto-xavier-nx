@@ -185,7 +185,9 @@ tier2() {
             left=$(( hard_stop - $(uptime_s) ))
             [ "$left" -gt 0 ] || fail "operator check $check had no time left before boat-commit.service's 10-minute limit" || return 1
             limit="$BOAT_HEALTH_CHECK_TIMEOUT"
-            [ "$left" -lt "$limit" ] && limit="$left"
+            # timeout's -k gives a check 5 s more to die: those count too.
+            [ $(( left - 5 )) -lt "$limit" ] && limit=$(( left - 5 ))
+            [ "$limit" -gt 0 ] || fail "operator check $check had no time left before boat-commit.service's 10-minute limit" || return 1
             rc=0
             timeout -k 5 "$limit" "$check" </dev/null || rc=$?
             case "$rc" in
@@ -222,7 +224,7 @@ blacklist() {
 
 release() { cat /etc/boat-release 2>/dev/null || echo unknown; }
 
-# This boot's commit, written only once grubenv_set has succeeded. The
+# This boot's commit, written only once grubenv and grubenv.bak have it. The
 # deadline goes by it, not by COMMITTED=1 in grubenv: a write that failed
 # after its rename shows COMMITTED=1 that was never flushed, or that
 # grubenv.bak - GRUB's fallback - does not have.
@@ -244,14 +246,24 @@ commit_failed() {
 }
 
 commit() {
+    # Only as long as boat-commit.service still allows: past its limit the
+    # gate is killed with no verdict at all.
+    left=$(( unit_end - $(uptime_s) - 5 ))
+    [ "$left" -lt 1 ] && left=1
+    [ "$left" -lt "$BOAT_AB_LOCK_WAIT" ] && BOAT_AB_LOCK_WAIT="$left"
     lock || commit_failed "could not take the A/B lock"
     [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_OK")" = 1 ] \
         || die "slot $slot was failed meanwhile (the trial deadline) - not committing it"
     # BOAT_RETRY: the next trial gets its own shutdown retry.
     # shellcheck disable=SC2046 # no word, or one
-    grubenv_set "${slot}_OK=1" "${slot}_TRY=0" "${slot}_COMMITTED=1" BOAT_RETRY= $(stay_off) \
+    grubenv_replace "${slot}_OK=1" "${slot}_TRY=0" "${slot}_COMMITTED=1" BOAT_RETRY= $(stay_off) \
         && [ "$(grubenv_get "$BOAT_AB_GRUBENV" "${slot}_COMMITTED")" = 1 ] \
         || commit_failed "could not write grubenv"
+    # Unlike the wrapper's, this copy counts: grubenv.bak is what GRUB boots
+    # from if grubenv tears, and without the commit there it would take this
+    # slot for a trial again.
+    grubenv_sync_bak \
+        || commit_failed "could not copy the commit to grubenv.bak, GRUB's fallback copy"
     : > "$COMMITTED_MARK" || warn "could not write $COMMITTED_MARK - the trial deadline will fail this slot"
     systemctl stop boat-trial-deadline.timer 2>/dev/null || true
     systemctl stop boat-trial-inhibit.service 2>/dev/null || true
@@ -402,7 +414,12 @@ HEALTH_CONF=/etc/boat-update/health.conf
 # slot before an update carries the file into the next one.
 if [ -r "$HEALTH_CONF" ]; then
     # shellcheck source=/dev/null
-    if ( . "$HEALTH_CONF" ) >/dev/null 2>&1; then
+    # The subshell's own exit status is that of the file's last command (a
+    # final `[ -x ... ] && ...` that is false is fine), so it reports
+    # reaching the end instead. sh -n catches syntax errors, which a sourced
+    # file may otherwise run past.
+    if sh -n "$HEALTH_CONF" 2>/dev/null \
+        && [ "$( . "$HEALTH_CONF" >/dev/null 2>&1; echo ok )" = ok ]; then
         # shellcheck source=/dev/null
         . "$HEALTH_CONF"
     else
@@ -424,8 +441,10 @@ case "$BOAT_HEALTH_CHECK_TIMEOUT" in
                    BOAT_HEALTH_CHECK_TIMEOUT=60 ;;
 esac
 # Where boat-commit.service's TimeoutStartSec (10 minutes) would stop this
-# run, less time to write the verdict: no check may run past it.
-hard_stop=$(( $(uptime_s) + 590 ))
+# run, and, 10 s before it, where the checks stop: what is left is for the
+# verdict. commit() waits for the lock only as long as that allows.
+unit_end=$(( $(uptime_s) + 600 ))
+hard_stop=$(( unit_end - 10 ))
 
 lastresort=0
 booted_lastresort && lastresort=1
@@ -492,6 +511,7 @@ while :; do
         say "the board was asleep for about $slept s - the checks get that time back"
         deadline=$(( deadline + slept ))
         hard_stop=$(( hard_stop + slept ))
+        unit_end=$(( unit_end + slept ))
     fi
 done
 

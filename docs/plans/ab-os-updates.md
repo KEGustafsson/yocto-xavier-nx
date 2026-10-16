@@ -409,7 +409,9 @@ At build time, `grub.cfg` is generated from `KERNEL_ARGS` and checked with
 `grub-script-check`. The bundle recipe also fails if the rootfs lacks
 `/boot/Image` or `/boot/initrd`. `grub.cfg` passes `boat.esp=N`, the version
 of the ESP's boot files (5.9); `boat-grubenv-guard` raises an alert when it
-is older than the running release expects.
+is older than the running release needs, and only notes in the journal that
+it is older than the newest (a reflash empties `/data`, so it is never
+pressed on a board for an improvement alone).
 
 **Why committed slots get 2 attempts and trials get 1** (review M1):
 
@@ -837,7 +839,7 @@ The order matches RAUC 1.13's `install.c`:
 |---|---|---|
 | QSPI firmware (one usable chain) | section 3 | USB recovery (`05-flash-nvme.sh`) |
 | kernel DTB (`kernel-dtb`, read by UEFI) | option A trade-off | USB reflash. Phase 0 confirms GRUB passes UEFI's DTB through unchanged. |
-| ESP contents: L4TLauncher, GRUB, `grub.cfg` (with `KERNEL_ARGS`) | single copy | USB reflash (`grubenv` and `boot.cfg` are runtime-written). An update never changes them. `grub.cfg` passes their version as `boat.esp=N`; a release whose scripts need newer ones bumps it (with `BOAT_ESP` in `boat-grubenv-guard`), and the guard alerts on a board whose ESP is older. Nothing refuses such a bundle before it is installed yet. |
+| ESP contents: L4TLauncher, GRUB, `grub.cfg` (with `KERNEL_ARGS`) | single copy | USB reflash (`grubenv` and `boot.cfg` are runtime-written). An update never changes them. `grub.cfg` passes their version as `boat.esp=N`; every change bumps it (with `BOAT_ESP` in `boat-grubenv-guard`); a release whose scripts come to need the change also raises `BOAT_ESP_MIN`, and the guard alerts on a board whose ESP is older than that. Nothing refuses such a bundle before it is installed yet. |
 | `kernel`/`kernel_b` (`boot.img`) | last-resort fallback only | flash time |
 
 A BSP bump (new L4T) is therefore always a **full USB reflash**. The
