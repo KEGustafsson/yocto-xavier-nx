@@ -310,6 +310,11 @@ different file nobody has tried. Keep a copy of each bundle you publish:
 the next build of `boat-bundle` deletes it from the deploy directory.
 `--notes FILE` attaches release notes.
 
+To withdraw a release, publish the previous one again: a board that
+checks drops the download it holds, ready or not. Deleting `index.p7`
+withdraws nothing - boards keep what they downloaded, and show the failed
+check as an alert.
+
 **A BSP bump** (a release on a new L4T) cannot go over the air. A board
 running another L4T than a newer release's is told "reflash at the dock"
 instead of downloading it - with `--reflash` or without - and that is not

@@ -973,9 +973,16 @@ def check_channel(conf, state, quiet, stamp):
     state["notes"] = idx["notes"]
     if offer:
         prev = state.get("offer") or {}
-        if prev.get("bundle") != offer["bundle"]:
+        if (prev.get("bundle"), prev.get("sha256")) != (offer["bundle"], offer["sha256"]):
             # Content-addressed names: a different name is a different file.
+            # So is the same name with another SHA-256 (a channel not
+            # published with publish-update.sh): its old bytes are no part
+            # of the new file.
             discard_downloads(keep=None)
+        if (state.get("ready") or {}).get("sha256") != offer["sha256"]:
+            # Downloaded for an earlier offer: not the file this one names.
+            # Kept, it would read as ready and stop the new download.
+            state.pop("ready", None)
         state["offer"] = {k: offer[k] for k in ("version", "bundle", "size", "sha256", "l4t", "channel")}
     else:
         # Nothing to fetch: a bundle downloaded, or half downloaded, for an
@@ -1340,6 +1347,14 @@ def resolve_bundle(state, bundle):
         bundle = ready_to_install(state)
         if not bundle:
             raise UpdateError("no bundle is ready - 'boat-update check' and 'download' first, or name one")
+        failed = state.get("last_error") or {}
+        if failed.get("stage") == "check":
+            # Only a signed index can withdraw an offer: a missing index
+            # (404) or a stale one leaves the download in place. Whoever
+            # installs it is told the channel's word on it is not current.
+            warn("the last check failed (%s) - the channel may have withdrawn %s since it was "
+                 "downloaded; 'boat-update check' first if in doubt"
+                 % (failed.get("message", "?"), state["ready"]["version"]))
     bundle = os.path.abspath(bundle)
     if not os.path.isfile(bundle):
         raise UpdateError("%s does not exist" % bundle)

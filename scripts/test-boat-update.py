@@ -25,8 +25,10 @@ systemd-run, systemd-inhibit, journalctl) is stubbed too, so the install
 wrapper, the timer's auto run, rollback and the locking are run as well. A misbehaving host gets
 its own cases: an endless chunked index or bundle (cut off at the signed
 size as it arrives - kirkstone's curl 7.82 would not), and a server that
-ignores Range. So do give-ups, per-channel serials, a stale ready bundle and
-a trial that died before boat-commit, and that a refused check or
+ignores Range. So do give-ups, per-channel serials, a stale ready bundle,
+what a READY bundle becomes when the channel withdraws it, loses or serves
+a stale index, rebuilds its version or moves past a withdrawal the board
+missed, and a trial that died before boat-commit, and that a refused check or
 download shows in status as an alert until it works again. So do the
 guards on what the board accepts (another compatible or L4T, a CA only in
 the system's trust store, an expired index certificate), the metered rules
@@ -1120,6 +1122,120 @@ esac
         check("an offer withdrawn by the next index leaves no download behind",
               offer is None and not os.listdir(bu.downloads_dir()) and "ready" not in bu.load_state(),
               "%s %s" % (os.listdir(bu.downloads_dir()), bu.load_state()))
+
+        # --- fleet operations, seen from a board with a READY bundle ---------
+        # On a channel of its own, so its serials leave stable's alone. Each
+        # case starts from a bundle downloaded and verified (READY), then
+        # the channel changes under it the ways an operator changes it.
+        fleet = os.path.join(www, "boat-xavier-nx", "fleet")
+        os.makedirs(fleet)
+        write(board + "/data/boat-update/channel.conf", "BOAT_UPDATE_CHANNEL=fleet\n")
+        info_version = open(board + "/rauc-info-version").read()
+
+        def fleet_bundle(version, name=None):
+            data = os.urandom(64 * 1024)
+            s = hashlib.sha256(data).hexdigest()
+            name = name or "boat-bundle-%s-%s.raucb" % (version, s[:12])
+            with open(os.path.join(fleet, name), "wb") as f:
+                f.write(data)
+            return dict(version=version, bundle=name, size=len(data), sha256=s)
+
+        def fleet_publish(serial, b):
+            publish(serial, channel="fleet", where="fleet", **b)
+
+        def make_ready(serial, b):
+            fleet_publish(serial, b)
+            write(board + "/rauc-info-version", b["version"])
+            offer, err = run_check()
+            r = bu.do_download(bu.load_conf(), bu.load_state(), windows=2) if offer else False
+            return r and bu.ready_to_install(bu.load_state())
+
+        def install_says():
+            said = io.StringIO()
+            with contextlib.redirect_stderr(said):
+                got = bu.resolve_bundle(bu.load_state(), None)
+            return got, said.getvalue()
+
+        v2 = fleet_bundle("2.0.0")
+        got = make_ready(1, v2)
+        check("fleet: a board downloads 2.0.0 to READY", got and got.endswith(v2["bundle"]), str(bu.load_state()))
+        # (a) withdrawn: the next signed index offers an older release.
+        fleet_publish(2, fleet_bundle("0.9.0"))
+        offer, err = run_check()
+        st = bu.load_state()
+        check("fleet: a READY bundle the channel withdraws (an older release published over it) is "
+              "deleted and can no longer be installed",
+              offer is None and err is None and "ready" not in st and "offer" not in st
+              and not os.listdir(bu.downloads_dir()) and bu.ready_to_install(st) is None
+              and "READY" not in status(), "%s %s %s" % (err, os.listdir(bu.downloads_dir()), st))
+        # (a) the index taken away (404), or a cache serving an older one:
+        # neither is signed, so neither withdraws anything. The download
+        # stays, the failed check is an alert, and install says so.
+        got = make_ready(3, v2)
+        stale_index = open(os.path.join(fleet, "index.p7"), "rb").read()
+        os.unlink(os.path.join(fleet, "index.p7"))
+        offer, err = run_check()
+        got404, said = install_says()
+        out = status()
+        check("fleet: with the index removed (404) the READY bundle stays, the check is an alert, and "
+              "install warns that the channel may have withdrawn it",
+              got and err and "HTTP 404" in err and got404 == got
+              and re.search(r"ALERT +the last check failed, .*HTTP 404", out) and "READY" in out
+              and "may have withdrawn 2.0.0" in said, "%s / %s / %s" % (err, said, out))
+        with open(os.path.join(fleet, "index.p7"), "wb") as f:
+            f.write(stale_index)
+        offer, err = run_check()
+        _, said = install_says()
+        check("fleet: once the same index is served again the alert and the warning go",
+              offer is not None and err is None and "ALERT" not in status() and said == "",
+              "%s / %s" % (err, said))
+        fleet_publish(2, fleet_bundle("0.9.0"))
+        offer, err = run_check()
+        _, said = install_says()
+        check("fleet: an older index served after a newer one (a stale cache) is refused as a replay; "
+              "READY stays, with the warning at install",
+              offer is None and err and "replayed" in err and bu.ready_to_install(bu.load_state()) == got
+              and "may have withdrawn" in said, "%s / %s" % (err, said))
+        # (b) the same version published again with other bytes (a rebuild):
+        # another name, so the old download goes, and the new file is
+        # fetched, not installed from the old one.
+        v2b = fleet_bundle("2.0.0")
+        fleet_publish(4, v2b)
+        offer, err = run_check()
+        st = bu.load_state()
+        check("fleet: 2.0.0 republished with another SHA-256: the old download is deleted, not installed",
+              offer is not None and offer["sha256"] == v2b["sha256"] and "ready" not in st
+              and not os.listdir(bu.downloads_dir()) and bu.ready_to_install(st) is None,
+              "%s %s %s" % (err, os.listdir(bu.downloads_dir()), st))
+        r = bu.do_download(bu.load_conf(), bu.load_state(), windows=2)
+        check("fleet: ... and the new file is downloaded and READY in its place",
+              r is True and bu.load_state()["ready"]["sha256"] == v2b["sha256"]
+              and bu.ready_to_install(bu.load_state()).endswith(v2b["bundle"]), str(bu.load_state()))
+        # The same name with other bytes - not content-addressed, as a
+        # channel published by hand might be. Its old download must not
+        # read as ready for the new offer, or it is never fetched.
+        v2c = fleet_bundle("2.0.0", name=v2b["bundle"])
+        fleet_publish(5, v2c)
+        offer, err = run_check()
+        r = bu.do_download(bu.load_conf(), bu.load_state(), windows=2)
+        fleet_file = os.path.join(bu.downloads_dir(), v2c["bundle"])
+        check("fleet: the same bundle name republished with another SHA-256 is downloaded again",
+              offer is not None and r is True and bu.load_state()["ready"]["sha256"] == v2c["sha256"]
+              and bu.sha256_file(fleet_file) == v2c["sha256"], "%s %s" % (err, bu.load_state()))
+        # (c) a board that missed the withdrawal (it was offline) sees the
+        # next release: the withdrawn download goes, the new one is offered.
+        fleet_publish(6, fleet_bundle("0.9.0"))            # the board never sees this
+        v21 = fleet_bundle("2.1.0")
+        fleet_publish(7, v21)
+        offer, err = run_check()
+        st = bu.load_state()
+        check("fleet: a board that missed a withdrawal and then sees a newer release drops the "
+              "withdrawn download and offers the new one",
+              offer is not None and offer["version"] == "2.1.0" and "ready" not in st
+              and not os.listdir(bu.downloads_dir()) and bu.ready_to_install(st) is None,
+              "%s %s %s" % (err, os.listdir(bu.downloads_dir()), st))
+        os.unlink(board + "/data/boat-update/channel.conf")
+        write(board + "/rauc-info-version", info_version)
 
         # --- the client key ----------------------------------------------------
         publish(17, version="1.2.0")

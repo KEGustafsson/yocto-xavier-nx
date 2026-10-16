@@ -1067,7 +1067,12 @@ headers (review M3).
     - A complete download is recorded `ready` after RAUC has checked it; one
       completed but never recorded (a power cut in between) is picked up
       next time, not fetched again. An offer the channel withdraws takes
-      its download, or partial download, with it.
+      its download, or partial download, with it; so does a new offer of
+      another file (another name, or the same name with another SHA-256).
+      Only a signed index withdraws: an index that is gone (404) or stale
+      leaves a ready download in place, as an alert, and `install` warns
+      that the channel may have withdrawn it. A board that never reaches
+      the channel again installs what it has.
     - It keeps a `/data` free-space floor (bundle size + 2 GiB, because
       Docker shares `/data`) and re-checks it every window.
     - A bundle is **re-fetched from scratch at most 3 times**, then
@@ -1581,7 +1586,9 @@ pieces also run off-target:
   The OTA `check`/`download` logic also runs against a local Range-capable
   HTTP server, with cut-offs injected mid-transfer and a tampered index.
   `scripts/test-boat-storage.py` runs `boat-storage` against a fake board
-  and checks every command it would run on SWAP and DATA.
+  and checks every command it would run on SWAP and DATA, and the start
+  order of the storage units (and RAUC's drop-in) as the recipe installs
+  them.
   `scripts/test-ab-initramfs.py` runs the initramfs's root selection, and
   `scripts/test-ab-layout.py` the layout generator on a template in
   NVIDIA's shape (read back through meta-tegra's `nvflashxmlparse` when
