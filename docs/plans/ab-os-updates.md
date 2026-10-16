@@ -889,7 +889,7 @@ expose a new index next to an old signature. Fields:
 | `bundle` | a bare file name: no `/`, no `..`, no scheme |
 | `size`, `sha256` | transport integrity of the download |
 | `published` | UTC. Shown in `status`, so a frozen channel is visible. |
-| `requires_reflash` | this release is a BSP bump, which cannot ship as a bundle (5.9). Only evaluated for a *newer* version. |
+| `requires_reflash` | this release is a BSP bump, which cannot ship as a bundle (5.9). Informational: a board on another L4T is told to reflash for any *newer* release on another L4T, flagged or not; a board already on the bundle's L4T takes it over the air. |
 | `notes` | display only. Size-capped, control characters stripped. |
 
 **Signing uses its own key** (review M1 on v3). An *index-signing* leaf
@@ -985,13 +985,17 @@ headers (review M3).
        slot's `slot_status.bundle.version`; plain `--output-format=json`
        leaves `slot_status` out. A slot that was flashed rather than
        installed has no bundle version, so for slot A as flashed the check
-       reads the `/etc/boat-release` inside it (mounted read-only) - the
-       same `BOAT_RELEASE` string a bundle carries;
+       reads the `/etc/boat-release` inside it with `debugfs`, not through
+       a mount (a mount left behind by a stop or a busy mount point would
+       make RAUC refuse that slot) - the same `BOAT_RELEASE` string a
+       bundle carries;
      - `version` is not on the board's list of versions that **failed a
        trial here**.
   5. **Then the L4T check.** `l4t` must match the running
-     `/etc/nv_tegra_release`. If it doesn't and `requires_reflash` is set,
-     report "BSP bump: reflash at the dock".
+     `/etc/nv_tegra_release`. If it doesn't, report "BSP bump: reflash at
+     the dock" - with `requires_reflash` or without, and not as an alert:
+     while a fleet is reflashed boat by boat, every later release on the
+     new L4T reaches the boats not yet reflashed this way.
   6. **Record** the accepted `serial`, plus the result and the channel's
      `published` date, for `status`.
 - **`download`** writes to
@@ -1025,7 +1029,10 @@ headers (review M3).
       **given up** (by its SHA-256) until the channel publishes a new
       index. A transfer fault is never recorded as a failed trial.
   - **Redirects:** none (`--max-redirs 0`). If the host redirects, the URL
-    in `channel.conf` must name the final location.
+    in `channel.conf` must name the final location. A redirect, or any
+    answer but the bundle (a 404, a 403), is an alert, and nothing of it
+    is kept in the `.part`; a 5xx, 408 or 429 counts as a window without
+    progress.
   - **Finish:**
     - At `size` it verifies `sha256`, renames the file, and runs `rauc info`
       on it (a local signature check), plus the `compatible` comparison,
@@ -1051,8 +1058,11 @@ headers (review M3).
 - Also triggered from the system-sleep `post` hook and from a
   NetworkManager dispatcher script on `up`/`connectivity-change`.
 - The service rate-limits itself with a stamp file on `/data`, so the extra
-  triggers cost nothing. Only a check that got past the gates stamps it,
-  and a stamp from the future does not count; a check the clock gate
+  triggers cost nothing. Only a check the channel answered stamps it (one
+  the gates refused, or that got no answer at all, did nothing), and a
+  stamp from the future does not count. Within the window an unfinished
+  download (policy `download`) resumes without a check; nothing else
+  runs. A check the clock gate
   refused runs again two minutes later (a transient timer), by when chrony
   has normally set the clock.
 - A command a person types does not give up on the timer's run, which can
@@ -1070,7 +1080,7 @@ headers (review M3).
 
 | knob | default | meaning |
 |---|---|---|
-| `BOAT_UPDATE_URL` | image default | channel base URL (final location; no redirects) |
+| `BOAT_UPDATE_URL` | empty, or the build's `BOAT_UPDATE_URL` | channel base URL (final location; no redirects; no user name or password) |
 | `BOAT_UPDATE_CHANNEL` | `stable` | which channel to follow |
 | `BOAT_UPDATE_AUTO` | `download` | `off` / `check` (notify only) / `download` (also fetch in background). **Never installs or reboots** (D12). |
 | `BOAT_UPDATE_METERED` | `no` | download over a metered link? (D14) |
@@ -1086,18 +1096,25 @@ until the bundle is ready or the offer goes away (tests 34, 38).
 
 **Metered detection** (review m1):
 
-- The board takes the default-route device's own NetworkManager `Metered`
-  property and binds curl to that device (`--interface`), so the bytes go
+- The board takes the device the kernel routes the channel's address
+  through (`ip route get`, so a VPN's split-tunnel route, a policy-routed
+  WireGuard default and IPv6 count - not only the main table's default),
+  uses that device's own NetworkManager `Metered` property, and binds curl
+  and the relay to it (`--interface`, `SO_BINDTODEVICE`), so the bytes go
   where the decision was made.
 - `yes`, `guess-yes` and `unknown` count as metered. `guess-no` counts as
   unmetered.
-- NetworkManager guesses `yes` for ModemManager (cellular) links. **A 4G
-  router reached over Ethernet or Wi-Fi reads `guess-no`**, so docs/07
-  tells you to mark that connection with
-  `nmcli connection modify <c> connection.metered yes`.
-- A VPN (WireGuard) default route hides the underlying link. With one
-  active, the board takes the conservative answer: metered if **any**
-  active device is metered.
+- NetworkManager guesses `yes` only for its own GSM/CDMA connections, and
+  this image's NetworkManager is built without the ModemManager plugin, so
+  it has none: a USB modem or a phone tethered over USB is Ethernet to it,
+  `guess-no`. The board counts a device on a USB modem or tethering driver
+  (`cdc_ether`, `cdc_ncm`, `qmi_wwan`, `rndis_host`, `ipheth`, ...) as
+  metered unless its connection says `metered no`. **A 4G router reached
+  over Ethernet or Wi-Fi reads `guess-no`**, so docs/07 tells you to mark
+  that connection with `nmcli connection modify <c> connection.metered yes`.
+- A VPN hides the underlying link. When the channel's route is a VPN, the
+  board takes the conservative answer: metered if **any** active device is
+  metered.
 - While metered and not allowed, `check` still runs (it is tiny), and
   `status` says "update X available, waiting for an unmetered link".
 
@@ -1130,9 +1147,14 @@ until the bundle is ready or the offer goes away (tests 34, 38).
     a host-networked container can run as root, and no container's process
     is in that cgroup, whatever namespaces it shares with the host. The URL
     also carries a token made for this stream. It serves only ranges up to
-    64 MiB that end after they start, a few at a time; a request that fails
-    any check gets no relay slot. A VPN default route is refused without
-    `--allow-metered`: the tunnel follows whatever link carries it.
+    64 MiB that end after they start, a few at a time. A connection from
+    anyone else is closed as it is accepted, before it gets a thread; a
+    refused request closes its connection, an idle one is closed after a
+    minute, and only so many are held open - so no local process can starve
+    RAUC of the relay. A VPN route to the channel is refused without
+    `--allow-metered`: the tunnel follows whatever link carries it. With
+    `server-ca.pem`, the relay trusts what curl trusts: an intermediate CA
+    in it is a trust anchor.
   - The bundle URL is the one from the verified index, on the channel the
     offer was checked on. A preflight request for the first byte refuses a
     redirecting or Range-less channel before RAUC marks the slot
@@ -1557,7 +1579,7 @@ All of them run from `lint.sh`, so they cover every PR.
 | 33 | OTA: truncated or corrupted download | SHA-256/`rauc info` mismatch → discarded and re-fetched; never offered for install |
 | 34 | OTA: index with a bad signature, signed by the bench CA on a boat image, or signed by a public CA certificate | ignored before any download; alert in `status` ("the last check failed"), cleared by the next good check |
 | 35 | OTA: index offers an older version, the same version, the version already in the other slot, a version that failed its trial here, another `compatible`, or another L4T | nothing downloaded; the L4T case reports "reflash needed" only for a newer version |
-| 36 | OTA: cellular (metered) link, default policy | check only; download waits for an unmetered link; moving to cellular mid-download pauses at the next window |
+| 36 | OTA: cellular (metered) link - a USB modem, a tethered phone, or a router connection marked metered - default policy | check only; download waits for an unmetered link; moving to cellular mid-download pauses at the next window |
 | 37 | OTA: clock at 1970 before NTP | check deferred, no TLS-error spam; runs after sync |
 | 38 | OTA: `/data` too full, or not mounted | download refused, with the reason as an alert in `status`; rootfs never used |
 | 39 | OTA: client-certificate channel | works for check, download and stream; the certificate is never in the journal or `ps`; still works after an update and after a rollback (it lives on `/data`) |

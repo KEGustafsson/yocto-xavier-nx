@@ -18,6 +18,13 @@ SRC_URI = "\
 
 S = "${WORKDIR}"
 
+# The fleet's update channel, built into /etc/boat-update/channel.conf, so a
+# board is back on it after a USB reflash has emptied /data (the operator's
+# /data/boat-update/channel.conf still overrides it). Set them in local.conf
+# or the kas configuration; an empty URL ships no channel.
+BOAT_UPDATE_URL ??= ""
+BOAT_UPDATE_CHANNEL ??= "stable"
+
 inherit allarch systemd
 
 do_configure[noexec] = "1"
@@ -35,8 +42,30 @@ do_install() {
         bbfatal "boat-update still has a placeholder"
     fi
 
+    # A URL with no user name or password in it (they would be readable by
+    # every local user), and nothing sed or the shell would read as syntax.
+    case "${BOAT_UPDATE_URL}" in
+        ""|https://*) ;;
+        *) bbfatal "BOAT_UPDATE_URL must be an https:// URL or empty, got '${BOAT_UPDATE_URL}'" ;;
+    esac
+    case "${BOAT_UPDATE_URL}" in
+        *[!A-Za-z0-9._~:/%-]*) bbfatal "BOAT_UPDATE_URL may hold only letters, digits and ._~:/%- (no user name or password), got '${BOAT_UPDATE_URL}'" ;;
+    esac
+    case "${BOAT_UPDATE_CHANNEL}" in
+        [a-z]*) ;;
+        *) bbfatal "BOAT_UPDATE_CHANNEL must be a channel name like stable, got '${BOAT_UPDATE_CHANNEL}'" ;;
+    esac
+    case "${BOAT_UPDATE_CHANNEL}" in
+        *[!a-z0-9-]*) bbfatal "BOAT_UPDATE_CHANNEL must be a channel name like stable, got '${BOAT_UPDATE_CHANNEL}'" ;;
+    esac
     install -d ${D}${sysconfdir}/boat-update
-    install -m 0644 ${WORKDIR}/channel.conf ${D}${sysconfdir}/boat-update/channel.conf
+    sed -e 's|@BOAT_UPDATE_URL@|${BOAT_UPDATE_URL}|' \
+        -e 's|@BOAT_UPDATE_CHANNEL@|${BOAT_UPDATE_CHANNEL}|' \
+        ${WORKDIR}/channel.conf > ${D}${sysconfdir}/boat-update/channel.conf
+    chmod 0644 ${D}${sysconfdir}/boat-update/channel.conf
+    if grep -q '@[A-Z_]*@' ${D}${sysconfdir}/boat-update/channel.conf; then
+        bbfatal "channel.conf still has a placeholder"
+    fi
 
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${WORKDIR}/boat-update-check.service ${WORKDIR}/boat-update-check.timer \
@@ -47,7 +76,8 @@ do_install() {
     install -d ${D}${systemd_unitdir}/system-sleep
     install -m 0755 ${WORKDIR}/boat-update-sleep ${D}${systemd_unitdir}/system-sleep/boat-update
 }
-do_install[vardeps] += "BOAT_AB_DISK BOAT_AB_PARTNUM_APP_A BOAT_AB_PARTNUM_APP_B BOAT_AB_PARTNUM_DATA"
+do_install[vardeps] += "BOAT_AB_DISK BOAT_AB_PARTNUM_APP_A BOAT_AB_PARTNUM_APP_B BOAT_AB_PARTNUM_DATA \
+                        BOAT_UPDATE_URL BOAT_UPDATE_CHANNEL"
 
 SYSTEMD_SERVICE:${PN} = "boat-update-check.timer"
 
@@ -64,6 +94,10 @@ FILES:${PN} = "\
 # python3-netserver (socketserver) and python3-html: http.server, for the
 # stream relay. boat-image has them only through docker-compose's requests;
 # boat-update ships in every A/B image.
+# e2fsprogs: debugfs, which reads a flashed slot's release without mounting
+# it. systemd-extra-utils: systemd-run (the install unit, the clock retry)
+# and systemd-inhibit (sleep and shutdown held off during an install) -
+# otherwise only a recommendation of systemd's.
 RDEPENDS:${PN} = "\
     python3-core \
     python3-json \
@@ -78,11 +112,14 @@ RDEPENDS:${PN} = "\
     rauc \
     grub-editenv \
     util-linux-blkid \
-    util-linux-mount \
+    e2fsprogs \
+    systemd-extra-utils \
     iproute2-ip \
     boat-ab-boot \
 "
 # nmcli: the metered check. Without NetworkManager every link counts as
 # metered, which is the safe answer.
-# chrony: the clock gate asks chronyc; without it, timedatectl.
-RRECOMMENDS:${PN} = "networkmanager-nmcli chrony"
+# chrony and chronyc (a package of its own, which chrony does not pull in):
+# the clock gate asks chronyc. Without it, timedatectl's NTPSynchronized,
+# which chrony sets only with 'rtcsync' in chrony.conf (the default).
+RRECOMMENDS:${PN} = "networkmanager-nmcli chrony chronyc"

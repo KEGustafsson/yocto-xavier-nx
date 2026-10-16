@@ -14,8 +14,13 @@ can run off-target:
 | harness | what it proves | matrix rows it covers off-target |
 |---|---|---|
 | `scripts/test-grub-ab.py` | the shipped `grub.cfg` in real GRUB (`grub-emu`): attempt counting, trial vs committed limits, torn/missing `grubenv`, an ESP that refuses writes, a failed kernel load | 10, 11, 12, 21 (GRUB side) |
-| `scripts/test-ab-scripts.py` | `boat-grubenv-guard`, `boat-commit` and RAUC's pre/post-install handlers against a fake board | 9, 13-16 and 18 (decision side), 20, 21, 50 |
-| `scripts/test-boat-update.py` | `boat-update` against a real local HTTPS channel: signatures, replay, channel, metered link, interrupted and corrupted downloads, streaming through the relay (a later redirect, wrong or short ranges, the bound link) | 31-36, 38, 42, 43, 46, 47 (logic) |
+| `scripts/test-ab-scripts.py` | `boat-grubenv-guard`, `boat-commit` and RAUC's pre/post-install handlers against a fake board | 9, 13-16 and 18 (decision side), 20, 21, 50 (install side) |
+| `scripts/test-boat-update.py` | `boat-update` against a real local HTTPS channel: signatures (another CA, one only in the system's trust store, an expired index certificate), replay, channel, `compatible`, another L4T, metered links (a VPN, a USB modem), interrupted and corrupted downloads, redirects and 404s, the rate limit, the clock gate, the trial gates, rollback, the install wrapper, streaming through the relay (a later redirect, wrong or short ranges, the bound link, other local processes) | 31-39, 42, 43, 45-51 (logic; 50 on the check and download side) |
+| `scripts/test-ab-initramfs.py` | the initramfs's root selection and its resets | 14 (decision side), 24 (root by GPT name) |
+| `scripts/test-boat-storage.py` | `boat-storage`: SWAP, DATA's check and mount, what is copied onto DATA | 20 (`/data` side) |
+| `scripts/test-ab-layout.py` | the layout generator: the slots' and DATA's partition numbers | 24 (partition numbers) |
+| `scripts/test-bundle-hook.py` | the bundle's carry-over hook between two fake slots | 29 (carry-over side) |
+| `scripts/test-publish-update.py` | `publish-update.sh`: what is signed and uploaded, and what is refused | 44 (bundle first, index last), 2 (a bench bundle never on a fleet channel) |
 
 None of that replaces the bench: firmware, the watchdogs, power cuts and RAUC
 itself only behave like the real thing on the real thing.
