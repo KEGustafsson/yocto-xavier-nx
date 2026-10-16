@@ -272,8 +272,13 @@ boot this kernel correctly.
     filesystem, a stack overflow - ends in the firmware's
     `DefaultExceptionHandler`, which dead-loops with interrupts masked, so
     the event never runs. Only the Tegra hardware WDT, if it runs that early
-    (Phase 0 runbook 2.3), or a power cycle ends that; the attempt was
-    counted before GRUB loaded the slot, so the next boot falls back (5.5).
+    (Phase 0 runbook 2.3), or a power cycle ends that. A crash while GRUB
+    loads the slot comes after `grub.cfg` has saved the slot's `_TRY` count,
+    so the next boot falls back (5.5). A crash before that save - in GRUB's
+    core or modules, or reading `grub.cfg` and `grubenv` on the ESP both
+    slots share - or with a `grubenv` the save could not write, is not
+    counted and repeats on every boot whichever slot is chosen: a reflash
+    at the dock.
   - The UEFI spec has `ExitBootServices` disarm the watchdog, so it stops
     the moment the kernel takes over. There is no menu (`timeout=0`), so it
     can never fire while someone is reading the screen.
@@ -624,7 +629,7 @@ in a reset. The exception is a deliberate stay on a committed slot.
 | `grub.cfg` missing or truncated | the config built into `grubaa64.efi` runs it, and resets when it returns (5.1) | `grub-efi` bbappend: boat's `cfg` |
 | kernel / initrd load error, `boot` returns | guarded loads → mark slot, `reboot`; when the mark cannot be saved, a hand-over within the boot (5.3) | grub.cfg design + build checks |
 | GRUB itself hangs (a loop, a stall, a disk read that never returns) | **the UEFI watchdog, kept armed through GRUB** (300 s; 5.1). The Tegra hardware WDT is a second layer if Phase 0 shows it runs this early. | `grub-efi` bbappend: re-arm instead of cancel. **Phase 1 exit test.** If firmware ignores the re-arm, this row narrows to "power cycle to recover" and goal 4 says so. |
-| GRUB itself crashes (a synchronous exception: the firmware's handler dead-loops with interrupts masked) | **not the UEFI watchdog**, a timer event that never runs then (5.1). Only the Tegra hardware WDT, if Phase 0 (runbook 2.3) shows it runs this early; otherwise a power cycle. The attempt was already counted, so that boot falls back | none possible in GRUB; Phase 1 records what a GRUB exception does on this UEFI |
+| GRUB itself crashes (a synchronous exception: the firmware's handler dead-loops with interrupts masked) | **not the UEFI watchdog**, a timer event that never runs then (5.1). Only the Tegra hardware WDT, if Phase 0 (runbook 2.3) shows it runs this early; otherwise a power cycle. A crash loading the slot comes after its attempt was counted, so that boot falls back; one before the count was saved (GRUB itself, the shared ESP, an unwritable `grubenv`) repeats whichever slot: a reflash | none possible in GRUB; Phase 1 records what a GRUB exception does on this UEFI |
 | kernel panic | `panic=10` | cmdline |
 | kernel hard hang | Tegra WDT running from early kernel | Phase 0: armed before userspace? If not, enable it at probe |
 | initramfs can't mount root | today: **hangs forever** | `tegra-minimal-init` bbappend: only the two slot partitions, GPT name checked, bounded retries, then `reboot -f` (`boat.stay=1` keeps the shell) |
@@ -1800,7 +1805,7 @@ safe in-place conversion, and the plan does not attempt one.
 |---|---|---|
 | GRUB on this UEFI mishandles the DTB, initrd or cmdline (SC7, display) | M / H | Phase 0 step 2 first; option C is the fallback |
 | a GRUB-stage hang with no watchdog running | L / H | GRUB patched to keep the UEFI watchdog armed (5.1); Phase 1 exit test; Tegra WDT as a second layer (Phase 0) |
-| a GRUB crash (an exception) with no watchdog running | L / H | the UEFI watchdog cannot fire then (5.1, 5.5): only the Tegra WDT, if Phase 0 shows it runs this early; otherwise a power cycle, after which the counted attempt falls back |
+| a GRUB crash (an exception) with no watchdog running | L / H | the UEFI watchdog cannot fire then (5.1, 5.5): only the Tegra WDT, if Phase 0 shows it runs this early; otherwise a power cycle, after which a counted attempt falls back; a crash before `grub.cfg` saves the count repeats on both slots: a reflash |
 | Tegra WDT not running in the early kernel | M / M | Phase 0 step 3; enable at probe; otherwise document power-cycle-to-recover for a kernel hang before systemd starts |
 | NVIDIA sticky recovery reached (both slots fail, or a shared fault that slipped past `nofail`) | L / H | the 2+1 attempt budget (5.3); `nofail` shared mounts; a USB reflash today, a UEFI-menu reset once Phase 0 finds it; test 28 |
 | `nvbootctrl verify` doesn't reset the count when booted from `APP_b` | M / H | Phase 1 exit criterion; if it fails, `boat-commit` resets it another way, or the budget becomes 1+1 |
@@ -2238,7 +2243,7 @@ The documentation findings:
 | a good release that failed its trial only through power cuts was never offered again, and nothing said how to try it again | docs/07 and docs/06: install the bundle by file, which does not consult the failed list, or delete its line from `failed-versions` and check again; the list still never shrinks by itself |
 | only root's `.ssh` is carried, so a `docker login` as root (which `boat-compose` pulls with), a `.gitconfig` and scripts in `/home/root` were lost at each install, while docs/07 read as if root's home were kept | docs/07, docs/05 and 5.8 say what is carried and to log in to a registry again after an update (5.8) |
 | a rollback or a GRUB fallback silently brings back credentials revoked since the other slot was installed: a password, a root SSH key, the sleep key | `boat-update rollback` warns before it reboots, and docs/07, 5.8 and test 29 say to revoke them again; a fallback stays silent, and keeping them on `/data` would lose root's SSH when DATA breaks (5.8; test 29) |
-| the UEFI watchdog was said to cover every GRUB failure, but it is a firmware timer event that cannot fire once GRUB crashes into the firmware's exception handler; the patch also said the kernel disarms it | 5.1, 5.5 (a row of its own), section 9, docs/07 and runbook 2.3 say a crash needs the Tegra WDT or a power cycle, after which the counted attempt falls back; the patch says the firmware's `ExitBootServices` disarms it (5.1, 5.5) |
+| the UEFI watchdog was said to cover every GRUB failure, but it is a firmware timer event that cannot fire once GRUB crashes into the firmware's exception handler; the patch also said the kernel disarms it | 5.1, 5.5 (a row of its own), section 9, docs/07 and runbook 2.3 say a crash needs the Tegra WDT or a power cycle, after which an attempt GRUB had counted falls back, and one before the count was saved needs a reflash (CodeRabbit); the patch says the firmware's `ExitBootServices` disarms it (5.1, 5.5) |
 | plan statements the code does not match: Tier 1's `rauc status` on every boot, a read-only `status`, a clock retry after two minutes, a stall threshold kept below the rate limit | 5.4, 5.10 and Phase 5 say what the code does: `rauc status` only with DATA, root's `status` records a trial outcome, 2 to 32 minutes, a fixed 1 KiB/s (5.4, 5.10) |
 | section 8's migration backed up a `/root/.ssh` that does not exist, restored slot files its own round trip then dropped, gave no Docker copy flags, and asked for an over-the-air round trip one release cannot make | it backs up `/home`, restores only what survives an update, gives the Docker flags, and proves the round trip by file or with two newer releases on a channel of the board's own (8; test 29) |
 | nothing steps a long-offline board through releases or records which release last wrote `/data`, and what every bundle must keep for the oldest release in the field was written down nowhere | 5.10 "Forward compatibility" and docs/07 list those interfaces and the stepping-stone or reflash procedure; a `min_from` index field and a migration framework are left out - a release already in the field would ignore the field (5.10) |

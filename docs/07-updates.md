@@ -60,8 +60,12 @@ UEFI -> L4TLauncher -> GRUB (NVMe ESP) -> kernel + initrd of slot A or B
   no reset yet: a GRUB that *crashes* (a fault, say on a damaged `/boot`)
   stops in the firmware's exception handler, where the UEFI watchdog never
   fires. Only the hardware watchdog, if it already runs then (the Phase 0
-  runbook finds out), or a power cycle ends it; GRUB counted the attempt
-  before loading the slot, so the next boot falls back.
+  runbook finds out), or a power cycle ends it. A crash while GRUB loads the
+  slot's kernel comes after GRUB has counted the attempt in `grubenv`, so
+  the next boot falls back. One that comes before that count is saved - in
+  GRUB itself or its files on the ESP, which both slots share, or with a
+  `grubenv` GRUB cannot write - comes back on every boot whatever the slot:
+  that board needs a reflash at the dock.
 - If **no slot qualifies** any more, GRUB still boots one, as a **last
   resort**, without counting: a slot that once passed its trial first, the
   flashed slot A otherwise. `boat-update status` then shows an ALERT. A
