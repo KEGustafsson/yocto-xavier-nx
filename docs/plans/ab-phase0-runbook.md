@@ -122,7 +122,11 @@ grub-editenv wdtest.env create
   reset about 5 minutes into the sleep means the watchdog covers a GRUB
   hang; the board then boots normally. If it sleeps the whole 900 s and
   then boots, GRUB hangs need a power cycle (plan 5.5, row "GRUB itself
-  hangs").
+  hangs"). A sleep tests a hang only: a GRUB that *crashes* stops in the
+  firmware's exception handler, where the UEFI watchdog never fires, so
+  only the hardware watchdog could reset it (plan 5.5, row "GRUB itself
+  crashes"), if it runs inside GRUB at all - a reset that comes before
+  the UEFI watchdog's 300 s would say so.
 - **Before userspace.** `grub-editenv /boot/efi/EFI/BOOT/wdtest.env set WDTEST=initramfs`,
   then `reboot`. The kernel starts a shell instead of the initramfs's
   `/init`, so nothing in userspace opens or feeds a watchdog. A reset means

@@ -3,9 +3,13 @@ manager - on Jetson, L4TLauncher, which arms it for 5 minutes before
 starting GRUB - set up. On a board that depends on a reset to fall back to
 the other A/B rootfs slot, that turns any hang inside GRUB (a bad config, a
 wedged disk read) into a hang that only a power cycle ends. Re-arm it for
-300 s instead. The kernel's EFI stub disarms it at ExitBootServices, as the
-UEFI spec requires, and the boat's grub.cfg has no menu, so it can never
-time out on someone reading the screen.
+300 s instead. ExitBootServices - the firmware, not the kernel - disarms it,
+as the UEFI spec requires, and the boat's grub.cfg has no menu, so it can
+never time out on someone reading the screen.
+
+It covers a hang, not a crash: the watchdog is a firmware timer event, and
+a fault inside GRUB ends in the firmware's exception handler, which loops
+with interrupts masked, so the event never runs.
 
 See docs/plans/ab-os-updates.md sections 5.1 and 5.5.
 
@@ -23,9 +27,9 @@ the watchdog on purpose, for interactive menus]
 +   * boot manager - on Jetson, L4TLauncher - arms it before starting this
 +   * image, and a GRUB that hangs (a bad config, a wedged disk read) must
 +   * still end in a reset so an A/B slot fallback can happen on the next
-+   * boot. The kernel's EFI stub disarms it at ExitBootServices, as the UEFI
-+   * spec requires, and a boot without a menu never waits on a human long
-+   * enough to trip it.
++   * boot. ExitBootServices - the firmware, not the kernel - disarms it, as
++   * the UEFI spec requires, and a boot without a menu never waits on a
++   * human long enough to trip it.
 +   */
    efi_call_4 (grub_efi_system_table->boot_services->set_watchdog_timer,
 -	      0, 0, 0, NULL);

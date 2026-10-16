@@ -27,12 +27,17 @@ itself only behave like the real thing on the real thing.
 
 ## Bench setup
 
-1. **Keys.** Run `scripts/gen-update-keys.sh` for the fleet keys if they do
-   not exist yet. Then run `scripts/gen-update-keys.sh --bench` for a
-   **separate** bench CA, in `~/.local/share/boat-update-bench-keys`. A
-   bench build signs every bundle - good and faulty - with the bench keys,
-   so the fleet's bundle-signing key need not be on the bench host; the
-   fleet CA certificate is, for the image's keyring.
+1. **Keys.** The bench image's keyring needs the **fleet** CA
+   certificate. On the machine that holds the fleet keys, run
+   `scripts/gen-update-keys.sh` only if the fleet has none yet. On a
+   separate bench host, copy just `ca.cert.pem` from the fleet key
+   directory into `BOAT_KEYS_DIR` there, and never run
+   `gen-update-keys.sh` without `--bench` on it: that would mint a second
+   "fleet" CA, which every later boat image built on that host would trust
+   instead of the real one. Then run `scripts/gen-update-keys.sh --bench`
+   for a **separate** bench CA, in `~/.local/share/boat-update-bench-keys`.
+   A bench build signs every bundle - good and faulty - with the bench
+   keys, so the fleet's signing keys need not be on the bench host.
 2. **A bench image.** It trusts both CAs, so it accepts fault bundles.
    A `BOAT_BENCH` build also gets its own RAUC `compatible`
    (`boat-xavier-nx-bench`), so nothing it builds - not even a good bundle,
@@ -201,7 +206,7 @@ manual step on the bench board. The expected results are the plan's.
 | 2 | bench | `rauc install` a bundle signed by a third, unknown CA, then a fault bundle on a **non-bench** image: both rejected, `boat-update status` unchanged |
 | 3 | bench | build a bundle with `RAUC_BUNDLE_FORMAT = "plain"`: rejected (`bundle-formats=-plain`) |
 | 4 | bench | build with another `BOAT_BUNDLE_COMPATIBLE`: rejected |
-| 5 | bench | image with `BOAT_MIN_BUNDLE_VERSION = "2.0"`, install a 1.x bundle: rejected |
+| 5 | bench | an image that is itself release 2.0 or later (the build stops on a floor above its own `BOAT_RELEASE`): `BOAT_RELEASE=2.0.0 BOAT_MIN_BUNDLE_VERSION=2.0 scripts/02-configure-build.sh` (with the bench's `AB_LAYOUT=1 BOAT_BENCH=1`), build and flash it, then install a 1.x bundle: rejected. The board now runs 2.0.0, so reflash a 1.x image before the rows that install 1.x bundles |
 | 6 | bench | edit a bundle's `[meta.boat] l4t` (rebuild with a patched recipe): the pre-install handler refuses |
 | 7 | bench | `date -s 1970-01-02` (chrony stopped), install a good bundle: installs |
 | 8 | bench | relay cut during `rauc install`'s write: comes back on the old slot, target `OK=0`; install again works |
@@ -225,7 +230,7 @@ manual step on the bench board. The expected results are the plan's.
 | 26 | bench | `boat-update rollback` after a commit: the other slot boots and commits |
 | 27 | bench | `boat-sleep` (with and without `--force`) and the UDP sleep listener during an install and during a trial: refused. Then, committed, with the helm session logged in: the listener's sleep works; with an app holding a sleep inhibitor: refused, and the lock is listed |
 | 28 | bench | both slots' kernels corrupted: A, A, B, then UEFI stop; the USB reflash in docs/07 recovers it. Stays open until the Phase 0 runbook (2.6) has found the UEFI-menu path and docs/06 and docs/07 describe it, and that path works too |
-| 29 | bench | before an update, note SSH host key fingerprint, `/home/root/.ssh`, `/home/boat`, Wi-Fi, a BT pairing, hostname, `boat-sleep.key`, passwords; compare after the update and after a rollback |
+| 29 | bench | before an update, note SSH host key fingerprint, `/home/root/.ssh`, `/home/boat`, Wi-Fi, a BT pairing, hostname, `boat-sleep.key`, passwords; compare after the update and after a rollback. Then, after an update, change root's password and remove a key from `/home/root/.ssh/authorized_keys`, and roll back: `rollback` warns, and the old password and key work again (documented in docs/07) |
 | 30 | bench | SC7 sleep + WoL wake on slot A and on slot B |
 | 31-33 | auto + bench | publish to `bench`: background download, "ready", nothing installs by itself; pull the cable / sleep / reboot mid-download; serve a corrupted file |
 | 34, 43, 45 | auto + bench | indexes signed wrongly, signed by the bench CA (on a boat image), replayed, for the wrong channel, with an expired index certificate |

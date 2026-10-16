@@ -42,6 +42,10 @@ IMAGE_FEATURES += "ssh-server-openssh"
 #
 #     openssl passwd -6 'your-password'
 #
+# On the A/B layout every update bundle holds this image's /etc/shadow, so a
+# private hash is readable by anyone who can fetch a bundle: serve its
+# channel with a client certificate (docs/07 "Access control").
+#
 # -p takes an ENCRYPTED password, never plaintext. kirkstone's shadow has no
 # clear-text option here, and a plaintext string in -p would be written to
 # /etc/shadow verbatim and match nothing, locking the account while looking

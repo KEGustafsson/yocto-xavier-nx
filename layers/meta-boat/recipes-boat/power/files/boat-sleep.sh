@@ -240,8 +240,8 @@ sleep_blockers() {
 }
 
 # Die with the reason a real run refuses for, if there is one. A sleep
-# inhibitor lock - the XFCE power manager's on the helm display, say - makes
-# this refuse; --force goes past every lock, but never past an A/B update.
+# inhibitor lock - an app's on the helm display, say, or a root service's -
+# makes this refuse; --force goes past every lock, but never past an A/B update.
 # The list is read here because logind never holds root back with root's
 # own locks, and this runs as root. The request then asks logind's own
 # check too (SD_LOGIND_ROOT_CHECK_INHIBITORS, 1) - unlike `systemctl suspend

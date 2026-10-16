@@ -1141,6 +1141,21 @@ esac
               "%s %s" % (err, bu.load_state().get("message")))
         write(board + "/rauc-status", rauc_status("1.0.0"))
 
+        # --- status without root: RAUC's D-Bus answers root only -------------
+        os.rename(board + "/rauc-status", board + "/rauc-status.away")   # the stub's `rauc status` fails
+        euid = os.geteuid
+        try:
+            os.geteuid = lambda: 1000
+            out_user = status()
+            os.geteuid = lambda: 0
+            out_root = status()
+        finally:
+            os.geteuid = euid
+            os.rename(board + "/rauc-status.away", board + "/rauc-status")
+        check("status without root, which RAUC does not answer, says to run it with sudo instead of a bare 'unknown'",
+              "release unknown" in out_user and "'sudo boat-update' shows the other slot's release" in out_user
+              and "RAUC answers root only" not in out_root, out_user + out_root)
+
         # --- an offer the channel withdraws takes its download with it -------
         publish(15, version="1.2.0")
         offer, err = run_check()
@@ -1804,7 +1819,8 @@ esac
         with open(board + "/systemd.log", "w"):
             pass
         setenv(ORDER="A B", B_OK="1", B_TRY="1", B_COMMITTED="1")
-        with as_root():
+        said = io.StringIO()
+        with as_root(), contextlib.redirect_stderr(said):
             try:
                 bu.do_rollback(yes=True)
                 err = None
@@ -1815,6 +1831,8 @@ esac
               err is None and e.get("ORDER") == "B A" and e.get("B_OK") == "1" and e.get("B_TRY") == "0"
               and "mark-active" not in open(board + "/rauc.log").read()
               and "systemctl reboot" in open(board + "/systemd.log").read(), "%s %s" % (err, e))
+        check("... and warns that credentials changed since the other slot's install are back as they were",
+              "a root SSH key removed or a sleep key rotated since then is back" in said.getvalue(), said.getvalue())
         setenv(ORDER="A B", B_OK="0")
         with as_root():
             try:
