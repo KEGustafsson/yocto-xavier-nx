@@ -560,6 +560,27 @@ def main():
                   "%d %s" % (rc, out))
         env["BOAT_PUBLISH_DEST"] = d
 
+        # An index that is there but does not verify under these keys (one
+        # signed under the bench CA) or is damaged: no publish either, since
+        # the serial and device tree would go unchecked.
+        for how in ("local", "rsync"):
+            for what in ("signed under another CA", "damaged"):
+                d = dest()
+                env["BOAT_PUBLISH_DEST"] = ("buildhost:" + d) if how == "rsync" else d
+                os.makedirs(os.path.join(d, "stable"), exist_ok=True)
+                if what == "damaged":
+                    data = b"\x30\x80not an index"
+                else:
+                    publish(env, "bench", bundle(keys=bench, compatible="boat-xavier-nx-bench"))
+                    data = open(os.path.join(d, "bench", "index.p7"), "rb").read()
+                with open(os.path.join(d, "stable", "index.p7"), "wb") as f:
+                    f.write(data)
+                rc, out = publish(env, "stable", newer)
+                kept = open(os.path.join(d, "stable", "index.p7"), "rb").read() == data
+                check("a current index %s (%s) stops the publish, and the channel keeps it" % (what, how),
+                      rc != 0 and "does not verify" in out and kept, "%d %s" % (rc, out))
+        env["BOAT_PUBLISH_DEST"] = d
+
         # Two publishes at once must not share a serial: the second waits.
         d = dest()
         with open(os.path.join(fleet, "index-serial.lock"), "a") as lock:

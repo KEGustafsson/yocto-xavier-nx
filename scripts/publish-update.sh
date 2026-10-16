@@ -175,14 +175,22 @@ if [[ "${BOAT_PUBLISH_DEST}" == *:* ]]; then
 elif [[ -f "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7" ]]; then
   cp "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7" "${WORK}/published.p7"
 fi
-if [[ -s "${WORK}/published.p7" ]] \
-   && openssl cms -verify -inform DER -binary -in "${WORK}/published.p7" -out "${WORK}/published.json" \
-        -CAfile "${KEYS}/ca.cert.pem" -no-CApath -no-CAstore -purpose smimesign -no_check_time 2>/dev/null; then
-  read -r PUBLISHED_SERIAL PUBLISHED_VERSION PUBLISHED_FIRMWARE < <(python3 -c '
+# An index that is there but does not verify under these keys, or cannot be
+# read, stops the publish too: going on would drop the serial and device-tree
+# checks against the release the boards were last offered. Boards trust only
+# this CA, so such an index is a wrong key directory or a damaged file, for
+# the operator to look at.
+if [[ -e "${WORK}/published.p7" ]]; then
+  openssl cms -verify -inform DER -binary -in "${WORK}/published.p7" -out "${WORK}/published.json" \
+          -CAfile "${KEYS}/ca.cert.pem" -no-CApath -no-CAstore -purpose smimesign -no_check_time \
+          2> "${WORK}/published.err" \
+    || die "the channel's current index, ${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7, does not verify against ${KEYS}/ca.cert.pem - nothing published. Check the key directory; replace that index by hand only if it is damaged. openssl said: $(head -c 2000 "${WORK}/published.err" | tr '\n' ' ')"
+  PUBLISHED="$(python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
-print(int(d.get("serial", 0)), d.get("version", "?") or "?", d.get("firmware", ""))' "${WORK}/published.json") \
-    || PUBLISHED_SERIAL=0
+print(int(d["serial"]), d.get("version", "?") or "?", d.get("firmware", "") or "")' "${WORK}/published.json")" \
+    || die "the channel's current index, ${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7, verifies but has no readable serial - nothing published"
+  read -r PUBLISHED_SERIAL PUBLISHED_VERSION PUBLISHED_FIRMWARE <<< "${PUBLISHED}"
 fi
 
 # The serial only ever grows: a board rejects an index whose serial is not
