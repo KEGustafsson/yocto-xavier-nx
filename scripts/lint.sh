@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fast repository checks - no Yocto layers fetched, no bitbake, no build.
-# Runs in seconds, both locally and in CI (.github/workflows/lint.yml calls
+# Runs in a minute or two, both locally and in CI (.github/workflows/lint.yml calls
 # exactly this script, so "green in CI" and "green on my machine" mean the
 # same thing).
 #
@@ -264,7 +264,13 @@ else
     else
         # 77: a tool the test needs is missing - a skip, as in section 5.
         test_rc=0
-        "${TARGET_PY}" scripts/test-boat-update.py >/dev/null 2>&1 || test_rc=$?
+        test_out="$(mktemp)"
+        "${TARGET_PY}" scripts/test-boat-update.py >"${test_out}" 2>&1 || test_rc=$?
+        if [[ "${test_rc}" -ne 0 && "${test_rc}" -ne 77 ]]; then
+            # Quiet when it passes; what failed, when it does not.
+            { grep -A1 -e '^FAIL' -e '^Traceback' "${test_out}" || tail -n 20 "${test_out}"; } >&2
+        fi
+        rm -f "${test_out}"
         if [[ "${test_rc}" -eq 0 ]]; then
             log "  ${#TARGET_PY_FILES[@]} Python file(s), and boat-update's tests, clean under $("${TARGET_PY}" -V)"
         elif [[ "${test_rc}" -eq 77 ]]; then
