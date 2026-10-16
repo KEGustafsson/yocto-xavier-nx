@@ -186,10 +186,9 @@ replace_file() {
     sync "$1" && mv "$1" "$2" && sync "$2" && sync "$(dirname "$2")"
 }
 
-# Set KEY=VALUE pairs in grubenv, on a copy that then replaces it, and bring
-# grubenv.bak - GRUB's fallback if grubenv is ever torn - up to date with it.
-# Fails, leaving grubenv as it was, if any step fails.
-grubenv_set() {
+# Set KEY=VALUE pairs in grubenv, on a copy that then replaces it. Fails,
+# leaving grubenv as it was, if any step fails.
+grubenv_replace() {
     rm -f "${BOAT_AB_GRUBENV}.new"
     if ! { cp "$BOAT_AB_GRUBENV" "${BOAT_AB_GRUBENV}.new" \
             && grub-editenv "${BOAT_AB_GRUBENV}.new" set "$@" \
@@ -197,7 +196,13 @@ grubenv_set() {
         rm -f "${BOAT_AB_GRUBENV}.new"
         return 1
     fi
-    grubenv_sync_bak
+}
+
+# The same, then bring grubenv.bak - GRUB's fallback if grubenv is ever
+# torn - up to date with it. Fails if either step fails: when only the .bak
+# copy did, grubenv has already changed (grubenv_replace tells the two apart).
+grubenv_set() {
+    grubenv_replace "$@" && grubenv_sync_bak
 }
 
 # Make grubenv.bak a copy of grubenv, if it is not one already.

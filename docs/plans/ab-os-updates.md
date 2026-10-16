@@ -240,7 +240,12 @@ boot this kernel correctly.
 **Fallbacks below GRUB:**
 
 - If loading `grubaa64.efi` fails, L4TLauncher drops to DIRECT, which boots
-  extlinux on `APP` (slot A), then `boot.img`.
+  extlinux on `APP` (slot A), then `boot.img`. It does the same when it
+  cannot rewrite `boot.cfg` on the ESP. Slot A then runs whatever
+  `grubenv` says, so it may be the older or a rejected release. When
+  `L4TDefaultBootMode` already read 0, `boat-bootmode-guard` raises an
+  alert that GRUB did not load: rebooting comes back the same way, and the
+  fix is a reflash.
 - `UBOOT_EXTLINUX = "1"` is set because its recipe is also what puts
   `/boot/Image` and `/boot/initrd` into the rootfs for GRUB to read.
 - `boot.img` is a last resort only. Its kernel is the flash-time one and
@@ -382,7 +387,12 @@ GRUB logic (derived from RAUC's `contrib/grub.conf`, with our counter added):
 4. **Every** load step is checked:
    `if ! linux …; then <slot>_OK=0; save_env; reboot; fi`. The same goes
    for `initrd`, and for a `boot` that returns. GRUB never stops at a
-   prompt.
+   prompt. When that mark cannot be saved (`grubenv` unreadable, or the ESP
+   refusing writes), a reset would bring the same slot back, each time
+   using one of NVIDIA's warm boots. So GRUB hands over within the same
+   boot instead, uncounted, to a committed slot (`boat.handover=1`), or to
+   the last resort without the slot that failed. `boat-grubenv-guard`
+   writes the mark from Linux and raises an alert.
 5. If no slot qualifies, the **last resort** boots without counting or
    writing anything, with `boat.lastresort=1`: first a slot that passed a
    trial and only ran out of attempts (`COMMITTED=1`, in `ORDER`), then any
@@ -396,7 +406,9 @@ GRUB logic (derived from RAUC's `contrib/grub.conf`, with our counter added):
 
 At build time, `grub.cfg` is generated from `KERNEL_ARGS` and checked with
 `grub-script-check`. The bundle recipe also fails if the rootfs lacks
-`/boot/Image` or `/boot/initrd`.
+`/boot/Image` or `/boot/initrd`. `grub.cfg` passes `boat.esp=N`, the version
+of the ESP's boot files (5.9); `boat-grubenv-guard` raises an alert when it
+is older than the running release expects.
 
 **Why committed slots get 2 attempts and trials get 1** (review M1):
 
@@ -442,7 +454,9 @@ At build time, `grub.cfg` is generated from `KERNEL_ARGS` and checked with
   - RAUC's grub backend runs `grub-editenv` by name, and `rauc.service` has
     `/usr/lib/boat-ab/bin` first on its `PATH`: the `grub-editenv` there
     turns a `set` on `grubenv` into the same locked copy-and-rename, and
-    passes everything else to the real one.
+    passes everything else to the real one. It fails RAUC's call only when
+    `grubenv` itself was not written; a failed `grubenv.bak` copy after that
+    is an alert, and the guard copies it on the next boot.
 - `boat-grubenv-guard.service` runs early on every boot, after the ESP
   mount and before `boat-commit`. It validates the file and keeps a
   last-good copy, `grubenv.bak`. On a committed boot it also resets the
@@ -456,7 +470,12 @@ At build time, `grub.cfg` is generated from `KERNEL_ARGS` and checked with
   - on a committed boot, the booted slot becomes `OK=1, COMMITTED=1`, and
     the other `OK=0, COMMITTED=0`: the torn write may have been RAUC's own,
     half way through writing it, and `grubenv.bak` predates this boot. A
-    rollback is refused until the next update rewrites that slot.
+    rollback is refused until the next update rewrites that slot;
+  - on a last-resort boot (`boat.lastresort=1`), GRUB passes the same flags
+    whether or not the slot ever passed a trial, so the booted slot becomes
+    `OK=1, TRY=0, COMMITTED=0`: on trial from the next boot, with the health
+    gate, rather than committed unchecked. The other slot is `OK=0,
+    COMMITTED=0`, as on a committed boot.
 - `grub.cfg` falls back to `grubenv.bak` for *reading* if `grubenv` won't
   load.
 
@@ -545,9 +564,9 @@ in a reset. The exception is a deliberate stay on a committed slot.
 | failure | what turns it into a reset | change needed |
 |---|---|---|
 | firmware fails before UEFI | not covered (single chain); firmware never changes in the field | none |
-| `grubaa64.efi` missing/unloadable | L4TLauncher falls back to DIRECT → extlinux on `APP` (A) → `boot.img` | none; `status` flags "booted outside GRUB" |
+| `grubaa64.efi` missing/unloadable | L4TLauncher falls back to DIRECT → extlinux on `APP` (A) → `boot.img` | none; `status` flags "booted outside GRUB", and `boat-bootmode-guard` alerts that GRUB did not load when `L4TDefaultBootMode` already read 0 (a reboot will not help: reflash). Slot A runs whatever `grubenv` says, and with no `panic=10`: a reset loop there would only reach NVIDIA's sticky state sooner, and a slot-aware DIRECT path needs its own design |
 | `grub.cfg` missing or truncated | the config built into `grubaa64.efi` runs it, and resets when it returns (5.1) | `grub-efi` bbappend: boat's `cfg` |
-| kernel / initrd load error, `boot` returns | guarded loads → mark slot, `reboot` (5.3) | grub.cfg design + build checks |
+| kernel / initrd load error, `boot` returns | guarded loads → mark slot, `reboot`; when the mark cannot be saved, a hand-over within the boot (5.3) | grub.cfg design + build checks |
 | GRUB itself hangs | **the UEFI watchdog, kept armed through GRUB** (300 s; 5.1). The Tegra hardware WDT is a second layer if Phase 0 shows it runs this early. | `grub-efi` bbappend: re-arm instead of cancel. **Phase 1 exit test.** If firmware ignores the re-arm, this row narrows to "power cycle to recover" and goal 4 says so. |
 | kernel panic | `panic=10` | cmdline |
 | kernel hard hang | Tegra WDT running from early kernel | Phase 0: armed before userspace? If not, enable it at probe |
@@ -762,7 +781,7 @@ The order matches RAUC 1.13's `install.c`:
 |---|---|---|
 | QSPI firmware (one usable chain) | section 3 | USB recovery (`05-flash-nvme.sh`) |
 | kernel DTB (`kernel-dtb`, read by UEFI) | option A trade-off | USB reflash. Phase 0 confirms GRUB passes UEFI's DTB through unchanged. |
-| ESP contents: L4TLauncher, GRUB, `grub.cfg` | single copy | USB reflash (`grubenv` and `boot.cfg` are runtime-written) |
+| ESP contents: L4TLauncher, GRUB, `grub.cfg` (with `KERNEL_ARGS`) | single copy | USB reflash (`grubenv` and `boot.cfg` are runtime-written). An update never changes them. `grub.cfg` passes their version as `boat.esp=N`; a release whose scripts need newer ones bumps it (with `BOAT_ESP` in `boat-grubenv-guard`), and the guard alerts on a board whose ESP is older. Nothing refuses such a bundle before it is installed yet. |
 | `kernel`/`kernel_b` (`boot.img`) | last-resort fallback only | flash time |
 
 A BSP bump (new L4T) is therefore always a **full USB reflash**. The
@@ -1419,9 +1438,11 @@ pieces also run off-target:
   `grubenv`. It asserts the slot picked, the kernel command line and the
   `grubenv` written back for every row of 5.3's table, plus a torn or
   missing `grubenv`, an ESP that refuses writes, a kernel, `initrd` or
-  `boot` that fails, every last-resort order, and - starting from the
+  `boot` that fails (also where that cannot be recorded), a trial in
+  either slot, every last-resort order, and - starting from the
   config built into `grubaa64.efi` - a missing or truncated `grub.cfg`. (`qemu-system-aarch64` + AAVMF was the first idea; `grub-emu` runs
-  the same script without a firmware image, and fits in CI.)
+  the same script without a firmware image, and fits in CI. It passes with
+  the board's GRUB 2.06 as well as the 2.12 CI installs.)
 - **Shell logic:** `boat-update`, the handlers, `boat-storage` and the
   boot-state scripts get host-side tests with `rauc`, `grub-editenv`,
   `blkid` and `nmcli` mocked. `scripts/test-ab-scripts.py` runs
@@ -1465,7 +1486,7 @@ All of them run from `lint.sh`, so they cover every PR.
 | 20 | committed slot, `/data` missing | stays up (Tier 1 ok); Docker degraded; alert |
 | 21 | ESP `grubenv` corrupted | boots by defaults; the guard rebuilds the file and alerts; next install works |
 | 22 | `L4TDefaultBootMode` reset to 1 (UEFI defaults) | the guard restores it; that boot is flagged "outside GRUB"; install refused until rebooted via GRUB |
-| 23 | `grubaa64.efi` missing | DIRECT boots A; flagged |
+| 23 | `grubaa64.efi` missing | DIRECT boots A; flagged, with an alert that GRUB did not load |
 | 24 | a JetPack SD card in the module slot, and a UEFI-bootable USB stick (JetPack-flashed: `APP`/`esp` labels and its own L4TLauncher), inserted before a reboot | ignored: UEFI boots the NVMe first (5.1), and root, ESP and RAUC slots resolve to NVMe partition numbers whose GPT names are checked |
 | 25 | unprivileged user, and a container running as a non-root user with the system bus mounted, call RAUC `Install`/`Mark` | denied |
 | 26 | `boat-update rollback` after commit | other slot boots and commits |

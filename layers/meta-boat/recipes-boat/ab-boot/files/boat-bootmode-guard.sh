@@ -18,7 +18,10 @@
 # It also records how this boot got here in /run/boat-ab/boot-path: "grub"
 # (rauc.slot= is on the command line) or "outside-grub" - L4TLauncher's own
 # fallback, which always boots slot A and bypasses the slot logic. The
-# update tooling refuses to install anything in that state.
+# update tooling refuses to install anything in that state. Outside GRUB
+# with L4TDefaultBootMode already 0, the setting was not the cause: GRUB
+# itself did not load (grubaa64.efi unreadable, or UEFI could not write the
+# ESP), every reboot comes back the same way, and that is an alert.
 #
 # See docs/plans/ab-os-updates.md section 5.1.
 set -eu
@@ -61,6 +64,9 @@ esac
 
 mode="$(efi_u32 L4TDefaultBootMode)"
 if [ "$mode" = 0 ]; then
+    if [ -z "$(booted_slot)" ]; then
+        alert "this boot did not come through GRUB although L4TDefaultBootMode is 0 (GRUB): GRUB itself did not load - grubaa64.efi is unreadable, or UEFI could not write the ESP. Rebooting will not help: reflash at the dock. Slot A is running, uncounted, whatever grubenv says - it may be an older or rejected release"
+    fi
     exit 0
 fi
 warn "L4TDefaultBootMode is '$mode', not 0 (GRUB) - setting it so the next boot goes through GRUB"

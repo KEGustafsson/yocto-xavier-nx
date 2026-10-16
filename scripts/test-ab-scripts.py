@@ -809,10 +809,84 @@ CASES = [
 ]
 
 
+# --- what GRUB cannot write down itself, and the ESP's own faults ---------
+
+def bak_copy_fails(board):
+    """An ESP that takes grubenv's write, then fails grubenv.bak's copy."""
+    board.write("bin/cp", """#!/bin/sh
+for last; do :; done
+case "$last" in *.bak.new) exit 1 ;; esac
+exec %s "$@"
+""" % shutil.which("cp"))
+    os.chmod(os.path.join(board.root, "bin", "cp"), 0o755)
+
+
+CASES += [
+    case("guard: torn grubenv on a last-resort boot - put on trial, never made committed",
+         "boat-grubenv-guard.sh",
+         dict(cmdline="rauc.slot=B boat.lastresort=1 boat.esp=1", torn=True,
+              bak=env_with(A_OK=0, A_TRY=2, B_OK=0, B_COMMITTED=0)),
+         0, want_env=dict(ORDER="B A", B_OK="1", B_TRY="0", B_COMMITTED="0",
+                          A_OK="0", A_TRY="0", A_COMMITTED="0", BOAT_STAY="0"),
+         want_bak_equal=True, says=["last resort: on trial from the next boot"]),
+    case("guard: hand-over boot - the failed slot GRUB could not mark is marked, with an alert",
+         "boat-grubenv-guard.sh",
+         dict(cmdline="rauc.slot=B boat.handover=1 boat.esp=1", env=env_with(B_TRY=1)),
+         0, want_env=env_with(A_OK=0, B_TRY=0), want_bak_equal=True,
+         says=["slot A failed to load in GRUB: it is marked unusable"],
+         files={"run/boat-ab/health-alert": "GRUB could not load slot A"}),
+    case("guard: hand-over boot over a torn grubenv - booted slot committed, the failed one unusable",
+         "boat-grubenv-guard.sh",
+         dict(cmdline="rauc.slot=A boat.handover=1 boat.esp=1", torn=True,
+              bak=env_with(ORDER="B A")),
+         0, want_env=dict(ORDER="A B", A_OK="1", A_TRY="0", A_COMMITTED="1",
+                          B_OK="0", B_TRY="0", B_COMMITTED="0", BOAT_STAY="0"),
+         want_bak_equal=True,
+         files={"run/boat-ab/health-alert": "GRUB could not load slot B"}),
+    case("guard: a hand-over mark the ESP refuses is an alert",
+         "boat-grubenv-guard.sh",
+         dict(cmdline="rauc.slot=B boat.handover=1 boat.esp=1", env=env_with(B_TRY=0),
+              editenv_fails=True),
+         0, want_env=env_with(B_TRY=0),
+         files={"run/boat-ab/health-alert": "could not mark slot A unusable"}),
+    case("guard: an ESP older than this release expects is an alert",
+         "boat-grubenv-guard.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(A_TRY=0)),
+         0, want_env=env_with(A_TRY=0),
+         files={"run/boat-ab/health-alert": "boot files on the ESP are version 0, and this release expects 1"}),
+    case("guard: the ESP this release expects - no alert",
+         "boat-grubenv-guard.sh",
+         dict(cmdline="rauc.slot=A boat.esp=1", env=env_with(A_TRY=0)),
+         0, want_env=env_with(A_TRY=0), absent=["run/boat-ab/health-alert"]),
+    dict(case("editenv wrapper: grubenv written but its .bak copy fails - RAUC is told it worked, and an alert",
+              "grub-editenv-wrapper.sh",
+              dict(cmdline="rauc.slot=A", env=env_with(), bak=env_with()),
+              0, want_env=env_with(B_OK=0),
+              args=["@ROOT@/boot/efi/EFI/BOOT/grubenv", "set", "B_OK=0"],
+              files={"run/boat-ab/health-alert": "could not copy grubenv to grubenv.bak",
+                     "boot/efi/EFI/BOOT/grubenv.bak": "^B_OK=1$"}),
+         setup=bak_copy_fails),
+    case("bootmode-guard: outside GRUB with L4TDefaultBootMode already 0 - GRUB did not load: an alert",
+         "boat-bootmode-guard.sh",
+         dict(cmdline="root=/dev/nvme0n1p1", env=env_with(),
+              efivars={"L4TDefaultBootMode": b"\x00\x00\x00\x00", "NewDeviceHierarchy": b"\x00"}),
+         0, not_log=["efivar"], files={"run/boat-ab/boot-path": "^outside-grub$",
+                                       "run/boat-ab/health-alert": "GRUB itself did not load.*reflash"}),
+    case("bootmode-guard: outside GRUB after a UEFI reset - the setting is fixed, no ESP alert",
+         "boat-bootmode-guard.sh",
+         dict(cmdline="root=/dev/nvme0n1p1", env=env_with(),
+              efivars={"L4TDefaultBootMode": b"\x01\x00\x00\x00", "NewDeviceHierarchy": b"\x00"}),
+         0, want_efi={"L4TDefaultBootMode": b"\x00\x00\x00\x00"},
+         absent=["run/boat-ab/health-alert"]),
+]
+
+
 def check(c, root):
     import re
     board = Board(root, **c["board"])
-    before = board.raw() if os.path.exists(board.grubenv) else None
+    # A case built as dict(case(...), setup=f) changes the board first.
+    c.get("setup", lambda b: None)(board)
+    before =board.raw() if os.path.exists(board.grubenv) else None
     inode = os.stat(board.grubenv).st_ino if os.path.exists(board.grubenv) else None
     bak_path = board.grubenv + ".bak"
     bak_before = board.raw(bak_path) if os.path.exists(bak_path) else None

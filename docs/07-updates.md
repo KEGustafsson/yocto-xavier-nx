@@ -18,6 +18,10 @@ What it does **not** do:
 - **Update firmware.** QSPI firmware, the kernel DTB and anything else that
   changes with a new L4T release still need a USB reflash at the dock. A
   bundle built on another L4T release is refused.
+- **Update the boot files on the ESP.** GRUB, its `grub.cfg` and the kernel
+  command line (`KERNEL_ARGS`) reach a board only with a USB reflash. A
+  release that needs newer ones says so in `status` once it runs ("the
+  boot files on the ESP are version ...").
 
 The design, and why it is shaped this way, is in
 [`plans/ab-os-updates.md`](plans/ab-os-updates.md).
@@ -466,13 +470,18 @@ whole SSD.
 ## When something goes wrong
 
 - **"booted OUTSIDE GRUB"** in `status`. GRUB did not run, and L4TLauncher's
-  own fallback booted slot A. Usually the UEFI setting was reset to its
-  default. `boat-bootmode-guard` puts it back, so reboot once. Updates are
-  refused until the board comes up through GRUB.
+  own fallback booted slot A, whatever `grubenv` says: it may be the older
+  release, or one that failed its trial. Usually the UEFI setting was reset
+  to its default. `boat-bootmode-guard` puts it back, so reboot once. If
+  `status` also says "GRUB itself did not load", the setting was not the
+  cause: the ESP is damaged, every reboot comes back to slot A, and the fix
+  is a reflash at the dock. Updates are refused until the board comes up
+  through GRUB.
 - **"grubenv was torn and rebuilt."** A power cut hit a write of the boot
   state. The running slot was kept. The other slot is marked unusable until
   the next update, unless this boot was a trial — then the slot you updated
-  from stays the fallback.
+  from stays the fallback. On a last-resort boot the running slot is kept on
+  trial instead: the next boot runs its health check again.
 - **It keeps falling back after an update.** Read `boat-update history`
   and `journalctl -b -1 -u boat-commit`.
   - A health check that fails for reasons outside the OS — an app that
