@@ -533,21 +533,31 @@ def main():
         # The channel's index cannot be read back (the host unreachable): no
         # publish, rather than one below the boards' serial or past a device
         # tree change. A channel with no index yet still publishes (above).
-        d = dest()
-        env["BOAT_PUBLISH_DEST"] = "buildhost:" + d
-        publish(env, "stable", good)
-        before = index(d, "stable", os.path.join(fleet, "ca.cert.pem"))
-        unreachable = ("#!/bin/sh\nfor a; do case \"$a\" in *:*index.p7) "
-                       "echo 'ssh: connect to host buildhost port 22: Connection refused' >&2; exit 255 ;; esac; done\n"
-                       "exec %s/stub-rsync \"$@\"\n" % work)
+        # Only exit 23 with a link_stat error naming this index counts as no
+        # index yet: a "No such file" about something else, or with another
+        # exit, is a failure to read it back.
         with open(os.path.join(work, "stub-rsync"), "w") as f:
             f.write(RSYNC)
         os.chmod(os.path.join(work, "stub-rsync"), 0o755)
-        rc, out = publish(env, "stable", newer, stubs={"rsync": unreachable})
-        after = index(d, "stable", os.path.join(fleet, "ca.cert.pem"))
-        check("an index that cannot be read back stops the publish, and the channel keeps its index",
-              rc != 0 and "could not read back" in out and isinstance(before, dict) and after == before,
-              "%d %s" % (rc, out))
+        for why, rc_, err in (
+                ("the host unreachable", 255, "ssh: connect to host buildhost port 22: Connection refused"),
+                ("no permission", 23, 'rsync: [sender] send_files failed to open "/srv/stable/index.p7": '
+                                      "Permission denied (13)"),
+                ("no rsync on the host", 127, "sh: 1: rsync: No such file or directory"),
+                ("another file missing", 23, 'rsync: [sender] link_stat "/srv/stable/index.p7.sig" failed: '
+                                             "No such file or directory (2)")):
+            d = dest()
+            env["BOAT_PUBLISH_DEST"] = "buildhost:" + d
+            publish(env, "stable", good)
+            before = index(d, "stable", os.path.join(fleet, "ca.cert.pem"))
+            failing = ("#!/bin/sh\nfor a; do case \"$a\" in *:*index.p7) "
+                       "echo '%s' >&2; exit %d ;; esac; done\n"
+                       "exec %s/stub-rsync \"$@\"\n" % (err, rc_, work))
+            rc, out = publish(env, "stable", newer, stubs={"rsync": failing})
+            after = index(d, "stable", os.path.join(fleet, "ca.cert.pem"))
+            check("an index that cannot be read back (%s) stops the publish, and the channel keeps its index" % why,
+                  rc != 0 and "could not read back" in out and isinstance(before, dict) and after == before,
+                  "%d %s" % (rc, out))
         env["BOAT_PUBLISH_DEST"] = d
 
         # Two publishes at once must not share a serial: the second waits.

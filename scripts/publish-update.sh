@@ -161,10 +161,15 @@ if [[ "${BOAT_PUBLISH_DEST}" == *:* ]]; then
   # A channel with no index yet (its first publish) is the only failure to
   # read it back that may go on: anything else - the host unreachable, no
   # permission - would publish below the boards' serial, or past a device
-  # tree change, with nothing said.
-  if ! rsync -q "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7" "${WORK}/published.p7" 2> "${WORK}/fetch.err"; then
-    grep -q "No such file or directory" "${WORK}/fetch.err" \
-      || die "could not read back ${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7 to check the serial and device tree against it - nothing published. rsync said: $(head -c 2000 "${WORK}/fetch.err" | tr '\n' ' ')"
+  # tree change, with nothing said. rsync says a source is missing with exit
+  # 23 and a link_stat error that names it; both must hold, for this file.
+  FETCH_RC=0
+  rsync -q "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7" "${WORK}/published.p7" 2> "${WORK}/fetch.err" || FETCH_RC=$?
+  if [[ ${FETCH_RC} -ne 0 ]]; then
+    if [[ ${FETCH_RC} -ne 23 ]] \
+       || ! grep -qF "${CHANNEL}/index.p7\" failed: No such file or directory" "${WORK}/fetch.err"; then
+      die "could not read back ${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7 to check the serial and device tree against it - nothing published. rsync exited ${FETCH_RC} and said: $(head -c 2000 "${WORK}/fetch.err" | tr '\n' ' ')"
+    fi
     rm -f "${WORK}/published.p7"
   fi
 elif [[ -f "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7" ]]; then
