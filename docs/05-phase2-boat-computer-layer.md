@@ -227,7 +227,10 @@ Practical wiring:
 - **Working DNS / egress** via NetworkManager; the clock must be correct
   before the first pull (see Time).
 - **NGC login** for gated images: `docker login nvcr.io` with an NGC API
-  key.
+  key. `boat-compose` pulls as root, with root's login
+  (`/home/root/.docker`). On an A/B image that is in the slot and not
+  carried, so log in again after every update (docs/07 "Storage on the A/B
+  layout").
 - **Compose as config-as-code (git):** compose files live in a **git
   checkout on `/data`** (e.g. `/data/compose`) that you `git pull` on the
   boat to update settings, then `docker compose up -d`. This is why `git` is
@@ -797,8 +800,8 @@ all the kernel offers, and pushes past inhibitor locks);
 `BOAT_SLEEP_REQUIRE_WOL=0` in `/etc/default/boat-power` turns it off for
 good, which you want only on a board you can reach.
 
-Without `--force`, a sleep inhibitor lock another program holds - the XFCE
-power manager on the helm display, say, or a root service - makes it
+Without `--force`, a sleep inhibitor lock another program holds - an app
+on the helm display, say, or a root service - makes it
 refuse, and it lists the locks. The logged-in helm user alone does not. On
 an A/B image it also refuses, `--force` or not, while an update is being
 installed or is on trial (docs/07-updates.md).
@@ -906,7 +909,7 @@ remote `boat-sleep`.
 | `BOAT_WOL_INTERFACES` | `eth0` | interfaces to arm (space separated). Build-time default comes from `BOAT_WOL_INTERFACES` in the recipe, which also feeds the NM `match-device` line |
 | `BOAT_SLEEP_REQUIRE_WOL` | `1` | refuse to suspend with no wake path |
 | `BOAT_SLEEP_DELAY` | `3` | seconds before logind is asked, so an SSH session closes cleanly |
-| `BOAT_SLEEP_STOP_WATCHDOG` | `0` | stop/start `watchdog.service` around the sleep |
+| `BOAT_SLEEP_STOP_WATCHDOG` | `0` | stop/start `watchdog.service` around the sleep (no effect on an A/B image, where systemd holds the watchdog and there is no `watchdog.service`) |
 
 ### What has and has not been verified on hardware
 
@@ -1482,8 +1485,10 @@ UI" above.)
   hardening, not started.
 - ⚠️ **Credentials.** Root and `boat` share the password `Xavier`
   (`BOAT_PASSWORD_HASH` in `boat-image.bb`; override in `local.conf` with
-  `openssl passwd -6`). sshd accepts root logins; it no longer accepts empty
-  passwords, and nothing has one. `boat` still has passwordless sudo and
+  `openssl passwd -6`). On an A/B image every update bundle carries that
+  hash: a private one needs a channel with a client certificate
+  (docs/07 "Access control"). sshd accepts root logins; it no longer
+  accepts empty passwords, and nothing has one. `boat` still has passwordless sudo and
   `docker` group membership, both root-equivalent.
 
   This is a real credential where there used to be none, but the hash is

@@ -265,12 +265,21 @@ boot this kernel correctly.
     (300 s).
   - A GRUB that wedges, or a kernel load that never returns, then ends in a
     firmware reset.
+  - It covers a hang, not a crash. This UEFI watchdog is edk2's software
+    one (`WatchdogTimerDxe`, the only one in NVIDIA's platform
+    description): a timer event that resets the board when it expires. A
+    synchronous exception inside GRUB - a bad pointer from a damaged
+    filesystem, a stack overflow - ends in the firmware's
+    `DefaultExceptionHandler`, which dead-loops with interrupts masked, so
+    the event never runs. Only the Tegra hardware WDT, if it runs that early
+    (Phase 0 runbook 2.3), or a power cycle ends that; the attempt was
+    counted before GRUB loaded the slot, so the next boot falls back (5.5).
   - The UEFI spec has `ExitBootServices` disarm the watchdog, so it stops
     the moment the kernel takes over. There is no menu (`timeout=0`), so it
     can never fire while someone is reading the screen.
   - Phase 1 proves it with a `grub.cfg` that only sleeps. The Tegra hardware
     WDT, if Phase 0 shows it runs this early, is a second layer, not the
-    one the design depends on.
+    one the design depends on for a hang - and the only one for a crash.
 
 ### 5.2 Disk layout (custom external layout, `boat-nvme-ab.xml`)
 
@@ -495,7 +504,10 @@ never flip the OS back to an older slot.
   - the rootfs is read-write;
   - the ESP is mounted;
   - `grubenv` is valid;
-  - `rauc status` works.
+  - `rauc status` works - checked only when `/data` is the `DATA`
+    partition, since RAUC keeps its status there: on a board whose DATA is
+    broken a trial commits without this check (a broken `/data` never fails
+    the OS, 5.6).
 - **Tier 2 (trial boots only, `boat.trial=1`):**
   - critical units are active: `NetworkManager`, `sshd`/`sshd.socket`,
     `systemd-logind`, `dbus`, `boat-bootmode-guard`, and `docker` if `/data`
@@ -611,7 +623,8 @@ in a reset. The exception is a deliberate stay on a committed slot.
 | `grubaa64.efi` missing/unloadable | L4TLauncher falls back to DIRECT → extlinux on `APP` (A) → `boot.img` | none; `status` flags "booted outside GRUB", and `boat-bootmode-guard` alerts that GRUB did not load when `L4TDefaultBootMode` already read 0 (a reboot will not help: reflash). Slot A runs whatever `grubenv` says, and with no `panic=10`: a reset loop there would only reach NVIDIA's sticky state sooner, and a slot-aware DIRECT path needs its own design |
 | `grub.cfg` missing or truncated | the config built into `grubaa64.efi` runs it, and resets when it returns (5.1) | `grub-efi` bbappend: boat's `cfg` |
 | kernel / initrd load error, `boot` returns | guarded loads → mark slot, `reboot`; when the mark cannot be saved, a hand-over within the boot (5.3) | grub.cfg design + build checks |
-| GRUB itself hangs | **the UEFI watchdog, kept armed through GRUB** (300 s; 5.1). The Tegra hardware WDT is a second layer if Phase 0 shows it runs this early. | `grub-efi` bbappend: re-arm instead of cancel. **Phase 1 exit test.** If firmware ignores the re-arm, this row narrows to "power cycle to recover" and goal 4 says so. |
+| GRUB itself hangs (a loop, a stall, a disk read that never returns) | **the UEFI watchdog, kept armed through GRUB** (300 s; 5.1). The Tegra hardware WDT is a second layer if Phase 0 shows it runs this early. | `grub-efi` bbappend: re-arm instead of cancel. **Phase 1 exit test.** If firmware ignores the re-arm, this row narrows to "power cycle to recover" and goal 4 says so. |
+| GRUB itself crashes (a synchronous exception: the firmware's handler dead-loops with interrupts masked) | **not the UEFI watchdog**, a timer event that never runs then (5.1). Only the Tegra hardware WDT, if Phase 0 (runbook 2.3) shows it runs this early; otherwise a power cycle. The attempt was already counted, so that boot falls back | none possible in GRUB; Phase 1 records what a GRUB exception does on this UEFI |
 | kernel panic | `panic=10` | cmdline |
 | kernel hard hang | Tegra WDT running from early kernel | Phase 0: armed before userspace? If not, enable it at probe |
 | initramfs can't mount root | today: **hangs forever** | `tegra-minimal-init` bbappend: only the two slot partitions, GPT name checked, bounded retries, then `reboot -f` (`boat.stay=1` keeps the shell) |
@@ -666,7 +679,9 @@ The order matches RAUC 1.13's `install.c`:
   and `TRY=0` - itself, under the A/B lock, and reboots. Not through RAUC:
   `rauc.service` needs `/data`, and a release that broke `/data` still
   commits (the health gate never fails the OS over data). It refuses if
-  the other slot is `OK=0`. It is a slot switch; nothing is reinstalled.
+  the other slot is `OK=0`. It is a slot switch; nothing is reinstalled,
+  so it warns that credentials changed since the other slot's install are
+  back as they were there (5.8).
 - **Transport:** OTA from the update channel (5.10) is the normal path.
   Fallbacks:
   - an SSH push to `/data` (`scripts/push-update.sh`);
@@ -742,7 +757,10 @@ The order matches RAUC 1.13's `install.c`:
   - **withhold updates** (a freeze attack). `status` shows the age of the
     last successful check and the channel's publish date, so a stale
     channel is visible. It cannot be prevented without an online
-    time-stamped authority; accepted.
+    time-stamped authority; accepted. A withdrawal can be withheld too: a
+    board that has not seen the withdrawing index can be kept on the one
+    before it, and fetch the withdrawn - still validly signed - release
+    (5.10).
   - **waste bandwidth or offer an old bundle.** This is blocked *before*
     downloading. The index is signed by its own key (5.10), and the board
     checks its `channel`, a monotonic `serial` (no replay), the version
@@ -771,6 +789,10 @@ The order matches RAUC 1.13's `install.c`:
   - This authenticates *updates*. Root on the running board can still write
     anything to disk, and the bench image's shared password (README
     "Credentials") still applies.
+  - A bundle is signed, not encrypted (a `verity` bundle): anyone who can
+    fetch one reads the image, `/etc/shadow` included. With the
+    repository's `BOAT_PASSWORD_HASH` that discloses nothing new; a build
+    with a private hash needs a channel with a client certificate (5.10).
   - A physical attacker with USB recovery mode can reflash.
   - Secure Boot and dm-verity (Phase 8) close those gaps. For option A that
     also means signing GRUB and having it verify the kernel.
@@ -833,7 +855,10 @@ The order matches RAUC 1.13's `install.c`:
     is seeded from the image's copy on first boot. `root`'s home is
     `/home/root` on this distro and stays in the slot, so key-only SSH as
     `root` still works when `DATA` is what broke; its `.ssh` is carried
-    over instead (above). The home mounts come before
+    over instead (above), and nothing else in it is: a `docker login` there
+    (`boat-compose` pulls as root), a `.gitconfig`, scripts are missing
+    after the next install, and a rollback brings back that slot's older
+    copy (docs/07 says so). The home mounts come before
     `systemd-user-sessions`, so the helm desktop and non-root logins wait for
     DATA's check, however long a repair takes - deliberately, rather than
     log anyone into the slot's stale copy; the check says so on the console.
@@ -859,6 +884,16 @@ The order matches RAUC 1.13's `install.c`:
   (a reflash empties `/data` and does not write `APP_b`) nothing is kept.
   Limit: the comparison trusts the clock at the install and at the change.
   Copying them back is left to the operator; nothing merges them on its own.
+- The same holds for credentials, with the opposite effect: after a
+  rollback or a fallback, a password changed, a key removed from `root`'s
+  `authorized_keys`, a sleep key or a Wi-Fi password rotated on the other
+  slot since this one was installed is valid again. Nothing can undo that
+  for a fallback, which no code on the board chooses; `boat-update
+  rollback` warns before it reboots, and docs/07 tells the operator to
+  revoke or change them again. Keeping them on `/data` instead would lose
+  `root`'s key-only SSH when DATA is what broke (above), and copying them
+  into the other slot at a rollback would mean writing a slot from the
+  running one, outside RAUC.
 - `/data` is shared, so a newer Docker could migrate `/data/docker` in a way
   an older slot can't read. The `pre-install` handler warns when the Docker
   major version differs: an alert in `status` until the reboot, and in the
@@ -937,7 +972,7 @@ expose a new index next to an old signature. Fields:
 | field | purpose |
 |---|---|
 | `channel` | must equal the channel the board follows, so a `testing` index served at the `stable` URL is rejected |
-| `serial` | increases with every publish (at least the time in seconds, below 2^32). The board stores the highest serial it has accepted on each channel (on `/data`) and rejects lower ones, which stops a replayed or pulled old index. |
+| `serial` | increases with every publish (at least the time in seconds, below 2^32). The board stores the highest serial it has accepted on each channel (on `/data`) and rejects lower ones, which stops a replayed or pulled old index - on a board that has seen the newer one (a board that has not can still be served the older index: the freeze of 5.7). |
 | `compatible`, `version`, `l4t`, `firmware` | checked before any download (below); `firmware` (the bundle's device-tree record, 5.9) only when the index and the board both have one |
 | `bundle` | a bare file name: no `/`, no `..`, no scheme |
 | `size`, `sha256` | transport integrity of the download |
@@ -1003,12 +1038,50 @@ release that committed on the `testing` board, re-publish that same bundle
 file with a new `stable` index. Bundles are never renamed, because names
 are content-addressed.
 
-**Access:** the default is a **public** channel. Bundles carry nothing
-secret: the image's password hash is already public (README
-"Credentials"). If you want access control, use a **TLS client
-certificate** (D15). Basic auth and bearer headers leak in this setup,
-because curl and RAUC forward them across redirects and RAUC logs request
-headers (review M3).
+**Withdrawing a release** is publishing the one before it again: a new
+serial offering an older version. A board drops the offer and its download
+(ready or not) at its next check that reaches the channel; one that does
+not reach it keeps a ready download, and `install` installs it. A trial is
+decided by its health gate alone; a board that committed the release stays
+on it ("up to date") until `boat-update rollback` or a fix-forward with a
+higher `BOAT_RELEASE`. Deleting `index.p7` or the bundle withdraws nothing
+(only a signed index does): boards keep what they have and alert on the
+failed check, and `install` warns about it. docs/07 says so.
+
+**Forward compatibility.** A board takes the channel's one current release
+straight from whatever it runs, and the running - possibly much older -
+release's code judges it. So every bundle and index must stay readable by
+the oldest release in the field:
+
+- the bundle: RAUC 1.13's verity format and manifest, signed by a
+  codeSigning certificate under the CA in its keyring (5.7);
+- the system `pre-install` handler, which is the running slot's: the
+  `[meta.boat]` keys `l4t` and `release` (`release` must be the version
+  `boat-update` installs: the index's for a stream, the manifest's for a
+  file), `firmware` where both sides have it;
+- `boat-update`'s index: the required fields and their types, the version
+  grammar (`boat-update`'s `parse_version`, the handler's `semver_le`,
+  RAUC's own for `min-bundle-version`), the emailProtection index
+  certificate and the CMS flags above. Unknown index fields are ignored,
+  so a new field means nothing to a release that does not know it.
+
+The bundle's `slot-post-install` hook runs from the new bundle, so the
+carry-over may change from release to release. A change to anything in the
+list needs a stepping stone - a release that reads both, published until
+every board has committed it - or a reflash of the boards left behind.
+Nothing enforces this: the index has no "minimum source release" field
+(older clients would ignore one anyway), and nothing records which release
+last wrote `/data`. A release that must convert data on `/data` does it at
+boot in the new slot, idempotently, and in a form the older slot still
+reads after a fallback (the Docker and journal cases in 5.8).
+
+**Access:** the default is a **public** channel. A bundle carries the
+image's `/etc/shadow`, which is nothing secret while `BOAT_PASSWORD_HASH`
+is the repository's (README "Credentials"). A build with a private hash
+publishes that hash with every bundle, so its channel needs a **TLS client
+certificate** (D15), as does any channel that wants access control.
+Basic auth and bearer headers leak in this setup, because curl and RAUC
+forward them across redirects and RAUC logs request headers (review M3).
 
 #### On the board: check, download, ready (stage 1)
 
@@ -1128,8 +1201,10 @@ headers (review M3).
   stamp from the future does not count. Within the window an unfinished
   download (policy `download`) resumes without a check; nothing else
   runs. A check the clock gate
-  refused runs again two minutes later (a transient timer), by when chrony
-  has normally set the clock.
+  refused runs again after 2 minutes (a transient timer), by when chrony
+  has normally set the clock; each further refusal waits twice as long (4,
+  8, 16, 32 minutes), at most five times a boot, then the timer's own
+  schedule takes over.
 - A command a person types does not give up on the timer's run, which can
   hold the lock for hours of downloading: it stops it (the download goes on
   from where it was at the next run) and waits for the lock.
@@ -1149,7 +1224,7 @@ headers (review M3).
 | `BOAT_UPDATE_CHANNEL` | `stable` (`bench` in a `BOAT_BENCH` image), or the build's `BOAT_UPDATE_CHANNEL` | which channel to follow |
 | `BOAT_UPDATE_AUTO` | `download` | `off` / `check` (notify only) / `download` (also fetch in background). **Never installs or reboots** (D12). |
 | `BOAT_UPDATE_METERED` | `no` | download over a metered link? (D14) |
-| `BOAT_UPDATE_RATE_LIMIT` | empty | curl `--limit-rate`; the stall threshold (`--speed-limit`) is kept below it |
+| `BOAT_UPDATE_RATE_LIMIT` | empty | curl `--limit-rate`. The stall threshold is fixed (`--speed-limit` 1 KiB/s for 120 s), so a rate limit must stay well above 1 KiB/s or every window ends as a stall |
 | client cert/key | none | TLS client authentication (D15) |
 | `BOAT_UPDATE_SERVER_CA` | `/data/boat-update/server-ca.pem` if present, else the image's `ca-certificates` | the CA the channel's TLS certificate must chain to (a bench server's own CA); for curl and the stream relay alike |
 
@@ -1451,8 +1526,11 @@ exit criteria wait for the bench board.*
 **Phase 5: OTA stage 1 (check, download, install) and operator tooling.** Effort: M.
 *Implemented; the exit criteria wait for the bench board.*
 
-- **`boat-update` (on the board).** `status` is the default and read-only.
-  It shows:
+- **`boat-update` (on the board).** `status` is the default. It changes
+  nothing, except that run as root it records a trial that ended without a
+  verdict, if nothing has yet (as `history` does). Without root, RAUC does
+  not answer it (5.7), so the other slot's release is unknown and it says
+  so. It shows:
   - the booted slot and whether it is a trial or committed;
   - the last result and its reason;
   - both slots' versions;
@@ -1641,7 +1719,7 @@ All of them run from `lint.sh`, so they cover every PR.
 | 26 | `boat-update rollback` after commit | other slot boots and commits |
 | 27 | `boat-sleep` (and the UDP sleep listener), and root's own `systemctl suspend`, during install and during a trial | refused (`boat-sleep --status` says why) |
 | 28 | both slots broken | A, A, B, then UEFI stop (sticky recovery) is the documented end state; the USB reflash recovers it, and so does the UEFI-menu path once Phase 0 has found it and docs/06 describes it (open until then) |
-| 29 | carry-over | SSH host key, `/root/.ssh`, `/home`, Wi-Fi, BT pairing, hostname, `boat-sleep.key`, passwords (D5) are unchanged after update and after rollback. A Wi-Fi network added after the update, then a rollback and the next install: the network is missing on the old slot (documented), and the install keeps it in `/data/boat-update/displaced/` with an alert; an ordinary forward update keeps nothing and raises no alert |
+| 29 | carry-over | SSH host key, `/home/root/.ssh`, `/home`, Wi-Fi, BT pairing, hostname, `boat-sleep.key`, passwords (D5), as they were before the update, are unchanged after the update and after a rollback. A password changed and a root key removed after the update are back after a rollback (documented; `rollback` warns). A Wi-Fi network added after the update, then a rollback and the next install: the network is missing on the old slot (documented), and the install keeps it in `/data/boat-update/displaced/` with an alert; an ordinary forward update keeps nothing and raises no alert |
 | 30 | SC7 + WoL on both slots | works |
 | 31 | OTA: channel offers a newer bundle, unmetered link | background download; `status` shows "ready"; no install or reboot happens by itself |
 | 32 | OTA: link dropped, SC7 sleep, and reboot, each mid-download | resumes from where it stopped; final SHA-256 matches; never a second full download |
@@ -1661,7 +1739,7 @@ All of them run from `lint.sh`, so they cover every PR.
 | 46 | OTA: the server streams an endless body, or more than `size` | aborted at `size`; the `/data` free-space floor is never crossed |
 | 47 | OTA: a redirect to another host or to `http` | refused; no credential leaves the board |
 | 48 | OTA: two downloads started at once (timer + manual) | the manual one stops the timer's, which resumes at its next run, and goes ahead; two from the timer: the second exits |
-| 49 | OTA: checks across SC7 sleeps and after a link comes up | a check runs on resume and on link-up; at most one per rate-limit window |
+| 49 | OTA: checks across SC7 sleeps and after a link comes up | a check runs on resume and on link-up; at most one per rate-limit window (within it only an unfinished download resumes) |
 | 50 | OTA: check and download during a trial boot | neither runs until the slot is committed |
 | 51 | OTA: a 4G router on Ethernet marked metered in NetworkManager | treated as metered |
 | 52 | OTA stream after a cold boot, with no manual `modprobe` | works (NBD built in) |
@@ -1684,20 +1762,35 @@ install is a one-time full USB reflash that erases the SSD**. There is no
 safe in-place conversion, and the plan does not attempt one.
 
 1. On the old system, back up `/data` (compose, volumes, Signal K state),
-   `/home`, `/root/.ssh` and any hand-edited `/etc` files to a laptop with
-   `rsync`.
+   `/home` (which holds `root`'s home, `/home/root`, and its `.ssh`) and
+   any hand-edited `/etc` files to a laptop with `rsync`. Copy Docker's
+   data root, if at all, as root with `dockerd` stopped and `rsync -aHAX
+   --numeric-ids` (overlay whiteouts are device files, opaque directories
+   are `trusted.*` xattrs); re-pulling the images and copying only the
+   volumes is simpler.
 2. Full flash with `AB_LAYOUT=1`. The ESP lives in the external layout, so
    even `--skip-bootloader` rewrites it. A full flash is still recommended
    for the first A/B install, so that the GRUB-mode `L4TConfiguration`
    overlay lands in QSPI. (`boat-bootmode-guard` would fix the variable at
    runtime regardless.)
 3. First boot: `boat-storage` provisions `/data`, swap and the rootfs size.
-   Restore the backup.
+   Restore only what survives an update: `/data`'s app data, `/home/boat`
+   (on `/data` now), and what 5.8 carries at every install - `/home/root/.ssh`,
+   the Wi-Fi connections, the operator-edited `CONFFILES`. Other hand-edited
+   `/etc` files and the rest of `/home/root` live in the slot and are gone
+   after the first install (5.8): move those settings into `meta-boat` (or
+   onto `/data`) before this migration, not back into the slot.
 4. Put any channel overrides (and the client certificate, if you use one) in
-   `/data/boat-update/`. Then, **over
-   the air**, install a bundle once (A→B) and once more (B→A) to prove the
-   round trip before the boat leaves the dock. After this, the only reasons
-   to bring a laptop to the boat are a BSP bump or a dead board.
+   `/data/boat-update/`. Then prove the round trip before the boat leaves
+   the dock: install a bundle once (A→B) and once more (B→A). The same
+   bundle twice works only by file (`scripts/push-update.sh`, or `sudo
+   boat-update install <file>`): over the air a board takes only a release
+   newer than the one it runs and not already in the other slot, so an
+   over-the-air round trip needs two successively newer releases, published
+   on a channel of the board's own (`testing`, set in
+   `/data/boat-update/channel.conf`) rather than to the fleet. After this,
+   the only reasons to bring a laptop to the boat are a BSP bump or a dead
+   board.
 
 ---
 
@@ -1707,6 +1800,7 @@ safe in-place conversion, and the plan does not attempt one.
 |---|---|---|
 | GRUB on this UEFI mishandles the DTB, initrd or cmdline (SC7, display) | M / H | Phase 0 step 2 first; option C is the fallback |
 | a GRUB-stage hang with no watchdog running | L / H | GRUB patched to keep the UEFI watchdog armed (5.1); Phase 1 exit test; Tegra WDT as a second layer (Phase 0) |
+| a GRUB crash (an exception) with no watchdog running | L / H | the UEFI watchdog cannot fire then (5.1, 5.5): only the Tegra WDT, if Phase 0 shows it runs this early; otherwise a power cycle, after which the counted attempt falls back |
 | Tegra WDT not running in the early kernel | M / M | Phase 0 step 3; enable at probe; otherwise document power-cycle-to-recover for a kernel hang before systemd starts |
 | NVIDIA sticky recovery reached (both slots fail, or a shared fault that slipped past `nofail`) | L / H | the 2+1 attempt budget (5.3); `nofail` shared mounts; a USB reflash today, a UEFI-menu reset once Phase 0 finds it; test 28 |
 | `nvbootctrl verify` doesn't reset the count when booted from `APP_b` | M / H | Phase 1 exit criterion; if it fails, `boat-commit` resets it another way, or the budget becomes 1+1 |
@@ -1765,7 +1859,7 @@ written.
 | M5 | major | Partition labels collide with JetPack SD cards and USB media (initramfs `blkid -l`, `boot-efi.mount`, RAUC) | NVMe partition numbers with a GPT-name check everywhere (fixed PARTUUIDs in v4; see pass 4); initramfs accepts only the two slots and drops the `mmcblk0p1` fallback (5.2); test 24 |
 | M6 | major | RAUC's stock D-Bus policy lets anyone install or mark slots, and containers get the system bus | root-only policy (5.7); test 25 |
 | M7 | major | The trial marker was written after RAUC activates the slot | inverted: `COMMITTED=0` is set in **pre-install**, so a fresh slot is a trial by default (5.3, 5.6); test 9 |
-| M8 | major | Carry-over missed `/root/.ssh` and `/home`, so key-only SSH would lock you out after an update | `/root/.ssh` carried; `/home` on `/data` (D11) |
+| M8 | major | Carry-over missed `root`'s `.ssh` (`/home/root/.ssh`) and `/home`, so key-only SSH would lock you out after an update | `/home/root/.ssh` carried; `/home/boat` on `/data` (D11) |
 | M9 | major | Keys inside `WORKROOT` get deleted; fault bundles were signed with the boat-trusted key | `BOAT_KEYS_DIR` outside `WORKROOT`, no-overwrite, backup; separate bench CA (5.7) |
 | M10 | major | Phase 1 tested the TRY logic before anything could clear it | stub commit unit + `grub-editenv` in Phase 1 |
 | — | minor | read-back hash can't match after `resize`; ext4 image is already 16 GiB; sector margin too small; signing-time/rotation caveats; `--skip-bootloader` reasoning wrong; handlers see only bundle metadata; RAUC `mkdir`s its data dir on the rootfs; inhibitor ends too early; escape hatch on `/data`; `AB_LAYOUT` can't reach kas; FAT32 4 GiB; URL install implies streaming; `boot.img` kernel/module mismatch; GRUB logic testable in QEMU; never `tune2fs -U` | all addressed in 5.2, 5.4, 5.6, 5.7, 5.9, 6, 7, 8 |
@@ -2004,6 +2098,151 @@ The documentation and runbook findings:
 | docs/06 pointed at the Phase 0 runbook for a UEFI-menu recovery that the runbook says is yet to be found | a USB reflash, which empties `/data`, is given as the only recovery known; test 28 stays open until the menu path is found and written down |
 | the bench build blocks ran on after a failed build - copying the previous bundle or flashing an older image - the fault bundles had no release, and the `--stream` soak reused versions the board had already run | `set -e` in every block, a release for every bundle, and a second, higher set for `--stream` |
 | docs/07's first A/B flash skipped `04-unpack-tegraflash.sh`, so it could write an older single-slot unpack back | the step is there, and `05-flash-nvme.sh` refuses an unpack whose layout does not match `AB_LAYOUT` |
+
+### Review pass 12 (internal multi-agent review of the implementation, after pass 11's fixes)
+
+A second review of the whole implementation by independent agents, after
+pass 11's fixes, each finding checked by a second one against the code and
+the upstream sources; then a review of those fixes before the pull requests,
+and CodeRabbit's. The boot and fallback findings:
+
+| finding | resolution |
+|---|---|
+| a slot that failed to load was marked bad only in memory when `grubenv` was unreadable or the ESP refused writes, so every reset picked it again until NVIDIA's sticky recovery, while the other committed slot was never tried | when the mark cannot be saved, GRUB hands over within the same boot, uncounted, to a committed slot (`boat.handover=1`) or to the last resort without the failed slot, and `boat-grubenv-guard` writes the mark from Linux and alerts (5.3) |
+| the guard's rebuild of a torn `grubenv` on a last-resort boot made the booted slot committed, though GRUB passes the same flags whether or not it ever passed a trial: a release that failed its trial became the committed OS unchecked | on a last-resort boot the rebuilt slot is on trial from the next boot (`COMMITTED=0`), the other unusable (5.3) |
+| RAUC's `grub-editenv` reported a failure when only the `grubenv.bak` copy failed, after `grubenv` had already changed: an install was reported failed although the new slot was active | the wrapper fails RAUC's call only when `grubenv` was not written; a failed `.bak` copy is an alert, which the guard mends on the next boot (5.3) |
+| a commit whose `grubenv.bak` copy failed was reported as a failed write of `grubenv` | it is still not a commit - GRUB falls back to that copy after a torn `grubenv`, and would take the slot for a trial again - but its record names the copy (5.4) |
+| outside GRUB with `L4TDefaultBootMode` already 0, the board said only that it had booted slot A, and the docs said "reboot once" - but then GRUB itself failed to load, every reboot returns to slot A, and A may be the older or a rejected release | `boat-bootmode-guard` alerts that GRUB did not load and a reflash is needed; docs/06 and docs/07 tell the two causes apart. A slot-aware DIRECT path and `panic=10` there are left out: the first boots a slot with A's kernel, the second only reaches NVIDIA's sticky state sooner (5.1, 5.5) |
+| changes to `grub.cfg`, GRUB or `KERNEL_ARGS` never reach a board updated over the air, and nothing said so or noticed it | docs/07 says they need a USB reflash. `grub.cfg` passes `boat.esp=N`; the guard alerts only when the running release needs newer boot files than the ESP has (`BOAT_ESP_MIN`), and an ESP merely older than the newest is a note in its journal, since a reflash empties `/data`. Refusing such a bundle before install is left for later (5.9) |
+| `boat-commit` has no default dependencies, so it still ran in emergency mode and reset a committed slot's attempt count: a slot that kept ending in emergency mode was rebooted for ever, never handed over | `boat-commit.service` conflicts with emergency and rescue mode, so the count stands and GRUB falls back (5.5; test 15) |
+| the emergency reboot also ends an operator's own `systemctl rescue` after 60 s, and no user document said so | docs/07 says so, and how to keep the shell (debug-hold, or stopping the unit); the unit's comment too (5.5) |
+| `BOAT_AB_LAYOUT=1` without `UBOOT_EXTLINUX=1` built and flashed an image with no `/boot/initrd` in either slot | `boat-ab-boot` fails the parse (5.1); a harness case runs the check |
+| `test-grub-ab.py` only passed with the host's GRUB 2.12 `grub-emu`: 2.06, the board's, sets `$cmdpath` and has no emu `linux` module | both `$cmdpath` messages are accepted, `linux`/`initrd` map to the `linux` module, and a GRUB build tree's own lists are used; it passes under 2.06 and 2.12 (7) |
+| the GRUB harness never booted slot A on trial, which every second update does: booting A's trial as committed, or uncounted, passed every scenario | A's trial, its read-only ESP and torn-`grubenv` pass-overs and its failed load are scenarios (7) |
+
+The trial, sleep and storage findings:
+
+| finding | resolution |
+|---|---|
+| the A/B lock file was 0644, and `flock` locks a file opened read-only, so any local user could hold every `grubenv` writer off - failing every trial and blacklisting each release | the lock files are 0600, made by a tmpfiles.d entry at boot (`boat-update`'s `/run/boat-update.lock` too) and kept so by `lib.sh` (5.3) |
+| a trial failed for a reason the board can cause too (the ESP, `grubenv`, RAUC, a commit the ESP refused) blacklisted the release with nothing to tell it apart | it still fails - `boat-commit` cannot tell a board fault from a release that caused it - but its record says so and how to install the release again by file, and docs/07 says how (5.4) |
+| `boat-update rollback` off an undecided trial was taken for a skipper's shutdown: the rejected release got its attempt back behind the slot rolled back to, and was never recorded as failed | `--shutdown` treats a reboot to the other, usable slot as a verdict: the slot is marked bad and the release recorded as failed (5.4) |
+| that shutdown record could be written after `/data` was unmounted, and was then lost | `boat-trial-inhibit` is ordered after `data.mount`, so it stops before `/data` is unmounted (5.4) |
+| the gate's last round, with the operator's `health.d` checks, could run past `boat-commit.service`'s 10-minute limit and be killed before its verdict, failing a good release at the deadline | each check gets only the time left before that limit, and `BOAT_HEALTH_CHECK_TIMEOUT` is validated (5.4) |
+| that limit left out `timeout`'s kill grace, and the commit could wait for the A/B lock past the unit's limit | the checks stop 10 s before the limit, the kill grace counted, and the commit waits for the lock only as long as the unit still allows (5.4) |
+| `boat-commit`'s verdicts went only to `last-result`, which the next one overwrote, while the docs sent operators to `boat-update history` for them | every verdict is appended to `history` as well (5.4) |
+| the trial deadline and the shutdown retry sourced `health.conf` like the gate, so one unreadable line there left a trial that never ended (and failed the release at the next power cut) | `--deadline`, `--shutdown` and `--may-sleep` never read it, the gate tries it in a subshell first and alerts, and the deadline's unit reboots if its own run fails (5.4) |
+| that subshell test took a `health.conf` whose last line is a false test (a `[ -x ... ] && ...`) for an unreadable one, and dropped the operator's settings | the file is read unless `sh -n` finds a syntax error or it stops before its end (5.4) |
+| `rauc.service`'s `RequiresMountsFor=/data` restarted DATA's failed check on every on-demand start - every `boat-update status` | `Requisite=`/`After=data.mount`: it waits for a mount under way and fails at once otherwise (5.8) |
+| `boat-install-firefox` wrote to the slot, so every update dropped the helm's Firefox, and a rollback met a profile a newer Firefox had written | on the A/B layout it installs to `/data/opt/firefox`, and a boot unit puts the menu entry back into each new slot; docs say anything else installed in a slot is lost (5.8) |
+| its swap into `/data` copied from the slot's `/var/tmp`, so a full `/data` could leave a half-copied Firefox | the working copy sits beside the install, the swap is a rename, and a failed swap puts the previous Firefox back |
+| the link unit's `ConditionPathIsExecutable=` is a key systemd does not know, so the unit ran unconditionally | `ConditionFileIsExecutable=`, and a wiring check fails on any `Condition`/`Assert` key systemd v250 does not know |
+| `boat-install-firefox --remove` without `/data` removed only the slot's launcher, which the link unit put back, and reported success | it refuses while `/data` is not mounted |
+| the gate does not see the helm display or the compose stack, and `health.d` was undocumented, silent and could hang on a check that ignored SIGTERM; a `/data` unit could not be required safely | the display stays out of the gate by design, now said (5.4); `BOAT_HEALTH_DATA_UNITS` for units on `/data`, `health.d` documented, with `timeout -k` and its output in the journal |
+| the gate passed a trial while DATA was still being checked - RAUC, Docker and `health.d` were skipped as if DATA had failed | a trial is not decided while DATA's check or mount is under way; at the deadline it is decided without them (5.4) |
+| nothing at the helm shows a trial or an ALERT, and docs/07 never said the power key does nothing while an install writes | docs/07 says so; a helm-side indication stays out of scope, recorded as a limit (5.4) |
+| `/etc/boat-ab-nocommit` switched the gate off undocumented, in every image, and the deadline still failed such a trial | the switch is gone; a harness case keeps the gate free of switches the deadline lacks |
+| root's own `systemctl suspend` went through the trial and install inhibitors (logind never holds root back with root's locks), and the gate's retry clock counted time asleep | a drop-in runs `boat-commit --may-sleep` before every suspend; time asleep is given back to the checks (5.4, 5.6; test 27) |
+| `boat-sleep --status` and `--dry-run` never ran the trial, install or lock refusals they are the diagnostic for | both run the same checks as a real run; `--dry-run` exits 1 where it would refuse (5.6) |
+| `boat-sleep` knew a trial only by `boat-trial-inhibit` running, so early in a trial boot, or with that unit failed, it slept | it reads `boat.trial=1` and this boot's commit record, as `boat-update` does (5.6) |
+| a connection flood to port 22 tripped `sshd.socket`'s trigger limit, failing it for the boot - and with it every trial | `sshd.socket` has no trigger limit (a drop-in), and the gate restarts a socket stopped by one (5.4) |
+| no harness looked at the wiring the shutdown retry and RAUC's `grub-editenv` depend on | `test-ab-scripts` checks the units, the drop-ins and the recipes' install paths against each other |
+| the RAUC handler cases only ever installed into slot B | cases install into, refuse, and activate slot A from slot B |
+| DATA's check, with no time limit, held the helm desktop and non-root logins off, and nothing said why | kept, deliberately (no login into a stale home), and now said: on the console, in the units and in docs/07 (5.8) |
+| the DATA seed's journal was a hole, so a flash that skips holes (`bmaptool`) left the previous filesystem's journal, same UUID, for a crash to replay | the recipe writes the journal out as zeros; a harness case builds the seed and checks it (5.2) |
+| journald's default `SystemKeepFree` (up to 4 GiB) on a nearly full DATA stopped the journal growing, losing older boots sooner | `SystemKeepFree=512M`, well below `boat-update`'s free-space floor (5.8) |
+| the storage harness stubbed every command and never looked at the order systemd starts DATA's units in, so a lost `After=`/`Before=`/`Requires=` passed | `test-boat-storage.py` runs `boat-storage.bb`'s `do_install` and checks each line of the DATA, swap, grow and RAUC wiring 5.8 relies on, the start order end to end, that every DATA mount is `nofail` and nothing early waits for DATA; deleting any of those lines fails it |
+
+The update client findings:
+
+| finding | resolution |
+|---|---|
+| the clock gate asks `chronyc`, which is a package of its own that nothing installed, so on the board `timedatectl` always decided, untested | `boat-update` recommends `chronyc`; the harness also runs the gate with only `timedatectl` (5.10) |
+| `systemd-run` and `systemd-inhibit`, which every install and the clock retry run, reached the image only as a recommendation of systemd's | `boat-update` depends on `systemd-extra-utils` |
+| the link was the main table's default route, and transfers were bound to it: a channel behind a split-tunnel VPN could not be reached, a policy-routed WireGuard default was bypassed, and an IPv6-only link was "no network" | the link is the device the kernel routes the channel's address through (`ip route get`), with the metered and VPN rules applied to it (5.10) |
+| this image's NetworkManager has no ModemManager plugin, so a USB modem or a tethered phone was guessed unmetered and downloaded over cellular | a device on a USB modem or tethering driver counts as metered unless its connection says `metered no`; docs/07 and test 36 say so (5.10) |
+| on a fleet moving to a new L4T, every later release published without `--reflash` was an alert on each boat not yet reflashed | a newer release on another L4T is "reflash at the dock" with or without the flag, never an alert; docs/07 says how to publish during the move (5.10) |
+| `boat-update` never read the index's `firmware`, so a release on the same L4T built against another device tree was offered and downloaded to READY, then refused by the pre-install handler; the docs said such boards were told to reflash | the index's `firmware` is checked against the board's `/usr/lib/boat-ab/firmware.id` before any download: a mismatch is "reflash at the dock", not an alert, as for a BSP bump; a side without the record is offered as before (5.9, 5.10) |
+| any local process could fill the stream relay with idle connections, each holding a thread and a file, and make a streamed install fail | a connection from anyone but RAUC is closed as it is accepted, a refused request closes its connection, an idle one is closed after a minute, and only so many are held (5.10) |
+| the relay needed a self-signed root in `server-ca.pem` where curl took an intermediate, so streams failed where checks worked | the relay trusts what curl trusts; docs/07 and `channel.conf` ask for the root CA (5.10) |
+| a stop during the mount of the other slot, a closed terminal, or a busy mount point could leave that slot mounted, and RAUC then refused every install into it; the probe mount was also open to every local user (no `nosuid`) | the flashed slot's release is read with `debugfs`, without mounting it; a hang-up unwinds like a stop (5.10) |
+| a typo in `/data/boat-update/channel.conf` stopped `rollback`, `status`, `history` and `debug-hold` as well as every check | only the verbs that use it read it; `status` shows the typo as an alert, and the timer's run fails (5.10) |
+| `boat-update install <file>` read `channel.conf` first, so a typo or a refused URL in it stopped `push-update.sh`'s offline install | an install that does not stream goes on with the defaults and a warning when `channel.conf` cannot be read (5.10) |
+| `BOAT_UPDATE_CHANNEL` defaulted to `stable` in `BOAT_BENCH` images, which then refused every stable index as an alert | the recipe defaults it to `bench` when `BOAT_BENCH = "1"` (5.10) |
+| a redirected or missing bundle was a window without progress, repeated for ever without an alert, and a redirect's page stayed at the start of the `.part` | a redirect or any answer but the bundle is an alert, and its bytes are cut off the `.part`; an index that redirects is reported as a redirect (5.10) |
+| a check that got no answer still used up the 30-minute rate limit, so the link-up trigger that would have worked did nothing | only a check the channel answered stamps it (5.10) |
+| any pending offer lifted the rate limit, so with `AUTO=check` or a ready bundle every network event fetched the index again | within the window nothing asks the channel again; only an unfinished download resumes (5.10, test 49) |
+| a background download never re-read `channel.conf`, and a stale "waiting: metered link" stayed in `status` while it downloaded | a background download follows `channel.conf` as it is at each window, and the wait is cleared on disk (5.10) |
+| a CDN or proxy caching `index.p7` raised replay alerts and delayed withdrawals, and a parallel object-storage sync could put the index up first | docs/07 says not to cache the index and how to upload to object storage; the replay alert names a stale cache as a cause |
+| no board-side case had a ready download when the channel withdrew it, lost or replayed its index, rebuilt the version or moved past a withdrawal the board missed; a rebuild under the same bundle name kept the old file "ready" and was never fetched | `test-boat-update.py` runs each case on a READY bundle; a new offer of another file now drops the old download and its ready record, and `install` warns when the last check failed (only a signed index withdraws, 5.10) |
+| an offer housekeeping dropped left its partial download on `/data`, unseen | the partial download goes with the offer |
+| an `OSError` (a full `/data`, a file gone mid-`status`) ended in a traceback, with no alert | it is a failure with its reason, kept as an alert where it can be; `status` shows a nearly full `/data` itself |
+| a trial outcome `boat-update` recorded was not on disk before `state.json` dropped the install, so a second power cut could offer the failed release again | the failed version (and the history line) is fsynced first |
+| the bundle hook's refusals and warnings never reached the operator: only lines starting `# boat-rauc-` were shown | the hook's lines are shown too, and its warnings from an install that worked stay in `status` until the trial ends |
+| the install wrapper read its result from the unit name every install shares, so a second install's reset-failed could turn a failed install into success | the install's own run reports its exit status to a file only its wrapper knows (5.10) |
+| the install wrapper first replayed the previous install's last log lines | it follows the unit's log from the moment it started it |
+| a link that dropped mid-handshake or mid-transfer was an alert, and a captive portal's certificate looked like a trust problem only | a connection cut off before any HTTP answer is the board's state; an untrusted certificate stays an alert that names a captive portal as a cause |
+| a `BOAT_UPDATE_URL` with a user name and password worked for checks, and put the password in `ps`, `state.json` and `status` | it is refused, without repeating it (5.10) |
+| the client-key check missed a key kept inside the client certificate file | a certificate file that holds its key is held to the key's rule |
+| a USB reflash emptied the channel settings, and the image had no way to carry the channel URL | `BOAT_UPDATE_URL` and `BOAT_UPDATE_CHANNEL` can be built into the image; docs/07 and docs/06 say to restore the settings and credentials after a reflash (5.10) |
+| rows 34, 35 and 45 were said to be covered off-target, but nothing tested the system trust store, an expired index certificate, another `compatible` or another L4T | `test-boat-update.py` does now; the runbook's coverage table lists every harness (section 7) |
+| the `nmcli` stub ignored its arguments, so the VPN branch of the metered check never ran | the stub answers per device; a VPN over a metered link and over an unmetered one are tested |
+| the harness did not cover HTTP errors, the rate limit with an offer, trial outcomes through `status` and `history`, `download`'s exit 2 on a metered wait, rollback from a trial, a stop's unwinding or an `OSError` | all added to `test-boat-update.py` |
+| the harness's 416 had no `Content-Length`, so each run stalled two minutes | it sends one; the run takes about half a minute, and `lint.sh` shows what failed under 3.10 |
+
+The RAUC, bundle and host tooling findings:
+
+| finding | resolution |
+|---|---|
+| an install with `/data` full or out of inodes lost the fallback slot for nothing: RAUC marks the target `OK=0`, then fails to save its status on `/data` | the `pre-install` handler refuses an install with less than 8 MiB or 64 inodes free on `/data`, before anything is marked; matrix row 38 (5.6) |
+| the Docker-major warning reached nobody on a successful install: RAUC shows a handler's output only in its own journal | it is an alert in `status` until the reboot and goes into the install's `history` line; it still does not refuse, `rollback` does not check it, and the risk table names the journal format too (5.8) |
+| only the L4T string guarded flash-only firmware: a bundle built against another kernel DTB within one L4T release installed silently | each image records its DTB and overlays as `firmware.id`, the bundle carries it, `pre-install` refuses another value and `publish-update.sh` wants `--reflash`; UEFI is not covered (5.9) |
+| an edited `health.conf` was carried forever, so a release that renamed a gated unit failed its trial on every board that extended the gate | a carried unit list naming a unit the new slot lacks gets a merged list appended (the board's units it has, then the release's), and the release's own file goes beside it as `.boat-default` (5.8) |
+| a default carried from an image without the record counted as edited at every later update, not "once" as documented | documented as such; the release's version is always beside it as `.boat-default` to take back, and the unit-list merge covers the case that fails trials (5.8) |
+| settings changed after an install were missing after a rollback or fallback, and the next install destroyed the newer copy for good | the `pre-install` handler keeps the connections, pairings and `authorized_keys` the target holds and this slot lacks or has otherwise in `/data/boat-update/displaced`, with an alert; docs/07 and matrix row 29 say so (5.8) |
+| that keeping raised a false alert on every ordinary forward update and copied the older slot's stale PSKs, revoked keys and BlueZ-rewritten pairings to `/data` | only files changed after the later of the two slots' installs (RAUC's `installed.timestamp` in its central status file) count, nothing without either record, and the target is mounted `ro,noload,nosuid,nodev,noexec`; the clock dependence is a stated limit (5.8) |
+| `conffile-defaults.sha256` was recorded before `sort_passwd`, `rootfs_reproducible`, the package-data removal and `ldconfig` changed `/etc` | it is recorded first in `do_image`, after everything `do_rootfs` does (5.8) |
+| the plan said the bundle key could live on a PKCS#11 token, but `boat-bundle` overrode `RAUC_KEY_FILE` and required a file | a `pkcs11:` URI in `local.conf` works, with `RAUC_PKCS11_MODULE` and `libp11-native`; a token that needs a PIN is not supported (5.7) |
+| the image keyring was installed from `BOAT_KEYS_DIR` unchecked, so a hand-built rotation keyring could ship the CA's private key on every board | the build refuses a keyring with a private key, a non-certificate block or a non-CA certificate, and compares the bench CA by certificate; `publish-update.sh` refuses a private key too (5.7) |
+| `03-build.sh` silently ignored a release, floor or key directory set after `02-configure-build.sh`, so a raised security floor never reached `system.conf` | `03-build.sh` stops when one set in the shell or `env.sh` is not the one in `local.conf`, and logs the release and floor it builds; docs/07 and `env.sh` say to run 02 again (5.7) |
+| that check compared `BOAT_KEYS_DIR`, which `env.sh` always defaults, so a build directory configured with its own keys died from every new terminal | the key directory is compared only when the shell gave it; the release and floor, which `env.sh` leaves empty, as before (5.7) |
+| `05-flash-nvme.sh` compared the unpack with the shell's `AB_LAYOUT`, so in a new terminal a stale single-slot unpack was flashed over an A/B board | the configured build directory decides, and a contradicting `AB_LAYOUT` is refused; the variable decides only without one |
+| `publish-update.sh` needed OpenSSL 3 and rsync 3.2.3 on both ends, and an old OpenSSL showed up as a bundle that does not verify | it checks for OpenSSL 3 first and shows OpenSSL's whole error; the channel directory is made without `--mkpath`; docs/02 and docs/07 name the requirement (5.10) |
+| the index (and, locally, the bundle and directories) was published with the publisher's umask, so under 077 the web server could not read it | published files are 0644 and directories 0755 whatever the umask (`--perms --chmod` over rsync) (5.10) |
+| the index serial had no lock and depended on the clock, so a second publisher with a lagging clock published a serial boards reject as a replay | publishes take a lock next to the counter, and the serial is also above the channel's current index, read back from the destination (5.10) |
+| `push-update.sh` passed ssh-style `BOAT_SSH_OPTS` to scp, so the documented `-p PORT` broke the no-internet path | it copies over ssh, as `ab-soak.sh` does (5.10, Phase 5) |
+| `push-update.sh` failed for `BOAT_SSH_USER=boat`, which `wol/README.md` documents | a non-root user runs the board's commands through `sudo -n`, as `boat-sleep.sh` does |
+| `push-update.sh` left multi-GB bundles on `/data` after a failed or `--no-reboot` install, and its sessions had no keepalive | its own copy is removed on every exit, with copies earlier runs left a day ago or more, and ssh keeps the session alive |
+| that cleanup removed every bundle in the incoming directory, including one another push was copying or installing (CodeRabbit) | only this push's bundle and `.part`, and leftovers untouched for a day |
+| `publish-update.sh` went on as if the channel were new when it could not read the channel's index back, with no serial or device tree to keep above (CodeRabbit) | only a missing index - a channel's first publish, which rsync reports with exit 23 and a `link_stat` error naming that `index.p7` - goes on; any other failure, including a "No such file" about something else, stops the publish with rsync's exit status and message |
+| `publish-update.sh` treated a channel index that it read back but that did not verify under the key directory's CA, or had no readable serial, like no index at all, so the serial and device-tree checks were skipped (CodeRabbit) | such an index stops the publish with openssl's message; only a missing index goes on |
+| an unset `RAUC_KEY_FILE` failed `boat-bundle`'s parse in its checksum expression, before the recipe's own check could say what was missing (CodeRabbit) | an unset key adds nothing there, and `boat_check_bundle_keys` reports it |
+| two `test-boat-update.py` checks passed only as root and without chrony on the host, and failed on CI's runner | a `chronyc` that fails stands in for none, and the client key's owner check goes by the real uid while the harness poses as root |
+| `push-update.sh` and `ab-soak.sh` judged the reboot by ping, which a jump host or an ssh_config alias does not reach | both wait for a new boot ID over SSH (`wait_for_new_boot`) |
+| the TypeScript client's `listen()` bound 9099 beside `boat-sleep-listener` with `SO_REUSEADDR` and silently took every sleep request on the boat | it no longer sets `reuseAddr`, so a taken port fails with `EADDRINUSE`; the README says it belongs on another host or port, and that `onSleep` on the boat must hand off to `boat-sleep` |
+| the layout harness never ran NVIDIA's real template order (ids, `APP`/`APP_b` last), and the initramfs harness ran `/init` under one shell | `test-ab-layout.py` runs NVIDIA's R35.6.4 partition list too, and `test-ab-initramfs.py` every POSIX shell present (busybox ash when installed); the storage units' ordering is left to `test-boat-storage.py` |
+| the bundle-hook harness never checked the machine-id, sleep key, time zone, boot control, listener drop-in or pairing carry-over | each is now asserted byte for byte (and mode, link) in the new slot |
+| the publish harness never checked the index's `sha256` and `size` | both are asserted, and the published index passes `boat-update`'s own `validate_index` and `decide` |
+| no harness modelled fleet flows: promotion, withdrawal, version reuse, a stale index, a second publisher | `test-publish-update.py` runs them through `boat-update`'s own checks; the board-side cases with a ready download pending are in `test-boat-update.py` |
+
+The documentation findings:
+
+| finding | resolution |
+|---|---|
+| docs/06's fix for a reboot during every sleep, `BOAT_SLEEP_STOP_WATCHDOG=1`, does nothing on an A/B image, where systemd holds the watchdog | docs/06 and docs/05 say so, and send such a reboot to the bench (test 30); a sleep-time switch for systemd's watchdog is left out, since it would turn off what the fallback relies on (5.5) |
+| docs/06 called on-board edits of the helm's keyboard and screen-blank settings permanent, though they live in the slot, and three places blamed sleep locks on an XFCE power manager the image does not install | docs/06 points at the build (`BOAT_HMI_XKB_LAYOUT`, meta-boat's `startx` arguments) or an autostart entry in `~boat` on `/data`; docs/05, docs/06 and `boat-sleep` name the locks the image holds |
+| the dock-reflash recovery flashed whatever `boat-image` the build directory built last - a bench image after a bench run, or an older release - and left out the build and `AB_LAYOUT=1` | docs/07 "Reflashing at the dock" gives the whole sequence with the release named, and the sticky-state and BSP-bump entries in docs/06 and docs/07 point at it; a check in `05-flash-nvme.sh` that tells such an unpack apart would have to read the unpacked rootfs, and is left for later |
+| docs/07 and 5.10 said bundles hold nothing secret, but every bundle holds the image's `/etc/shadow` - also a private `BOAT_PASSWORD_HASH`, which the docs tell operators to set | docs/07, docs/05, the README and `boat-image.bb` say a private hash needs a channel with a client certificate, or locked passwords on the boards (5.7, 5.10) |
+| how to withdraw a bad release was undocumented; the obvious way, deleting `index.p7`, withdraws nothing; and "the worst a channel host can do is withhold updates" left out a withdrawal it withholds | docs/07 and 5.10 give the procedure (publish the release before it again) and what it does to a board in each state; docs/07 and 5.7 say a board that missed the withdrawal can still be served the older index. A withdrawal field or an index expiry is left out (5.7, 5.10) |
+| `boat-update` status, documented without `sudo`, cannot ask RAUC (its D-Bus is root's alone), so it showed the other slot's release as "unknown" with no reason and missed a half-written slot | the docs say `sudo boat-update`, and without root `status` says why (Phase 5) |
+| a good release that failed its trial only through power cuts was never offered again, and nothing said how to try it again | docs/07 and docs/06: install the bundle by file, which does not consult the failed list, or delete its line from `failed-versions` and check again; the list still never shrinks by itself |
+| only root's `.ssh` is carried, so a `docker login` as root (which `boat-compose` pulls with), a `.gitconfig` and scripts in `/home/root` were lost at each install, while docs/07 read as if root's home were kept | docs/07, docs/05 and 5.8 say what is carried and to log in to a registry again after an update (5.8) |
+| a rollback or a GRUB fallback silently brings back credentials revoked since the other slot was installed: a password, a root SSH key, the sleep key | `boat-update rollback` warns before it reboots, and docs/07, 5.8 and test 29 say to revoke them again; a fallback stays silent, and keeping them on `/data` would lose root's SSH when DATA breaks (5.8; test 29) |
+| the UEFI watchdog was said to cover every GRUB failure, but it is a firmware timer event that cannot fire once GRUB crashes into the firmware's exception handler; the patch also said the kernel disarms it | 5.1, 5.5 (a row of its own), section 9, docs/07 and runbook 2.3 say a crash needs the Tegra WDT or a power cycle, after which the counted attempt falls back; the patch says the firmware's `ExitBootServices` disarms it (5.1, 5.5) |
+| plan statements the code does not match: Tier 1's `rauc status` on every boot, a read-only `status`, a clock retry after two minutes, a stall threshold kept below the rate limit | 5.4, 5.10 and Phase 5 say what the code does: `rauc status` only with DATA, root's `status` records a trial outcome, 2 to 32 minutes, a fixed 1 KiB/s (5.4, 5.10) |
+| section 8's migration backed up a `/root/.ssh` that does not exist, restored slot files its own round trip then dropped, gave no Docker copy flags, and asked for an over-the-air round trip one release cannot make | it backs up `/home`, restores only what survives an update, gives the Docker flags, and proves the round trip by file or with two newer releases on a channel of the board's own (8; test 29) |
+| nothing steps a long-offline board through releases or records which release last wrote `/data`, and what every bundle must keep for the oldest release in the field was written down nowhere | 5.10 "Forward compatibility" and docs/07 list those interfaces and the stepping-stone or reflash procedure; a `min_from` index field and a migration framework are left out - a release already in the field would ignore the field (5.10) |
+| the bench runbook's row 5 could not be built (a floor above the image's own release), and its key step could mint a second fleet CA on a separate bench host | row 5 builds release 2.0.0 with the floor; the key step copies only the fleet CA certificate to a bench host |
 
 ### Your review
 

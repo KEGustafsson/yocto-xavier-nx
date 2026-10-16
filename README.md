@@ -173,7 +173,10 @@ and waking it again from your laptop.
   Root and the `boat` user share the password **`Xavier`**, sshd is built with
   `PermitRootLogin yes`, and `boat` has passwordless `sudo` and is in the
   `docker` group (root-equivalent). Set `BOAT_PASSWORD_HASH` in `local.conf`
-  to change it — `openssl passwd -6 'your-password'`.
+  to change it — `openssl passwd -6 'your-password'`. On the A/B layout
+  every update bundle carries that hash in its `/etc/shadow`, so a private
+  one needs a channel only your boards can read
+  ([`docs/07-updates.md`](docs/07-updates.md) "Access control").
 
   This is a real credential where the image previously had **none** (empty
   passwords plus `PermitEmptyPasswords yes`), but it is not a secret: the hash

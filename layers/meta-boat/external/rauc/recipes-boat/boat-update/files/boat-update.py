@@ -1851,6 +1851,11 @@ def do_rollback(yes=False):
                               % (o, o, env.get("%s_OK" % o, "?")))
         say("this switches the board to slot %s (%s) and reboots"
             % (o, slot_version(o, rauc_slots()) or "unknown version"))
+        # Board settings belong to each slot and are copied only at an
+        # install (plan 5.8): a credential revoked here is valid there.
+        warn("slot %s has the board settings it had when it was installed: a password changed, a root SSH "
+             "key removed or a sleep key rotated since then is back as it was - change them again there"
+             % o)
         if not yes:
             sys.stdout.write("Type 'yes' to go ahead: ")
             sys.stdout.flush()
@@ -2003,6 +2008,11 @@ def do_status(conf, state, conf_problem=None):
         print("  other     slot %s, %s, release %s%s" % (
             o, "usable" if ok else "not usable", slot_version(o, slots) or "unknown",
             " (its last install failed half way)" if written not in (None, "", "ok") else ""))
+        if slots is None and os.geteuid() != 0:
+            # RAUC's D-Bus policy answers root only (plan 5.7), so without
+            # root "unknown" says nothing about the slot itself.
+            print("  note      RAUC answers root only: 'sudo boat-update' shows the other slot's release, "
+                  "a half-written slot and a trial that ended without a verdict")
     if env is None:
         print("  ALERT     grubenv is unreadable")
     if os.path.exists(path("run_ab", "grubenv-repaired")):

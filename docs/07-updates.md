@@ -56,7 +56,12 @@ UEFI -> L4TLauncher -> GRUB (NVMe ESP) -> kernel + initrd of slot A or B
   - a GRUB that hangs (the UEFI watchdog), or a `grub.cfg` that is missing
     or cut short.
 
-  The reset is what lets GRUB count the attempt and fall back.
+  The reset is what lets GRUB count the attempt and fall back. One case has
+  no reset yet: a GRUB that *crashes* (a fault, say on a damaged `/boot`)
+  stops in the firmware's exception handler, where the UEFI watchdog never
+  fires. Only the hardware watchdog, if it already runs then (the Phase 0
+  runbook finds out), or a power cycle ends it; GRUB counted the attempt
+  before loading the slot, so the next boot falls back.
 - If **no slot qualifies** any more, GRUB still boots one, as a **last
   resort**, without counting: a slot that once passed its trial first, the
   flashed slot A otherwise. `boat-update status` then shows an ALERT. A
@@ -156,7 +161,7 @@ there, marked unusable, until the first update overwrites it.)
 ## Day to day: `boat-update`
 
 ```bash
-boat-update                  # status: slots, versions, last result, OTA state
+sudo boat-update             # status: slots, versions, last result, OTA state
 sudo boat-update check       # ask the channel now
 sudo boat-update download    # fetch the offered bundle now (resumable)
 sudo boat-update install --reboot     # write it to the other slot, reboot into it
@@ -165,6 +170,12 @@ boat-update history          # installs, trials and what became of them
 sudo boat-update rollback    # switch to the other slot (if it is usable) and reboot
 sudo boat-update debug-hold on|off    # next boot: stop for inspection after a failure, not reset
 ```
+
+`status` and `history` also run without `sudo`, but RAUC answers root
+only: the other slot's release then shows as unknown (`status` says so), a
+half-written slot is not flagged, and a trial that ended without a verdict
+is not recorded by that look (the next one as root, or the next background
+check, records it).
 
 `boat-update` exits 0 when it did what was asked, and 1 when it refused or
 failed (the message says why). `download` exits 2 when it ended without a
@@ -188,6 +199,15 @@ changed there after the later of the two slots' installs (RAUC's install
 times) count: on an ordinary update the other slot is the older one, whose
 settings this slot started from, and nothing of it is kept. The rule needs
 the clock: a change made while the board's clock was not set can be missed.
+
+**A rollback or a fallback also brings back credentials you revoked.** The
+slot that runs has the `root` and `boat` passwords, `root`'s SSH keys
+(`/home/root/.ssh`), the sleep key and the Wi-Fi passwords as they were when
+it was installed: a password changed, a key removed from `authorized_keys`
+or a sleep key rotated since then is valid again, and nothing alerts you
+after a fallback (`rollback` warns before it reboots). Change or revoke
+them again on this slot. Only what is on `/data` - `/home/boat`, the
+channel settings and credentials - is the same on both slots.
 
 An install, by any path, needs a few MiB and some free inodes on `/data`
 for RAUC's own status, even streamed: RAUC marks the other slot unusable
@@ -234,6 +254,15 @@ stick instead, and then neither slot runs.
     commit that could not be written) is recorded as such; once that is
     fixed, installing the bundle file by name (`sudo boat-update install
     <file>`, or `scripts/push-update.sh`) tries the release again.
+  - A release that failed only because the power went during its trial
+    (an engine start, a second shutdown) is tried again the same way: an
+    install by file name does not consult the failed list. The board
+    deleted its download; the file is in the channel's directory, or the
+    copy you kept when you published it. Or delete the version's line from
+    `/data/boat-update/failed-versions` and run `sudo boat-update check`:
+    it is offered again while the channel still offers it. Nothing removes
+    a line by itself, so a release that really fails is never offered
+    twice.
 
 **Without internet**, from a laptop on the boat's network:
 
@@ -315,10 +344,26 @@ different file nobody has tried. Keep a copy of each bundle you publish:
 the next build of `boat-bundle` deletes it from the deploy directory.
 `--notes FILE` attaches release notes.
 
-To withdraw a release, publish the previous one again: a board that
-checks drops the download it holds, ready or not. Deleting `index.p7`
-withdraws nothing - boards keep what they downloaded, and show the failed
-check as an alert.
+**To withdraw a release**, publish the bundle of the release before it
+again (`publish-update.sh stable <that bundle>`): a new serial that offers
+an older version. What that does depends on where each board is:
+
+- not yet offered it, or downloading it, or holding it READY: at its next
+  check that reaches the channel, the board drops the offer and the
+  download. A board that stays offline until then keeps it READY, and an
+  `install` there installs it;
+- on trial with it: its health gate alone decides;
+- committed to it: it stays there ("up to date"). Run `sudo boat-update
+  rollback` on that board, or fix forward with a new build whose
+  `BOAT_RELEASE` is higher - a board never takes an older release.
+
+Deleting `index.p7` or the bundle withdraws nothing: only a signed index
+does. Boards keep what they downloaded, show the failed check as an alert,
+and `install` warns that the channel may have withdrawn it. The serial
+protects only a board that has seen the withdrawal: one that has not
+checked since can still be served the earlier index (a stale cache, or a
+hostile host) and fetch the withdrawn release, whose signature is still
+good.
 
 **A BSP bump** (a release on a new L4T) cannot go over the air. A board
 running another L4T than a newer release's is told "reflash at the dock"
@@ -339,6 +384,22 @@ the device tree (`firmware`), and a board flashed with another one is told
 alert; a board already flashed with it takes it over the air. A board
 flashed before the device tree was recorded cannot tell: it downloads the
 release, and its install only warns.
+
+**A board that skipped releases** goes straight from what it runs to the
+channel's current release: an index offers one release, and nothing steps
+a board through the ones between. So every release must still install on
+the oldest release in the field, whose code judges it - its RAUC 1.13
+reads the bundle (a verity bundle, its manifest), its `boat-update` the
+index (the fields, the version grammar, the index-signing certificate), its
+pre-install handler the bundle's `[meta.boat]` keys (`l4t`, `release`,
+`firmware`). A release that changes one of these needs a stepping stone:
+first publish a release that understands both, and move on only once
+every board has committed it (nothing reports that for the fleet: ask each
+board's `status`) - or reflash the boards left behind. Data on `/data`
+that a release must convert is converted at boot by the new slot itself,
+safely repeatable, and in a form the older slot still reads after a
+fallback; nothing records which release last wrote `/data`. The plan
+(5.10, "Forward compatibility") has the full list.
 
 **Caches.** `index.p7` keeps its name, so nothing between the board and
 the channel may cache it: serve it with `Cache-Control: no-cache` from the
@@ -374,11 +435,13 @@ it only if all of these hold:
 
 RAUC checks the bundle's own signature again before it is installed. The
 channel host is not trusted for anything but availability: the worst it can
-do is withhold updates. A download never grows past the size the signed
-index gives. A bundle that will not download intact - three re-fetches - or
-that RAUC refuses is **given up**, not counted as a failed trial: a new
-index (the next publish) tries it again. `status` shows when the channel
-last published.
+do is withhold updates - a withdrawal too: by serving a board that has not
+seen the withdrawal the index from before it, it can offer a release you
+have since withdrawn, but only one you signed. A download never grows past
+the size the signed index gives. A bundle that will not download intact -
+three re-fetches - or that RAUC refuses is **given up**, not counted as a
+failed trial: a new index (the next publish) tries it again. `status` shows
+when the channel last published.
 
 A check or download that fails shows in `status` as an **ALERT**, with its
 reason: an index that does not verify or is a replay, a channel whose
@@ -418,7 +481,7 @@ BOAT_UPDATE_RATE_LIMIT=""           # e.g. 200k
 - **Schedule.** The timer looks for updates four times a day, after every
   network change, and after waking from sleep. A check made before chrony
   has set the clock (the board has no battery-backed clock) runs again a
-  few times within the hour.
+  few times over the next hour (after 2, 4, 8, 16 and 32 minutes).
 - **Downloads.** They run in ten-minute windows. Each one resumes where the
   last stopped, whether that was a dropped link, a sleep or a reboot.
 - **Disk space.** A download needs the bundle's size plus 2 GiB free on
@@ -443,9 +506,18 @@ it. When that is a VPN, the board counts as metered if any of its links
 is. `status` shows "waiting for an unmetered link", and `sudo boat-update
 download --allow-metered` overrides it once.
 
-**Access control.** A public channel is the default. Bundles hold nothing
-secret: the image's password hash is already in this repository. To restrict
-it, use a TLS client certificate:
+**Access control.** A public channel is the default. A bundle holds the
+whole image, `/etc/shadow` included: with the repository's default
+`BOAT_PASSWORD_HASH` that is nothing secret, since the hash is in this
+repository anyway. **A build with your own `BOAT_PASSWORD_HASH` puts that
+hash in every bundle**, for anyone who can fetch one to crack offline - and
+it is the password of every board flashed from such a build whose password
+was never changed (an update carries the board's own). Serve such bundles
+only from a channel that needs a client certificate - or log in with SSH
+keys and lock both passwords on every board (`sudo passwd -l root`, `sudo
+passwd -l boat`): an update carries the locked fields, so the hash in a
+bundle then opens only a board freshly flashed from that build. To
+restrict a channel, use a TLS client certificate:
 
 ```bash
 sudo install -m 644 client.crt /data/boat-update/client.crt
@@ -554,8 +626,14 @@ then-install is the fallback.
   `/data/opt/firefox`; each new slot gets its menu entry back at boot);
 - RAUC's state and `boat-update`'s state.
 
-`root`'s home stays in the slot, so its SSH keys still work if DATA is what
-broke.
+`root`'s home (`/home/root`) stays in the slot, so its SSH keys still work
+if DATA is what broke. **Only its `.ssh` is carried to the next slot**
+(below): anything else `root` keeps there - a `docker login` (root's, which
+`boat-compose` pulls with, in `/home/root/.docker`), a `.gitconfig`, a
+deploy key outside `.ssh`, scripts - is missing after the next install, and
+a rollback brings back that slot's older copy. After an update, log in to
+a registry again (`sudo docker login nvcr.io`), and keep scripts on
+`/data`.
 
 Settings that belong to the board rather than the image are copied into the
 new slot at every install:
@@ -657,18 +735,47 @@ whole SSD.
   hand the board to the other slot. Reflash at the dock.
 - **The board stops in the UEFI menu, or will not boot at all.** Both
   slots failed repeatedly, and NVIDIA's own boot counter has marked the
-  drive unbootable. That marker is sticky. Recover with a USB reflash
-  (`scripts/04-unpack-tegraflash.sh boat-image`, then
-  `scripts/05-flash-nvme.sh`), which keeps nothing on the SSD: `/data` starts
-  empty - put the channel settings back afterwards (above). That is the
-  only recovery known today. The UEFI menu may be able
-  to clear the marker without a reflash, but where is not known yet: the
-  Phase 0 runbook (2.6) is where it gets found, and then it is written here
-  and in [`06-troubleshooting.md`](06-troubleshooting.md).
+  drive unbootable. That marker is sticky. Recover with a USB reflash of
+  the release the fleet runs ("Reflashing at the dock", below), which keeps
+  nothing on the SSD: `/data` starts empty - put the channel settings back
+  afterwards (above). That is the only recovery known today. The UEFI menu
+  may be able to clear the marker without a reflash, but where is not known
+  yet: the Phase 0 runbook (2.6) is where it gets found, and then it is
+  written here and in [`06-troubleshooting.md`](06-troubleshooting.md).
 - **"... is a BSP bump for this board: reflash at the dock."** The new
   release is built on another L4T (or, "built against another kernel
-  device tree", on another DTB of the same L4T). Flash it over USB. Like the first flash,
-  **a USB flash empties `/data`**: copy off what you need first, and put
-  the channel settings and credentials back afterwards.
+  device tree", on another DTB of the same L4T). Flash that release over
+  USB ("Reflashing at the dock", below; for a new L4T, run
+  `scripts/01-fetch-layers.sh` for its layers first). Like the first
+  flash, **a USB flash empties `/data`**: copy off what you need first, and
+  put the channel settings and credentials back afterwards.
+
+### Reflashing at the dock
+
+`04-unpack-tegraflash.sh boat-image` unpacks whatever `boat-image` the
+build directory built last. After a bench run there, that is a bench image,
+which trusts the bench CA and refuses every boat bundle; after an older
+build, an older release, perhaps below the fleet's security floor. So
+build the release you mean first, in a subshell:
+
+```bash
+(
+  set -e
+  unset BOAT_BENCH BOAT_FAULT
+  export AB_LAYOUT=1 IMAGE=boat-image
+  export BOAT_RELEASE=<release>           # the fleet's, or the BSP bump's
+  export BOAT_MIN_BUNDLE_VERSION=<floor>  # the fleet's floor; empty if none
+  scripts/02-configure-build.sh      # makes a bench build directory a boat one
+  scripts/03-build.sh
+  scripts/04-unpack-tegraflash.sh
+  scripts/05-flash-nvme.sh           # board in recovery mode; erases the SSD
+)
+```
+
+`03-build.sh` refuses a build directory still configured for a bench image,
+and `05-flash-nvme.sh` an unpack of the wrong layout; neither can tell one
+boat release from another, so the release is yours to name. (A build with
+the same `BOAT_RELEASE` as a published bundle is a rebuild, not that
+file: fine to flash, as the board takes later releases over the air.)
 
 See also [`06-troubleshooting.md`](06-troubleshooting.md).
