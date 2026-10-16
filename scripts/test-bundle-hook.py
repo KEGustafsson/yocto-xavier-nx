@@ -16,6 +16,7 @@ directory instead of /). Exit status: 0 = all passed, 1 = a case failed.
 import hashlib
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -49,20 +50,32 @@ def put(path, text, mode=None):
 
 class Slots:
     def __init__(self, root, old_shadow=OLD_SHADOW, new_shadow=NEW_SHADOW, fail_copy=None,
-                 health=None, shipped=None):
+                 health=None, shipped=None, old_from=None):
         """health: the running slot's /etc/boat-update/health.conf (None:
         none). shipped: what its image shipped there, as recorded in
-        conffile-defaults.sha256 (None: an image without the record)."""
+        conffile-defaults.sha256 (None: an image without the record).
+        old_from: a directory to take the running slot from instead (the
+        new slot of an earlier update, for a second one)."""
         self.root = root
         self.old = os.path.join(root, "old")
         self.new = os.path.join(root, "new")
-        put(self.o("etc/hostname"), "boat-one\n")
-        put(self.o("etc/machine-id"), "1" * 32 + "\n")
-        put(self.o("etc/ssh/ssh_host_ed25519_key"), "OLD KEY\n", 0o600)
-        put(self.o("etc/NetworkManager/system-connections/marina.nmconnection"), "[wifi]\n", 0o600)
-        put(self.o("var/lib/bluetooth/AA:BB/info"), "paired\n")
-        put(self.o("home/root/.ssh/authorized_keys"), "ssh-ed25519 AAAA root\n", 0o600)
-        put(self.o("etc/shadow"), old_shadow, 0o600)
+        if old_from:
+            shutil.copytree(old_from, self.old, symlinks=True)
+        else:
+            put(self.o("etc/hostname"), "boat-one\n")
+            put(self.o("etc/machine-id"), "1" * 32 + "\n")
+            put(self.o("etc/ssh/ssh_host_ed25519_key"), "OLD KEY\n", 0o600)
+            put(self.o("etc/NetworkManager/system-connections/marina.nmconnection"), "[wifi]\n", 0o600)
+            put(self.o("var/lib/bluetooth/AA:BB/info"), "paired\n")
+            put(self.o("home/root/.ssh/authorized_keys"), "ssh-ed25519 AAAA root\n", 0o600)
+            put(self.o("etc/shadow"), old_shadow, 0o600)
+            put(self.o("etc/boat-sleep.key"), "BOARD SLEEP KEY\n", 0o600)
+            os.symlink("/usr/share/zoneinfo/Europe/Stockholm", self.o("etc/localtime"))
+            put(self.o("etc/nv_boot_control.conf"), "TNSPEC board-own\n")
+            put(self.o("etc/systemd/system/boat-sleep-listener.socket.d/port.conf"),
+                "[Socket]\nListenDatagram=9199\n")
+            if health is not None:
+                put(self.o("etc/boat-update/health.conf"), health)
         # The new slot as the image ships it.
         put(self.n("etc/hostname"), "image-default\n")
         put(self.n("etc/machine-id"), "")
@@ -71,8 +84,12 @@ class Slots:
         put(self.n("var/lib/bluetooth/README"), "image\n")
         put(self.n("etc/shadow"), new_shadow, 0o640)
         put(self.n("etc/boat-update/health.conf"), NEW_HEALTH)
-        if health is not None:
-            put(self.o("etc/boat-update/health.conf"), health)
+        os.symlink("/usr/share/zoneinfo/UTC", self.n("etc/localtime"))
+        put(self.n("etc/nv_boot_control.conf"), "TNSPEC image\n")
+        # The units the new release has: it moved sshd from a socket to a
+        # service; the app's unit is a template instance.
+        for unit in ("sshd.service", "my-app@.service"):
+            put(self.n("lib/systemd/system/" + unit), "[Unit]\n")
         if shipped is not None:
             put(self.o("usr/lib/boat-ab/conffile-defaults.sha256"),
                 "%s  /etc/hostname\n%s  /etc/boat-update/health.conf\n"
@@ -126,6 +143,19 @@ def carried(s, rc, out):
     expect(e, conns == ["marina.nmconnection"],
            "system-connections should be the running slot's, whole: %s" % conns)
     expect(e, os.path.exists(s.n("home/root/.ssh/authorized_keys")), "root's .ssh not carried")
+    expect(e, slurp(s.n("etc/machine-id")) == "1" * 32 + "\n", "machine-id not carried")
+    key = s.n("etc/boat-sleep.key")
+    expect(e, os.path.exists(key) and slurp(key) == "BOARD SLEEP KEY\n"
+           and stat.S_IMODE(os.stat(key).st_mode) == 0o600, "boat-sleep.key not carried, mode 0600")
+    expect(e, os.path.islink(s.n("etc/localtime"))
+           and os.readlink(s.n("etc/localtime")) == "/usr/share/zoneinfo/Europe/Stockholm",
+           "localtime not carried as the board's link")
+    expect(e, slurp(s.n("etc/nv_boot_control.conf")) == "TNSPEC board-own\n", "nv_boot_control.conf not carried")
+    dropin = s.n("etc/systemd/system/boat-sleep-listener.socket.d/port.conf")
+    expect(e, os.path.exists(dropin) and "9199" in slurp(dropin), "the sleep listener's drop-in not carried")
+    expect(e, os.path.exists(s.n("var/lib/bluetooth/AA:BB/info"))
+           and not os.path.exists(s.n("var/lib/bluetooth/README")),
+           "Bluetooth pairings not carried as the board's directory, whole")
     leftovers = [d for d, _, fs in os.walk(s.new) for f in fs + [d] if ".boat-new" in f]
     expect(e, not leftovers, "temporary copies left in the new slot: %s" % leftovers)
     return e
@@ -179,19 +209,64 @@ def failed_copy(s, rc, out):
 
 OLD_HEALTH = 'BOAT_HEALTH_UNITS="sshd.socket"\n'
 NEW_HEALTH = 'BOAT_HEALTH_UNITS="sshd.service"\n'
-EDITED_HEALTH = 'BOAT_HEALTH_UNITS="sshd.socket my-app.service"\n'
+# An operator's list that still fits the new release, and one that names a
+# unit it no longer has.
+EDITED_HEALTH = 'BOAT_HEALTH_UNITS="sshd.service my-app@signalk.service"\n'
+STALE_HEALTH = 'BOAT_HEALTH_UNITS="sshd.socket my-app@signalk.service"\nBOAT_HEALTH_DEADLINE=300\n'
 
 
-def health_is(want, says):
+def sourced(path, var):
+    """What boat-commit gets for var from a health.conf: it sources it."""
+    return subprocess.run(["sh", "-c", '. "$1"; printf %s "$' + var + '"', "x", path],
+                          capture_output=True, text=True).stdout
+
+
+def health_is(want, says, units=None, default=None):
+    """want: the file's text (None: no file), or a regex when units is
+    given: what BOAT_HEALTH_UNITS comes to. default: the .boat-default
+    beside it (None: none)."""
     def check(s, rc, out):
         e = []
         expect(e, rc == 0, "exit %d, expected 0" % rc)
         p = s.n("etc/boat-update/health.conf")
         got = slurp(p) if os.path.exists(p) else None
-        expect(e, got == want, "health.conf is %r, expected %r" % (got, want))
+        if units is None:
+            expect(e, got == want, "health.conf is %r, expected %r" % (got, want))
+        else:
+            expect(e, got is not None and re.match(want, got, re.S), "health.conf is %r, expected %r" % (got, want))
+            expect(e, got is not None and sourced(p, "BOAT_HEALTH_UNITS") == units,
+                   "BOAT_HEALTH_UNITS is %r, expected %r" % (got and sourced(p, "BOAT_HEALTH_UNITS"), units))
+        d = p + ".boat-default"
+        got_default = slurp(d) if os.path.exists(d) else None
+        expect(e, got_default == default, "health.conf.boat-default is %r, expected %r" % (got_default, default))
         expect(e, re.search(says, out), "output never matched %r" % says)
         return e
     return check
+
+
+def two_updates(root):
+    """An update from an image without the record, then the next one: the
+    old default carried at the first is carried again at the second (it
+    is not the second image's default either), with the release's own
+    beside it - and the list a release no longer fits is merged both times."""
+    first = Slots(os.path.join(root, "1"), health=OLD_HEALTH, shipped=None)
+    rc1, out1 = first.run()
+    # The second update runs from the slot the first wrote, whose image
+    # recorded its own default.
+    put(first.n("usr/lib/boat-ab/conffile-defaults.sha256"), "%s  /etc/boat-update/health.conf\n"
+        % hashlib.sha256(NEW_HEALTH.encode()).hexdigest())
+    second = Slots(os.path.join(root, "2"), old_from=first.new)
+    rc2, out2 = second.run()
+    p = second.n("etc/boat-update/health.conf")
+    e = []
+    expect(e, rc1 == 0 and rc2 == 0, "exit %d, %d" % (rc1, rc2))
+    expect(e, re.search(r"carried over \S*/etc/boat-update/health\.conf", out2),
+           "the second update did not carry it: " + out2)
+    expect(e, sourced(p, "BOAT_HEALTH_UNITS") == "sshd.service", "BOAT_HEALTH_UNITS is %r after two updates"
+           % sourced(p, "BOAT_HEALTH_UNITS"))
+    expect(e, os.path.exists(p + ".boat-default") and slurp(p + ".boat-default") == NEW_HEALTH,
+           "the release's own health.conf is not beside it")
+    return e, out1 + out2
 
 
 def untouched(s, rc, out):
@@ -202,7 +277,8 @@ def untouched(s, rc, out):
 
 
 CASES = [
-    ("carries hostname, host keys, connections (whole) and root's .ssh", {}, {}, carried),
+    ("carries identity (hostname, machine-id, host keys), the sleep key and listener port, "
+     "connections and pairings (whole), time zone, boot control and root's .ssh", {}, {}, carried),
     ("merges root's and boat's password hashes, keeps the rest and the mode", {}, {}, passwords),
     ("an empty running shadow leaves the image's own (it once wrote an empty one)",
      dict(old_shadow=""), {}, kept_image),
@@ -212,15 +288,23 @@ CASES = [
     ("a conffile nobody changed takes the new image's version",
      dict(health=OLD_HEALTH, shipped=OLD_HEALTH), {},
      health_is(NEW_HEALTH, r"kept the new image's /etc/boat-update/health\.conf")),
-    ("a conffile someone changed is carried over",
+    ("a conffile someone changed is carried over, the release's own beside it",
      dict(health=EDITED_HEALTH, shipped=OLD_HEALTH), {},
-     health_is(EDITED_HEALTH, r"carried over \S*/etc/boat-update/health\.conf")),
+     health_is(EDITED_HEALTH, r"carried over \S*/etc/boat-update/health\.conf", default=NEW_HEALTH)),
+    ("an edited health.conf naming a unit the new release dropped is merged with the release's list",
+     dict(health=STALE_HEALTH, shipped=OLD_HEALTH), {},
+     health_is("^" + re.escape(STALE_HEALTH), r"names sshd\.socket, which this release does not have",
+               units="my-app@signalk.service sshd.service", default=NEW_HEALTH)),
     ("a conffile the image shipped and someone deleted stays deleted",
      dict(health=None, shipped=OLD_HEALTH), {},
      health_is(None, r"left /etc/boat-update/health\.conf out of the new slot")),
-    ("a running image without the record carries every conffile, as before",
+    ("a running image without the record carries every conffile, as before (a list the release "
+     "no longer fits merged)",
      dict(health=OLD_HEALTH), {},
-     health_is(OLD_HEALTH, r"carried over \S*/etc/boat-update/health\.conf")),
+     health_is("^" + re.escape(OLD_HEALTH), r"carried over \S*/etc/boat-update/health\.conf",
+               units="sshd.service", default=NEW_HEALTH)),
+    ("two updates from an image without the record: the old default is carried again, the "
+     "release's own beside it", None, None, two_updates),
     ("ignores any other hook call", {}, dict(arg="install-check"), untouched),
     ("ignores a slot that is not the rootfs", {}, dict(slot_class="appfs"), untouched),
 ]
@@ -232,9 +316,12 @@ def main():
         for i, (name, setup, run_args, check) in enumerate(CASES):
             root = os.path.join(work, str(i))
             os.makedirs(root)
-            s = Slots(root, **setup)
-            rc, out = s.run(**run_args)
-            errors = check(s, rc, out)
+            if setup is None:
+                errors, out = check(root)
+            else:
+                s = Slots(root, **setup)
+                rc, out = s.run(**run_args)
+                errors = check(s, rc, out)
             if errors:
                 failed += 1
                 print("FAIL: %s" % name)

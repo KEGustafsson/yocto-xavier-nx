@@ -14,15 +14,17 @@ and what it refuses.
 Only paths are changed (/proc, /run, /boot/efi, /etc, /data and efivarfs
 are moved into the scratch directory) and a few commands are stubbed: blkid
 (the GPT names), mountpoint, docker, systemctl (unit states and the
-system's; stop and reboot are logged), efivar (writes the fake efivarfs)
-and rauc (status, and mark-good/mark-bad writing grubenv the way RAUC's grub
-backend does). Everything else is the script the image ships. The A/B lock
+system's; stop and reboot are logged), efivar (writes the fake efivarfs),
+df (/data's free space), mount/umount (a slot "mounted" from a scratch
+directory) and rauc (status, and mark-good/mark-bad writing grubenv the way
+RAUC's grub backend does). Everything else is the script the image ships. The A/B lock
 can be held by the test while a script runs, to see that it waits.
 
 Exit status: 0 = all passed, 1 = a case failed, 77 = grub-editenv missing
 (scripts/lint.sh reports that as a skip).
 """
 import fcntl
+import glob
 import hashlib
 import os
 import shutil
@@ -75,14 +77,20 @@ class Board:
                  late=(), editenv_fails=False, committed_mark=False,
                  failed_mark=False, system_state="running", efivars=None,
                  efi_readonly=(), manifest=None, sysconf=None, expect=None,
-                 boat_update=None, setup=None):
+                 boat_update=None, data_free=(10 ** 7, 10 ** 6, 10 ** 6), firmware=None,
+                 settings=None, target_settings=None, run_files=None, setup=None):
         """efivars: {name: bytes} in the fake efivarfs (attributes added).
         efi_readonly: variables efivar fails to write. manifest/sysconf:
         the bundle's [update] and system.conf's [system] keys. expect:
         (release, pid) in boat-update's /run/boat-update/expect.
         boat_update: "ok" or "broken" - a boat-update that starts, or not
-        (None: there is none). setup: called with the board once it is
-        laid out, to add to it."""
+        (None: there is none). data_free: (KiB free, inodes free, inodes in
+        all) on /data.
+        firmware: the running slot's /usr/lib/boat-ab/firmware.id (None:
+        none). settings/target_settings: {path: text} board settings in the
+        running slot / in the slot about to be written (target_settings
+        None: that slot does not mount). run_files: {path under /run: text}.
+        setup: called with the board once it is laid out, to add to it."""
         self.root = root
         for d in ("bin", "proc", "run", "etc", "data", "boot/efi/EFI/BOOT",
                   "efivars", "bundle", "etc/rauc"):
@@ -112,6 +120,23 @@ class Board:
             os.makedirs(os.path.join(root, "run/boat-update"), exist_ok=True)
             self.write("run/boat-update/expect", "%s %d\n" % expect)
         self.boat_update = boat_update
+        self.write("data-free", "%d %d %d\n" % data_free)
+        if firmware is not None:
+            self.write("firmware.id", firmware + "\n")
+        for rel, text in (settings or {}).items():
+            os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+            self.write(rel, text)
+        if target_settings is not None:
+            # What the target slot's file system holds, mounted by the stub.
+            slot_dir = os.path.join(root, "slots", "nvme0n1p2")
+            os.makedirs(slot_dir)
+            for rel, text in target_settings.items():
+                os.makedirs(os.path.dirname(os.path.join(slot_dir, rel)), exist_ok=True)
+                with open(os.path.join(slot_dir, rel), "w") as f:
+                    f.write(text)
+        for rel, text in (run_files or {}).items():
+            os.makedirs(os.path.dirname(os.path.join(root, "run", rel)), exist_ok=True)
+            self.write(os.path.join("run", rel), text)
         for name, value in (efivars or {}).items():
             with open(os.path.join(root, "efivars", "%s-%s" % (name, NV_GUID)), "wb") as f:
                 f.write(b"\x07\x00\x00\x00" + value)
@@ -178,6 +203,26 @@ for last; do :; done
 grep -qx "$last" %s/mountpoints
 """ % r)
         self.write("bin/docker", "#!/bin/sh\necho 'Docker version 24.0.5, build x'\n")
+        self.write("bin/df", """#!/bin/sh
+# df -Pk|-Pi /data
+read -r kib inodes all < %s/data-free
+case "$1" in -Pi) n=$inodes size=$all ;; *) n=$kib size=100000000 ;; esac
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/nvme0n1p18 $size 1 $n 99%% /data"
+""" % r)
+        # mount -o OPTS -t TYPE DEV DIR: DIR becomes a link to slots/<dev>.
+        self.write("bin/mount", """#!/bin/sh
+echo "mount $*" >> %(r)s/log
+for dir; do :; done
+for a; do [ "$a" = "$dir" ] && break; dev="$a"; done
+src="%(r)s/slots/${dev##*/}"
+[ -d "$src" ] || exit 32
+rmdir "$dir" && ln -s "$src" "$dir"
+""" % dict(r=r))
+        self.write("bin/umount", """#!/bin/sh
+echo "umount $*" >> %(r)s/log
+[ -L "$1" ] && rm "$1" && mkdir "$1"
+""" % dict(r=r))
         self.write("bin/systemctl", """#!/bin/sh
 echo "systemctl $*" >> %(r)s/log
 # A case's own answers, if it has any (it exits when it answers).
@@ -206,7 +251,7 @@ var="${name#*-*-*-*-*-}"
 grep -qx "$var" %(r)s/efi-readonly && exit 1
 { printf '\\007\\000\\000\\000'; cat "$file"; } > "%(r)s/efivars/$var-${name%%-$var}"
 """ % dict(r=r))
-        names = ["blkid", "mountpoint", "docker", "systemctl", "efivar"]
+        names = ["blkid", "mountpoint", "docker", "systemctl", "efivar", "df", "mount", "umount"]
         if self.boat_update is not None:
             self.write("bin/boat-update", "#!/bin/sh\nexit %d\n" % (self.boat_update != "ok"))
             names.append("boat-update")
@@ -264,6 +309,8 @@ esac
                              ("/etc/boat-update", r + "/etc/boat-update"),
                              ("/etc/boat-release", r + "/etc/boat-release"),
                              ("/etc/nv_tegra_release", r + "/etc/nv_tegra_release"),
+                             ("/usr/lib/boat-ab/firmware.id", r + "/firmware.id"),
+                             ("\nslot_root=/\n", "\nslot_root=%s/\n" % r),
                              ("/data/boat-update", r + "/data/boat-update"),
                              ("/run/boat-update", r + "/run/boat-update")):
                 text = text.replace(old, new)
@@ -346,8 +393,9 @@ def case(name, script, board, expect_rc, want_env=None, want_bak_equal=None,
          files=None, absent=(), want_efi=None, lock=None, replaced=False,
          not_says=(), check=None):
     """log/not_log: entries that must / must not be in the stubs' command
-    log. files: {path under the fake root: a regex its contents must
-    match}. absent: paths under the fake root that must not exist.
+    log. files: {path (or a glob naming one) under the fake root: a regex
+    its contents must match}. absent: paths (globs) under the fake root
+    that must not exist.
     want_efi: {UEFI variable: its data afterwards}. lock: (seconds, grubenv
     change) - the lock is held that long by another writer, which makes
     that change meanwhile (seconds None: held throughout). replaced:
@@ -805,12 +853,76 @@ CASES = [
          dict(cmdline="rauc.slot=A", env=env_with()),
          1, unchanged=True, says=["configured as %sp3" % DISK],
          extra_env=dict(RAUC_TARGET_B, RAUC_SLOT_DEVICE_2=DISK + "p3")),
-    case("pre-install: warns, but goes on, for a new Docker major version",
+    case("pre-install: warns, but goes on, for a new Docker major version - as an alert and for the history",
          "boat-rauc-pre-install.sh",
          dict(cmdline="rauc.slot=A", env=env_with()),
          0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""),
          says=["Docker 24 -> 25"],
+         files={"run/boat-ab/health-alert": "Docker 24 -> 25.0.1",
+                "run/boat-ab/install-warning": "^Docker 24 -> 25.0.1: "},
          extra_env=dict(RAUC_TARGET_B, RAUC_META_BOAT_DOCKER="25.0.1")),
+    case("pre-install: a warning left by an earlier install is not this one's",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(),
+              run_files={"boat-ab/install-warning": "Docker 24 -> 25.0.1: old\n"}),
+         0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""),
+         absent=["run/boat-ab/install-warning"], extra_env=RAUC_TARGET_B),
+    # RAUC marks the target OK=0 before its first status save to /data/rauc.
+    case("pre-install: refuses a /data without room for RAUC's status, before demoting anything",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), data_free=(4000, 10 ** 6, 10 ** 6)),
+         1, unchanged=True, says=["/data has 3 MiB free"], extra_env=RAUC_TARGET_B),
+    case("pre-install: refuses a /data out of inodes, before demoting anything",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), data_free=(10 ** 7, 3, 10 ** 6)),
+         1, unchanged=True, says=["/data has 3 free inodes"], extra_env=RAUC_TARGET_B),
+    case("pre-install: a file system that counts no inodes is not refused for it",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), data_free=(10 ** 7, 0, 0)),
+         0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""), extra_env=RAUC_TARGET_B),
+    case("pre-install: refuses a bundle built against another kernel device tree",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), firmware="a" * 64),
+         1, unchanged=True, says=["another kernel device tree.*--reflash"],
+         extra_env=dict(RAUC_TARGET_B, RAUC_META_BOAT_FIRMWARE="b" * 64)),
+    case("pre-install: a bundle built against this slot's device tree installs",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), firmware="a" * 64),
+         0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""), not_says=["cannot check"],
+         extra_env=dict(RAUC_TARGET_B, RAUC_META_BOAT_FIRMWARE="a" * 64)),
+    case("pre-install: a slot flashed before firmware.id existed installs, with a warning",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with()),
+         0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""),
+         says=["cannot check the kernel device tree: this slot has no firmware.id"],
+         extra_env=dict(RAUC_TARGET_B, RAUC_META_BOAT_FIRMWARE="b" * 64)),
+    # After a rollback the target slot can hold settings newer than ours.
+    case("pre-install: settings only the target slot has are kept on /data, with an alert",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(),
+              settings={"etc/NetworkManager/system-connections/home.nmconnection": "[wifi]\nhome\n"},
+              target_settings={"etc/NetworkManager/system-connections/home.nmconnection": "[wifi]\nhome\n",
+                               "etc/NetworkManager/system-connections/new marina.nmconnection": "[wifi]\nnew\n",
+                               "home/root/.ssh/authorized_keys": "ssh-ed25519 AAAA new\n",
+                               "home/root/.ssh/known_hosts": "changes by itself\n"}),
+         0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""),
+         says=["slot B holds board settings this slot lacks or has otherwise"],
+         files={"data/boat-update/displaced/slot-B-*/etc/NetworkManager/system-connections/new marina.nmconnection": "new",
+                "data/boat-update/displaced/slot-B-*/home/root/.ssh/authorized_keys": "AAAA new",
+                "run/boat-ab/health-alert": "kept in .*/data/boat-update/displaced/slot-B-"},
+         absent=["data/boat-update/displaced/slot-B-*/etc/NetworkManager/system-connections/home.nmconnection",
+                 "data/boat-update/displaced/slot-B-*/home/root/.ssh/known_hosts",
+                 "run/boat-ab/displaced-B"],
+         log=["mount -o ro,noload -t ext4 %sp2" % DISK, "umount"],
+         extra_env=RAUC_TARGET_B),
+    case("pre-install: a target slot with the same settings keeps nothing",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(),
+              settings={"etc/NetworkManager/system-connections/home.nmconnection": "[wifi]\n"},
+              target_settings={"etc/NetworkManager/system-connections/home.nmconnection": "[wifi]\n"}),
+         0, want_env=env_with(B_COMMITTED=0, BOAT_RETRY=""), not_says=["holds board settings"],
+         absent=["data/boat-update/displaced", "run/boat-ab/displaced-B"], log=["umount"],
+         extra_env=RAUC_TARGET_B),
     # --- RAUC post-install handler ----------------------------------------
     case("post-install: grubenv.bak follows RAUC's activation; history written",
          "boat-rauc-post-install.sh",
@@ -821,6 +933,14 @@ CASES = [
          want_bak_equal=True, says=["installed 1.1.0 into slot\\(s\\) B - it boots as a trial"],
          extra_env=RAUC_TARGET_B,
          files={"data/boat-update/history": r"^\S+ installed 1\.1\.0 into slot\(s\) B, from slot A$"}),
+    case("post-install: the pre-install handler's warning goes into the history",
+         "boat-rauc-post-install.sh",
+         dict(cmdline="rauc.slot=A",
+              env=env_with(ORDER="B A", B_OK=1, B_TRY=0, B_COMMITTED=0),
+              run_files={"boat-ab/install-warning": "Docker 24 -> 25.0.1: may migrate\n"}),
+         0, extra_env=RAUC_TARGET_B, absent=["run/boat-ab/install-warning"],
+         files={"data/boat-update/history":
+                r"^\S+ installed 1\.1\.0 into slot\(s\) B, from slot A - WARNING: Docker 24 -> 25\.0\.1: may migrate$"}),
 ]
 
 
@@ -1713,10 +1833,11 @@ def check(c, root):
                                 or board.raw(bak_path) != board.raw()):
         errors.append("grubenv.bak is not a copy of grubenv")
     for rel in c["absent"]:
-        if os.path.exists(os.path.join(root, rel)):
+        if glob.glob(os.path.join(root, rel)):
             errors.append("%s was written, and must not have been" % rel)
     for rel, pattern in c["files"].items():
-        path = os.path.join(root, rel)
+        paths = glob.glob(os.path.join(root, rel))
+        path = paths[0] if len(paths) == 1 else os.path.join(root, rel)
         text = slurp(path) if os.path.exists(path) else None
         if text is None or not re.search(pattern, text, re.M):
             errors.append("%s does not match %r: %r" % (rel, pattern, text))

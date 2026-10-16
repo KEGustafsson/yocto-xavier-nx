@@ -8,9 +8,14 @@
 #
 # Copies the bundle to /data/boat-update/incoming on the board, installs it
 # into the other slot with `boat-update install --reboot`, then waits for
-# the board to go down and come back, and reports which slot it came back
-# on: the new one (on trial - boat-commit decides) or, if the trial failed
-# and GRUB fell back, the old one.
+# the board to come back - over SSH, with a new boot ID, so a jump host or
+# a Host alias in ~/.ssh/config works as for any ssh - and reports which
+# slot it came back on: the new one (on trial - boat-commit decides) or, if
+# the trial failed and GRUB fell back, the old one. The copy on /data is
+# removed again whatever happens.
+#
+# The board's user is root, or one with passwordless sudo (wol/README.md:
+# BOAT_SSH_USER=boat): its commands then run through `sudo -n`.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../wol/common.sh
@@ -34,20 +39,34 @@ if [[ "${#ARGS[@]}" -eq 2 ]]; then
   # A pattern such as boat-bundle-*.raucb matches the deploy directory's
   # link as well as the bundle: the second file is not a board.
   [[ ! -e "${TARGET}" ]] || die "${TARGET} is a file, not a board - give one bundle, e.g. the deploy directory's boat-bundle-<MACHINE>.raucb link"
-  BOAT_HOST="${TARGET#*@}"
 else
   require_conf BOAT_HOST
   TARGET="${BOAT_SSH_USER}@${BOAT_HOST}"
 fi
 need ssh
-need scp
 
+# ServerAlive* ends a session whose board has gone (a power cut mid-copy or
+# mid-install) after a minute, instead of TCP's retransmission timeout. A
+# board that is busy still answers them, so a long copy or install is fine.
 # shellcheck disable=SC2086 # BOAT_SSH_OPTS is a list of options
-ssh_b() { ssh ${BOAT_SSH_OPTS} -o BatchMode=yes -o ConnectTimeout=15 "${TARGET}" "$@"; }
+ssh_b() {
+  ssh ${BOAT_SSH_OPTS} -o BatchMode=yes -o ConnectTimeout=15 \
+    -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "${TARGET}" "$@"
+}
+boot_id() { ssh_b 'cat /proc/sys/kernel/random/boot_id'; }
 
 log "checking ${TARGET} ..."
 ssh_b 'boat-update status' || die "cannot run boat-update on ${TARGET} - is it an A/B image?"
+# Installing needs root on the board: as another user (the boat account),
+# through its passwordless sudo, the way wol/boat-sleep.sh does.
+SUDO=""
+if [[ "$(ssh_b 'id -u')" != 0 ]]; then
+  SUDO="sudo -n "
+  ssh_b 'sudo -n true' \
+    || die "${TARGET} is not root and has no passwordless sudo - installing needs root (give root@host, or BOAT_SSH_USER=root)"
+fi
 BEFORE="$(ssh_b 'sed -n "s/.*rauc\.slot=\([AB]\).*/\1/p" /proc/cmdline')"
+BOOT_BEFORE="$(boot_id)" || die "cannot read the board's boot ID"
 
 # The name goes into a command line the board's shell runs as root: only a
 # plain bundle name, never one that could end the quoting around it.
@@ -55,13 +74,23 @@ NAME="$(basename "${BUNDLE}")"
 [[ "${NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.raucb$ ]] \
   || die "'${NAME}' is not a plain bundle file name (letters, digits, . _ + -, ending .raucb) - rename it first"
 REMOTE="/data/boat-update/incoming/${NAME}"
+# A bundle is several GB on /data, which Docker and the journal share and
+# boat-update's downloads need room on: it goes again once installed, or
+# when anything fails - as do copies earlier runs left.
+remove_copy() { ssh_b "${SUDO}rm -f /data/boat-update/incoming/*.raucb /data/boat-update/incoming/*.raucb.part" || true; }
 log "copying $(basename "${BUNDLE}") ($(( $(stat -c %s "${BUNDLE}") >> 20 )) MiB) ..."
-ssh_b "mkdir -p /data/boat-update/incoming"
-# shellcheck disable=SC2086
-scp ${BOAT_SSH_OPTS} -o BatchMode=yes "${BUNDLE}" "${TARGET}:${REMOTE}"
+trap remove_copy EXIT
+# Over ssh rather than scp: BOAT_SSH_OPTS is written for ssh (-p, not scp's
+# -P; -l is a login there, a bandwidth limit for scp). A copy cut off half
+# way is never taken for a whole bundle: it is renamed only once complete.
+ssh_b "${SUDO}mkdir -p /data/boat-update/incoming \
+       && ${SUDO}rm -f /data/boat-update/incoming/*.raucb /data/boat-update/incoming/*.raucb.part \
+       && ${SUDO}sh -c \"cat > '${REMOTE}.part'\" \
+       && ${SUDO}mv '${REMOTE}.part' '${REMOTE}'" < "${BUNDLE}" \
+  || die "could not copy the bundle to ${TARGET}:${REMOTE}"
 
 if (( REBOOT == 0 )); then
-  ssh_b "boat-update install '${REMOTE}'"
+  ssh_b "${SUDO}boat-update install '${REMOTE}'"
   log "installed; the other slot boots as a trial on the next reboot."
   exit 0
 fi
@@ -71,24 +100,18 @@ log "installing and rebooting ..."
 # expected end. Any other failure is boat-update refusing or failing the
 # install - the board is not going to reboot, so say why now.
 rc=0
-ssh_b "boat-update install '${REMOTE}' --reboot" || rc=$?
+ssh_b "${SUDO}boat-update install '${REMOTE}' --reboot" || rc=$?
 if (( rc != 0 && rc != 255 )); then
   die "the install failed on ${TARGET} (exit ${rc}, see above) - the board stays on slot ${BEFORE}"
 fi
 
-log "waiting for ${BOAT_HOST} to go down ..."
-wait_for_state down 300 || die "the board did not reboot within 5 minutes - check 'boat-update status' on it"
-log "waiting for it to come back ..."
-wait_for_state up 900 || die "no answer 15 minutes after the reboot - a trial that fails falls back by itself; give it time, then look at the console"
-for _ in $(seq 1 60); do
-  ssh_b true 2>/dev/null && break
-  sleep 5
-done
-AFTER="$(ssh_b 'sed -n "s/.*rauc\.slot=\([AB]\).*/\1/p" /proc/cmdline')" || die "the board answers ping but not SSH"
+log "waiting for the board to reboot and come back ..."
+wait_for_new_boot "${BOOT_BEFORE}" 1200 \
+  || die "no new boot over SSH 20 minutes after the install - if it never rebooted, check 'boat-update status' on it; a trial that fails falls back by itself, so give it time, then look at the console"
+AFTER="$(ssh_b 'sed -n "s/.*rauc\.slot=\([AB]\).*/\1/p" /proc/cmdline')" || die "the board came back, but SSH stopped answering"
 if [[ "${AFTER}" != "${BEFORE}" ]]; then
   log "the board came back on slot ${AFTER} - the new release, on trial until boat-commit passes it:"
 else
   warn "the board came back on slot ${AFTER}, the OLD one: the new release did not pass its trial."
 fi
 ssh_b 'boat-update status' || true
-ssh_b 'rm -f /data/boat-update/incoming/*.raucb' || true

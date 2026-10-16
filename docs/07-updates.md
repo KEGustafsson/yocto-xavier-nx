@@ -16,8 +16,10 @@ What it does **not** do:
   be automatic; writing the other slot, and the reboot into it, always takes
   `boat-update install`, typed by a person.
 - **Update firmware.** QSPI firmware, the kernel DTB and anything else that
-  changes with a new L4T release still need a USB reflash at the dock. A
-  bundle built on another L4T release is refused.
+  changes with a new L4T release still need a USB reflash at the dock - and
+  so does a changed kernel DTB or device-tree overlay within one L4T
+  release (a meta-tegra or kernel update). A bundle built on another L4T
+  release, or against another DTB than the running slot's, is refused.
 - **Update the boot files on the ESP.** GRUB, its `grub.cfg` and the kernel
   command line (`KERNEL_ARGS`) reach a board only with a USB reflash. A
   release that needs newer ones says so in `status` once it runs ("the
@@ -113,6 +115,12 @@ Set it to the release with the fix, in that release's build: from then on a
 board running it refuses anything older. Empty means no floor; it can never
 be above `BOAT_RELEASE` (the build stops).
 
+Both reach the build only through `scripts/02-configure-build.sh`, which
+writes them into `local.conf`: after changing either (or `BOAT_KEYS_DIR`),
+run 02 again before 03. `03-build.sh` stops when a value set in your shell
+or `env.sh` is not the one `local.conf` has, and says which release and
+floor it builds.
+
 **A slot holds about 12 GiB of image content.** Each slot is 16 GiB; the
 build adds 30 % and 512 MiB to the content and stops if the result no longer
 fits.
@@ -130,8 +138,10 @@ scripts/05-flash-nvme.sh
 ```
 
 Unpack first: `05-flash-nvme.sh` flashes whatever was unpacked last. It
-refuses an unpack whose layout does not match `AB_LAYOUT`, so an older
-single-slot unpack is not written back over the erased SSD.
+refuses an unpack whose layout is not the one the build directory is
+configured for (`local.conf`; `AB_LAYOUT` only without one), also in a new
+terminal where `AB_LAYOUT` is not exported, so an older single-slot unpack
+is not written back over the erased SSD.
 
 Use the default `initrd-flash` path. `--host-drive` relies on a
 `doexternal.sh` that meta-tegra's kirkstone branch does not ship, and the DATA
@@ -166,6 +176,22 @@ RAUC, is what the new release broke. A `rollback` from a slot still on
 trial is a verdict: that slot is marked bad, and the release is recorded as
 failed and not offered again.
 
+Board settings live in each slot (see "Storage on the A/B layout"), so after
+a `rollback` - or a fallback - the slot that runs lacks what you changed on
+the other one since its install: a Wi-Fi network added, a device paired, a
+key authorized. Add them again on this slot before the next install. That
+install overwrites the other slot; it first keeps what it holds that this
+slot lacks or has otherwise in `/data/boat-update/displaced/slot-<X>-<time>/`
+and raises an alert, so you can copy back what is still wanted.
+
+An install, by any path, needs a few MiB and some free inodes on `/data`
+for RAUC's own status, even streamed: RAUC marks the other slot unusable
+before it first saves there. The install is refused with nothing changed
+when `/data` is that full; free some space (`docker system prune`) first.
+A new Docker major version in the release is not refused, but warned
+about - in `status` until the reboot, and in the install's line in
+`boat-update history`: a fallback or rollback afterwards runs the old
+Docker on what the new one may have migrated in `/data/docker`.
 `install` runs as its own systemd unit, so losing the SSH session half way
 does not stop it; it still exits non-zero if the install fails. While it
 writes the other slot, shutdown is held off too: the power key and XFCE's
@@ -212,9 +238,13 @@ scripts/push-update.sh yocto/build/tmp/deploy/images/jetson-xavier-nx-devkit/boa
 
 That file is the link to the last bundle built; run it from the
 repository root. (A `boat-bundle-*` pattern names both the bundle and that
-link.) A second argument is the board, as `user@host`; without one,
-`wol/boat.conf` names it. It copies the bundle to the board, installs it,
-reboots, waits, and tells you which slot came back. From a USB stick, use exFAT or ext4 (a bundle over
+link.) A second argument is the board, as `user@host` (or a Host from
+`~/.ssh/config`); without one, `wol/boat.conf` names it. The user is root,
+or `boat`, whose passwordless sudo it then uses. It copies the bundle to
+the board over ssh (`BOAT_SSH_OPTS` are ssh options: `-p` is the port, a
+jump host works), installs it, reboots, waits for the board to answer over
+SSH with a new boot, and tells you which slot came back. The copy on
+`/data` is removed again, also when the install fails. From a USB stick, use exFAT or ext4 (a bundle over
 4 GiB does not fit on FAT32), then `sudo boat-update install /media/<stick>/<bundle>.raucb --reboot`.
 
 ## Over the air: the update channel
@@ -262,10 +292,17 @@ The script:
 
 1. reads the version and L4T release from the bundle itself;
 2. names it by its SHA-256;
-3. writes and signs the index with the index key and the next serial (at
-   least the time in seconds, so a restored key directory or a second
-   publishing machine never goes backwards);
-4. uploads the bundle **first** and the index **last**.
+3. writes and signs the index with the index key and the next serial: at
+   least the time in seconds, and above the serial of the index the
+   channel serves now (read back from the destination), so a restored key
+   directory or a second publishing machine - even one whose clock is
+   behind - never goes backwards. One publish at a time per key directory;
+4. uploads the bundle **first** and the index **last**, readable by the
+   web server (0644, directories 0755) whatever your umask.
+
+It needs OpenSSL 3 (Ubuntu 22.04 or newer) on the publishing host; rsync
+can be any version on either end. The destination directory (or, for
+`host:path`, its parent) must exist.
 
 To promote a release once it has committed on the `testing` board, publish
 the same bundle file to `stable` - not a rebuild, which would be a
@@ -283,6 +320,11 @@ reflashed show "reflash at the dock" for each release. A fix for those
 boats can still go out on the old L4T on the same channel, because boats
 already reflashed see it as older (or give them a channel of their own).
 
+A bundle built against another kernel device tree than the channel's
+current release (a meta-tegra or kernel change within one L4T release)
+needs `--reflash` too - boards keep the DTB they were flashed with and
+refuse such a bundle - and the script stops without it.
+
 **Caches.** `index.p7` keeps its name, so nothing between the board and
 the channel may cache it: serve it with `Cache-Control: no-cache` from the
 origin, and keep a CDN or caching proxy from caching it. Bundles can be
@@ -291,6 +333,12 @@ serving an older index shows on the board as "a replayed or rolled-back
 index". For object storage, upload the bundle, wait until it is complete,
 then upload `index.p7` on its own - not one parallel sync of the
 directory, which can put the index up first.
+
+The bundle-signing key can live on a PKCS#11 token instead of in
+`BOAT_KEYS_DIR`: in `local.conf`, set `RAUC_KEY_FILE` to the key's
+`pkcs11:` URI and `RAUC_PKCS11_MODULE` to the token's module (for example
+OpenSC's `opensc-pkcs11.so`). A token that needs a PIN to sign is not
+supported by the build.
 
 ### What the board accepts
 
@@ -511,7 +559,16 @@ changed them**: `/etc/default/boat-power`, `/etc/default/boat-bluetooth`,
 `/etc/NetworkManager/conf.d/90-boat-wol.conf`, `/etc/docker/daemon.json` and
 `/etc/boat-update/health.conf`. One you never touched takes the new
 release's version, so a release can change its defaults; one you deleted
-stays deleted. (An image built before this rule carries them all, once.)
+stays deleted. One you changed is carried as it is - also at every later
+update, without the new release's changes. The release's own version is
+put beside it as `<file>.boat-default`: compare the two after an update,
+and copy the `.boat-default` over yours to go back to the release's.
+`health.conf`'s `BOAT_HEALTH_UNITS` is the exception: if your list names a
+unit the new release no longer has, every trial would fail on it, so the
+update appends a merged list - your units it still has, then the
+release's own. (An image built before this rule carries them all, and
+they then count as changed at every update: take the `.boat-default`
+versions you want, or reflash.)
 A setting the install could not carry is a warning in the install's
 output, and an ALERT in `status` until the trial is decided.
 

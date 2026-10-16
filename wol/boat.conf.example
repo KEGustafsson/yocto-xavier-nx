@@ -10,7 +10,10 @@
 # environment, e.g.:  BOAT_HOST=192.168.0.99 wol/boat-wake.sh
 
 # Address or hostname to reach the board on. Used to watch for it going down
-# and coming back; not needed to send the packet itself.
+# and coming back, by ping - so it must answer ping from this machine; not
+# needed to send the packet itself. (scripts/push-update.sh and ab-soak.sh
+# watch a reboot over SSH, so a jump host or a ~/.ssh/config alias works
+# for them.)
 BOAT_HOST=192.168.0.43
 
 # The MAC that wakes it - the Ethernet one, not Wi-Fi. Wake-on-LAN over
@@ -27,8 +30,9 @@ BOAT_MAC=48:b0:2d:15:e1:11
 # "does nothing".
 BOAT_BROADCAST=192.168.0.255
 
-# SSH user for boat-sleep.sh. Must be able to run `boat-sleep`, which needs
-# root - so either root, or the "boat" user via its passwordless sudo.
+# SSH user for boat-sleep.sh and scripts/push-update.sh. Must be able to run
+# `boat-sleep` and `boat-update install`, which need root - so either root,
+# or the "boat" user via its passwordless sudo.
 BOAT_SSH_USER=root
 
 # Seconds to wait for the board to answer after a wake / to go quiet after a

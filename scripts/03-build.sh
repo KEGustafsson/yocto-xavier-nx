@@ -25,6 +25,20 @@ fi
 if [[ "${BOAT_BENCH}" == 1 ]] && ! grep -q '^BOAT_BENCH = "1"' "${BUILD_DIR}/conf/local.conf"; then
   die "BOAT_BENCH=1, but ${BUILD_DIR}/conf/local.conf is not configured for a bench image - run scripts/02-configure-build.sh with AB_LAYOUT=1 BOAT_BENCH=1 first (a bench image is an A/B one)"
 fi
+# The same for the release, its security floor and the signing keys: bitbake
+# reads them from local.conf too, so a value set in env.sh or exported after
+# the last 02-configure-build.sh never reaches the build - a floor raised
+# for a security fix would silently be missing from system.conf. A value
+# left empty here means "as configured".
+if grep -q '^BOAT_AB_LAYOUT = "1"' "${BUILD_DIR}/conf/local.conf"; then
+  configured() { sed -n "s/^$1 = \"\\(.*\\)\"\$/\\1/p" "${BUILD_DIR}/conf/local.conf" | tail -n 1; }
+  for var in BOAT_RELEASE BOAT_MIN_BUNDLE_VERSION BOAT_KEYS_DIR; do
+    if [[ -n "${!var}" && "${!var}" != "$(configured "${var}")" ]]; then
+      die "${var}=${!var} here, but ${BUILD_DIR}/conf/local.conf has '$(configured "${var}")' - bitbake reads it from there: run scripts/02-configure-build.sh again"
+    fi
+  done
+  log "A/B release '$(configured BOAT_RELEASE)', min-bundle-version '$(configured BOAT_MIN_BUNDLE_VERSION)' (from ${BUILD_DIR}/conf/local.conf)"
+fi
 
 [[ "$(id -u)" -ne 0 ]] || die "do NOT run bitbake as root"
 

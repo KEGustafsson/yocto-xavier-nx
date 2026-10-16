@@ -19,6 +19,36 @@ SRC_URI += "\
 RAUC_KEYRING_FILE = "ca.cert.pem"
 RAUC_KEYRING_URI = ""
 
+# The keyring goes into every image, world-readable, and into sstate and the
+# deploy directory: it must hold CA certificates and nothing else. A keyring
+# put together by hand for a CA rotation (plan 5.7) next to ca.key.pem is
+# where a private key would slip in - and anyone holding it could sign for
+# the whole fleet. Returns the certificates, as DER.
+def boat_keyring_certs(path, what):
+    import base64, re
+    with open(path) as f:
+        text = f.read()
+    if 'PRIVATE KEY' in text:
+        bb.fatal("%s (%s) holds a PRIVATE KEY: it would ship on every board. It must hold only "
+                 "CA certificates - rebuild it from the ca.cert.pem files alone" % (what, path))
+    certs = []
+    for kind, body in re.findall(r'-----BEGIN ([A-Z0-9 ]+)-----(.*?)-----END \1-----', text, re.S):
+        if kind != 'CERTIFICATE':
+            bb.fatal("%s (%s) holds a %s block: it must hold only CA certificates" % (what, path, kind))
+        der = base64.b64decode(''.join(body.split()))
+        # basicConstraints (2.5.29.19): [critical,] OCTET STRING { SEQUENCE { cA TRUE ... } }
+        i = der.find(bytes.fromhex('0603551d13'))
+        rest = der[i + 5:] if i >= 0 else b''
+        if rest[:3] == bytes.fromhex('0101ff'):
+            rest = rest[3:]
+        if not (len(rest) > 7 and rest[0] == 0x04 and rest[2] == 0x30 and rest[4:7] == bytes.fromhex('0101ff')):
+            bb.fatal("%s (%s) holds a certificate that is not a CA (no basicConstraints CA:TRUE): "
+                     "the keyring is the update CA's certificate(s) only" % (what, path))
+        certs.append(der)
+    if not certs:
+        bb.fatal("%s (%s) holds no certificate" % (what, path))
+    return certs
+
 python boat_check_keyring() {
     import os
     keys = d.getVar('BOAT_KEYS_DIR')
@@ -26,17 +56,18 @@ python boat_check_keyring() {
         bb.fatal("RAUC needs the update CA certificate: BOAT_KEYS_DIR (%r) has no "
                  "ca.cert.pem. Run scripts/gen-update-keys.sh once, keep the "
                  "directory safe, and point BOAT_KEYS_DIR at it (scripts/env.sh)." % keys)
+    fleet = boat_keyring_certs(os.path.join(keys, 'ca.cert.pem'), "the update keyring")
     bench = d.getVar('BOAT_BENCH_KEYS_DIR')
     if d.getVar('BOAT_BENCH') == '1':
         if not bench or not os.path.isfile(os.path.join(bench, 'ca.cert.pem')):
             bb.fatal("BOAT_BENCH = \"1\" needs the bench CA: BOAT_BENCH_KEYS_DIR (%r) has no "
                      "ca.cert.pem. Run scripts/gen-update-keys.sh --bench." % bench)
-        with open(os.path.join(bench, 'ca.cert.pem'), 'rb') as b, \
-                open(os.path.join(keys, 'ca.cert.pem'), 'rb') as f:
-            if b.read() == f.read():
-                bb.fatal("BOAT_BENCH_KEYS_DIR (%r) holds the fleet CA: the bench needs its own "
-                         "(scripts/gen-update-keys.sh --bench), or its fault bundles would be "
-                         "trusted by every boat." % bench)
+        # Compared as certificates, not bytes: a re-encoded copy is the same CA.
+        bench_certs = boat_keyring_certs(os.path.join(bench, 'ca.cert.pem'), "the bench keyring")
+        if any(c in fleet for c in bench_certs):
+            bb.fatal("BOAT_BENCH_KEYS_DIR (%r) holds the fleet CA: the bench needs its own "
+                     "(scripts/gen-update-keys.sh --bench), or its fault bundles would be "
+                     "trusted by every boat." % bench)
 }
 do_install[prefuncs] += "boat_check_keyring"
 do_install[file-checksums] += "${BOAT_KEYS_DIR}/ca.cert.pem:True"

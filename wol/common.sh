@@ -83,7 +83,31 @@ require_conf() {
 
 # Ping is only ever used as a liveness probe here, never as proof of
 # anything else - a board that answers ICMP has resumed far enough to matter.
+# BOAT_HOST must answer ping from this machine for that; a reboot is watched
+# over SSH instead (wait_for_new_boot), which also works through a jump host.
 boat_is_up() { ping -c1 -W1 "$BOAT_HOST" >/dev/null 2>&1; }
+
+# Wait, up to $2 seconds, until the board answers over SSH with a kernel
+# boot ID other than $1: it has rebooted and is back. The caller defines
+# boot_id (its own ssh to the board). Prints a dot per probe; sets
+# WAIT_ELAPSED like wait_for_state.
+wait_for_new_boot() {
+    local old="$1" limit="$2" started=$SECONDS probes=0 id
+    while (( SECONDS - started < limit )); do
+        id="$(boot_id 2>/dev/null || true)"
+        if [[ -n "$id" && "$id" != "$old" ]]; then
+            (( probes > 0 )) && printf '\n'
+            WAIT_ELAPSED=$(( SECONDS - started ))
+            return 0
+        fi
+        printf '.'
+        probes=$((probes + 1))
+        sleep 5
+    done
+    (( probes > 0 )) && printf '\n'
+    WAIT_ELAPSED=$(( SECONDS - started ))
+    return 1
+}
 
 # Wait for boat_is_up to become $1 ("up"/"down"), up to $2 seconds. Prints a
 # dot per probe so a long wait does not look like a hang.

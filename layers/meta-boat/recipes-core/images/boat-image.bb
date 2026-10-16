@@ -266,8 +266,12 @@ ROOTFS_POSTPROCESS_COMMAND += "mask_unused_networkd; "
 # only what someone actually changed (boat-bundle-hook): a file still as the
 # image shipped it takes the new release's version, so a release can change
 # its defaults. This records what the image shipped - the sha256 of every
-# file in /etc - for the hook to compare against. Last, after the other
-# post-processing commands have changed /etc.
+# file in /etc - for the hook to compare against. It runs in do_image, first:
+# after everything do_rootfs does to /etc (the post-processing commands,
+# sort_passwd and rootfs_reproducible among them, which a class appends after
+# this recipe's own; the package-data removal; ldconfig). What follows it -
+# systemd_preset_all's symlinks, reproducible_final_image_task's mtimes -
+# changes no regular file's contents.
 boat_record_conffile_defaults() {
     install -d ${IMAGE_ROOTFS}${nonarch_libdir}/boat-ab
     ( cd ${IMAGE_ROOTFS} && find etc -type f -print0 | LC_ALL=C sort -z \
@@ -276,4 +280,28 @@ boat_record_conffile_defaults() {
     grep -q '  /etc/' ${IMAGE_ROOTFS}${nonarch_libdir}/boat-ab/conffile-defaults.sha256 \
         || bbfatal "recorded no /etc file hashes"
 }
-ROOTFS_POSTPROCESS_COMMAND:append = "${@' boat_record_conffile_defaults; ' if d.getVar('BOAT_AB_LAYOUT') == '1' else ''}"
+
+# The kernel runs on the device tree written at flash, never on one from a
+# slot (docs/plans/ab-os-updates.md 5.9), and a new build can bring another
+# DTB within the same L4T release (a meta-tegra or kernel change). This
+# records the DTB and overlays this image was built against - the files the
+# flash writes - as one sha256: the bundle carries it as [meta.boat]
+# firmware=, and the pre-install handler refuses a bundle whose value is not
+# the running slot's.
+BOAT_FIRMWARE_FILES = "${DTBFILE} ${TEGRA_PLUGIN_MANAGER_OVERLAYS} ${@(d.getVar('OVERLAY_DTB_FILE') or '').replace(',', ' ')}"
+boat_record_firmware_id() {
+    install -d ${IMAGE_ROOTFS}${nonarch_libdir}/boat-ab
+    list=""
+    for f in $(printf '%s\n' ${BOAT_FIRMWARE_FILES} | LC_ALL=C sort -u); do
+        [ -f "${DEPLOY_DIR_IMAGE}/$f" ] || bbfatal "cannot record firmware.id: no $f in ${DEPLOY_DIR_IMAGE}"
+        list="$list$(cd ${DEPLOY_DIR_IMAGE} && sha256sum "$f")
+"
+    done
+    [ -n "$list" ] || bbfatal "cannot record firmware.id: no DTB named (DTBFILE)"
+    printf '%s' "$list" | sha256sum | cut -d' ' -f1 \
+        > ${IMAGE_ROOTFS}${nonarch_libdir}/boat-ab/firmware.id
+    bbnote "firmware.id $(cat ${IMAGE_ROOTFS}${nonarch_libdir}/boat-ab/firmware.id) from:
+$list"
+}
+IMAGE_PREPROCESS_COMMAND:prepend = "${@'boat_record_conffile_defaults; boat_record_firmware_id; ' if d.getVar('BOAT_AB_LAYOUT') == '1' else ''}"
+do_image[depends] += "${@'virtual/kernel:do_deploy' if d.getVar('BOAT_AB_LAYOUT') == '1' else ''}"
