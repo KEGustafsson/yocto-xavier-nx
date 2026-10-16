@@ -5,6 +5,8 @@
 #   boat-install-firefox --install    # download, verify and install/upgrade
 #   boat-install-firefox --version 154.0.1
 #   boat-install-firefox --remove
+#   boat-install-firefox --link       # put back the launcher and menu entry
+#                                     # for the Firefox on /data (A/B, at boot)
 #
 # WHY A DOWNLOADER AND NOT A RECIPE
 # Firefox is not packaged for Yocto in any layer this project fetches. The one
@@ -54,6 +56,21 @@ PREFIX=/opt/firefox
 BINLINK=/usr/local/bin/firefox
 DESKTOP=/usr/share/applications/firefox.desktop
 
+# On the A/B layout the browser lives on /data instead. An update writes a
+# fresh image into the other slot: a Firefox in /opt would be left behind at
+# every update, while the profile in ~/.mozilla - on /data, with /home/boat
+# - lives on, and a rollback would then start an older Firefox against a
+# profile a newer one wrote, which Firefox refuses. One copy on /data serves
+# both slots. The launcher and menu entry are on the slot, and
+# boat-firefox-link.service puts them back into a new one at boot (--link).
+AB_LIB=/usr/lib/boat-ab/lib.sh
+AB_DATA=/data
+OLD_PREFIX=""
+if [ -e "$AB_LIB" ]; then
+    OLD_PREFIX="$PREFIX"
+    PREFIX="${AB_DATA}/opt/firefox"
+fi
+
 MODE=status
 WANT_VERSION=""
 
@@ -73,11 +90,15 @@ the six-year-EOL one the only available Yocto layer carries.
   -i, --install      download, checksum-verify and install or upgrade
   -V, --version VER  install this exact version instead of the latest
   -r, --remove       uninstall
+  -l, --link         put back the launcher and menu entry for an installed
+                     Firefox (run at boot on the A/B layout)
   -h, --help         this text
 
-Installs to /opt/firefox, links /usr/local/bin/firefox, and adds a menu
-entry. Needs root for anything except --status. Profiles live in the calling
-user's ~/.mozilla and are untouched by upgrades and by --remove.
+Installs to /opt/firefox - on the A/B layout to /data/opt/firefox, so that
+it survives updates and both slots share it - links /usr/local/bin/firefox,
+and adds a menu entry. Needs root for anything except --status. Profiles
+live in the calling user's ~/.mozilla and are untouched by upgrades and by
+--remove.
 USAGE
     exit "${1:-0}"
 }
@@ -87,6 +108,7 @@ while [ "$#" -gt 0 ]; do
         -s|--status)  MODE=status ;;
         -i|--install) MODE=install ;;
         -r|--remove)  MODE=remove ;;
+        -l|--link)    MODE=launcher ;;
         -V|--version) [ "$#" -ge 2 ] || die "--version needs a value"
                       # Goes straight into a URL path below, so keep it to what
                       # a Mozilla release string can contain - "../.." would
@@ -133,13 +155,61 @@ latest_version() {
         | sed -n 's|.*/releases/\([^/]*\)/.*|\1|p'
 }
 
+# The launcher and the XFCE menu entry, for the Firefox in ${PREFIX}.
+# StartupWMClass matches what Firefox actually sets, so the panel groups its
+# windows under this launcher instead of a stray icon.
+link_launcher() {
+    mkdir -p "$(dirname "$BINLINK")" "$(dirname "$DESKTOP")"
+    ln -sfn "${PREFIX}/firefox" "$BINLINK"
+    cat > "$DESKTOP" <<DESKTOPEOF
+[Desktop Entry]
+Type=Application
+Name=Firefox
+GenericName=Web Browser
+Comment=Browse the web
+Exec=${PREFIX}/firefox %u
+Icon=${PREFIX}/browser/chrome/icons/default/default128.png
+Terminal=false
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+StartupNotify=true
+StartupWMClass=firefox
+DESKTOPEOF
+    command -v update-desktop-database >/dev/null 2>&1 \
+        && update-desktop-database "$(dirname "$DESKTOP")" 2>/dev/null || :
+}
+
+# /data really mounted, not the bare directory on the slot's rootfs.
+data_mounted() {
+    awk -v m="$AB_DATA" '$2 == m { f = 1 } END { exit !f }' /proc/mounts
+}
+
 CURRENT="$(installed_version || true)"
 
 case "$MODE" in
+launcher)
+    [ "$(id -u)" -eq 0 ] || die "must run as root (try: sudo ${SELF} --link)"
+    if [ -z "$CURRENT" ]; then
+        say "no Firefox installed at ${PREFIX} - nothing to link"
+        exit 0
+    fi
+    link_launcher
+    say "launcher and menu entry point at ${PREFIX} (Firefox ${CURRENT})"
+    exit 0
+    ;;
 remove)
     [ "$(id -u)" -eq 0 ] || die "must run as root (try: sudo ${SELF} --remove)"
+    # Without /data, only the slot's launcher would go, and the link service
+    # would put it back once /data mounts.
+    if [ -n "$OLD_PREFIX" ] && ! data_mounted; then
+        die "${AB_DATA} is not mounted - on the A/B layout Firefox is installed there, so it cannot be removed now"
+    fi
     [ -n "$CURRENT" ] || say "nothing installed at ${PREFIX}"
     rm -rf "$PREFIX" "$BINLINK" "$DESKTOP"
+    # A copy this script put in the slot before Firefox moved to /data.
+    if [ -n "$OLD_PREFIX" ] && [ -e "${OLD_PREFIX}/application.ini" ]; then
+        rm -rf "$OLD_PREFIX"
+    fi
     command -v update-desktop-database >/dev/null 2>&1 \
         && update-desktop-database /usr/share/applications 2>/dev/null || :
     say "removed. User profiles under ~/.mozilla were left alone."
@@ -167,6 +237,9 @@ fi
 
 # --- install ---------------------------------------------------------------
 [ "$(id -u)" -eq 0 ] || die "must run as root (try: sudo ${SELF} --install)"
+if [ -n "$OLD_PREFIX" ] && ! data_mounted; then
+    die "${AB_DATA} is not mounted - on the A/B layout Firefox is installed there, so that updates keep it"
+fi
 need tar tar
 need sha256sum coreutils
 need xz xz
@@ -178,15 +251,23 @@ fi
 
 TARBALL="firefox-${LATEST}.tar.xz"
 URL="${CDN}/${LATEST}/linux-aarch64/en-US/${TARBALL}"
-WORK="$(mktemp -d /var/tmp/boat-firefox.XXXXXX)"
+# The working copy lives beside the install, on the same file system, so the
+# swap below is a rename. Across file systems (the slot's /var/tmp to /data on
+# the A/B layout) `mv` copies, and a full disk leaves a half-copied tree.
+mkdir -p "$(dirname "$PREFIX")"
+WORK="$(mktemp -d "$(dirname "$PREFIX")/.boat-firefox.XXXXXX")"
+SWAP=none
 # Leave nothing behind on any exit path, including a failed download - and put
 # back the previous install if the swap below did not complete. Without that
-# rollback, a `mv` that fails (ENOSPC on the 16 GiB rootfs is realistic) leaves
-# NO /opt/firefox at all while the working copy sits unmentioned at
-# /opt/firefox.old - which the next run then starts by deleting.
+# rollback, a `mv` that fails (ENOSPC on the 16 GiB rootfs, or on a full
+# /data, is realistic) leaves NO Firefox at all while the working copy sits
+# unmentioned at <prefix>.old - which the next run then starts by deleting.
 cleanup() {
     rm -rf "$WORK"
-    if [ -d "${PREFIX}.old" ] && [ ! -d "$PREFIX" ]; then
+    if [ "$SWAP" = started ] && [ -d "${PREFIX}.old" ]; then
+        # This run moved the old install aside; whatever is at $PREFIX now is
+        # not a confirmed install.
+        rm -rf "$PREFIX"
         mv "${PREFIX}.old" "$PREFIX" 2>/dev/null \
             && echo "${SELF}: install failed - restored the previous Firefox" >&2
     fi
@@ -242,35 +323,23 @@ say "installing to ${PREFIX}"
 # missing rather than the destination's directory.
 mkdir -p "$(dirname "$PREFIX")"
 rm -rf "${PREFIX}.old"
-[ -d "$PREFIX" ] && mv "$PREFIX" "${PREFIX}.old"
+if [ -d "$PREFIX" ]; then
+    mv "$PREFIX" "${PREFIX}.old"
+    SWAP=started
+fi
 # If this fails, the EXIT trap puts ${PREFIX}.old back - which is why .old is
 # only removed AFTER the new tree is confirmed in place, not before the move.
 mv "${WORK}/firefox" "$PREFIX" || die "could not move the new Firefox into ${PREFIX}"
 [ -x "${PREFIX}/firefox" ] || die "${PREFIX}/firefox is not there after the move"
+SWAP=finished
 rm -rf "${PREFIX}.old"
 
-mkdir -p "$(dirname "$BINLINK")"
-ln -sfn "${PREFIX}/firefox" "$BINLINK"
-
-# Menu entry for XFCE. StartupWMClass matches what Firefox actually sets, so
-# the panel groups its windows under this launcher instead of a stray icon.
-cat > "$DESKTOP" <<DESKTOPEOF
-[Desktop Entry]
-Type=Application
-Name=Firefox
-GenericName=Web Browser
-Comment=Browse the web
-Exec=${PREFIX}/firefox %u
-Icon=${PREFIX}/browser/chrome/icons/default/default128.png
-Terminal=false
-Categories=Network;WebBrowser;
-MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
-StartupNotify=true
-StartupWMClass=firefox
-DESKTOPEOF
-
-command -v update-desktop-database >/dev/null 2>&1 \
-    && update-desktop-database /usr/share/applications 2>/dev/null || :
+link_launcher
+# A copy this script put in the slot before Firefox moved to /data: the one
+# on /data replaces it.
+if [ -n "$OLD_PREFIX" ] && [ -e "${OLD_PREFIX}/application.ini" ]; then
+    rm -rf "$OLD_PREFIX"
+fi
 
 say "installed Firefox ${LATEST}"
 say "launch it from the XFCE menu, or run: firefox"

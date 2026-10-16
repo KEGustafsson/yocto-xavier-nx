@@ -6,3 +6,7 @@ ConditionKernelCommandLine=boat.trial=1
 [Service]
 Type=oneshot
 ExecStart=/usr/sbin/boat-commit --deadline
+# The backstop's backstop: if the deadline run itself ends in an error
+# rather than a verdict, reboot anyway - GRUB's attempt count then ends the
+# trial. Not under boat.stay=1, which keeps a failed trial up on purpose.
+ExecStopPost=/bin/sh -c '[ "$$SERVICE_RESULT" = success ] || grep -qw boat.stay=1 /proc/cmdline || systemctl reboot'

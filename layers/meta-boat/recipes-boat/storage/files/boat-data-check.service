@@ -17,5 +17,10 @@ ExecStart=/usr/sbin/boat-storage check-data
 # while on a large drive; being killed half way helps nobody, so - as for
 # systemd-fsck@ - there is no time limit. Nothing early in the boot waits
 # for this: only /data, the homes kept there and the journal's move onto it
-# (boat-journal-flush.service) do.
+# (boat-journal-flush.service) do - and, through the homes, logins other
+# than root's (systemd-user-sessions), so the helm desktop too: nobody may
+# log into the slot's stale copy of a home. Root's SSH works meanwhile.
 TimeoutStartSec=infinity
+# On the console as well, as systemd-fsck@ does: a long repair then says so
+# on the screen, rather than looking like a dead display.
+StandardOutput=journal+console

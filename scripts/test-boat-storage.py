@@ -17,6 +17,7 @@ Exit status: 0 = all passed, 1 = a case failed.
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -263,6 +264,110 @@ CASES = [
 ]
 
 
+# --- DATA's check on the console; the files that shape DATA -----------------
+STORAGE = os.path.join(LAYER, "recipes-boat", "storage")
+BOAT_UPDATE = os.path.join(LAYER, "external", "rauc", "recipes-boat", "boat-update",
+                           "files", "boat-update.py")
+
+CASES += [
+    case("check-data: says that the desktop and non-root logins wait for it", ["check-data"], 0,
+         calls=["e2fsck -p " + DATA], says=["the desktop and non-root logins wait for this"]),
+]
+
+
+def size_bytes(text):
+    units = {"K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+    m = re.match(r"^(\d+)([KMGT]?)$", text.strip())
+    if not m:
+        return None
+    return int(m.group(1)) * units.get(m.group(2), 1)
+
+
+def journal_keeps_free():
+    """journald's SystemKeepFree on DATA stays well below the space
+    boat-update leaves free, or a nearly full DATA stops the journal."""
+    conf = slurp(os.path.join(STORAGE, "files", "10-boat-ab-journald.conf"))
+    m = re.search(r"^SystemKeepFree=(\S+)$", conf, re.M)
+    keep = size_bytes(m.group(1)) if m else None
+    f = re.search(r"^FREE_FLOOR = ([0-9* ]+)", slurp(BOAT_UPDATE), re.M)
+    floor = eval(f.group(1), {"__builtins__": {}}) if f else None
+    if keep is None:
+        return ["10-boat-ab-journald.conf sets no SystemKeepFree (journald keeps up to 4 GiB free)"]
+    if floor is None:
+        return ["cannot find boat-update's FREE_FLOOR"]
+    if keep * 2 > floor:
+        return ["SystemKeepFree=%d is not well below boat-update's FREE_FLOOR=%d" % (keep, floor)]
+    return []
+
+
+def data_ranges(path):
+    """The block ranges (4 KiB) of PATH that hold data, not holes."""
+    out = []
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        size = os.fstat(fd).st_size
+        off = 0
+        while off < size:
+            try:
+                start = os.lseek(fd, off, os.SEEK_DATA)
+            except OSError:
+                break
+            end = os.lseek(fd, start, os.SEEK_HOLE)
+            out.append((start // 4096, (end - 1) // 4096))
+            off = end
+    finally:
+        os.close(fd)
+    return out
+
+
+def seed_journal_written():
+    """Build DATA's seed the way boat-data-seed.bb does, with the host's
+    e2fsprogs: its journal must be written zeros, not a hole that a flash
+    which skips holes (bmaptool) would leave the previous filesystem's
+    journal in - and the filesystem must still check clean."""
+    tools = os.pathsep.join([os.environ.get("PATH", ""), "/sbin", "/usr/sbin"])
+    if not shutil.which("mkfs.ext4", path=tools) or not shutil.which("debugfs", path=tools):
+        return ["mkfs.ext4 and debugfs are needed (apt-get install e2fsprogs)"]
+    recipe = slurp(os.path.join(STORAGE, "boat-data-seed.bb"))
+    body = re.search(r"^do_compile\(\) \{\n(.*?)^\}", recipe, re.M | re.S).group(1)
+    size = re.search(r'^BOAT_DATA_SEED_MB \?= "(\d+)"', recipe, re.M).group(1)
+    with tempfile.TemporaryDirectory(prefix="boat-seed-") as work:
+        for var, value in (("${B}", work), ("${BOAT_DATA_SEED}", "seed.ext4"),
+                           ("${BOAT_DATA_SEED_MB}", size), ("${SOURCE_DATE_EPOCH}", "0")):
+            body = body.replace(var, value)
+        script = 'bbfatal() { echo "$*" >&2; exit 1; }\nset -e\n' + body
+        p = subprocess.run(["sh", "-c", script], capture_output=True, text=True,
+                           env=dict(os.environ, PATH=tools))
+        if p.returncode != 0:
+            return ["do_compile failed: %s" % (p.stdout + p.stderr).strip()]
+        seed = os.path.join(work, "seed.ext4")
+        ex = subprocess.run(["debugfs", "-R", "ex <8>", seed], capture_output=True, text=True,
+                            env=dict(os.environ, PATH=tools)).stdout
+        journal = [(int(f[7]), int(f[9])) for f in (l.split() for l in ex.splitlines())
+                   if len(f) >= 11 and f[5] == "-" and f[8] == "-"]
+        if not journal:
+            return ["cannot find the seed's journal: %r" % ex]
+        data = data_ranges(seed)
+        errors = []
+        for first, last in journal:
+            for block in (first, (first + last) // 2, last):
+                if not any(a <= block <= b for a, b in data):
+                    errors.append("journal block %d is a hole in the seed" % block)
+        fsck = subprocess.run(["e2fsck", "-fn", seed], capture_output=True, text=True,
+                              env=dict(os.environ, PATH=tools))
+        if fsck.returncode != 0:
+            errors.append("the seed does not check clean: %s" % fsck.stdout.strip())
+        return errors
+
+
+FILE_CHECKS = [
+    ("journald: SystemKeepFree is set, well below what boat-update keeps free on DATA",
+     journal_keeps_free),
+    ("seed: DATA's seed carries its journal as written zeros, and checks clean",
+     seed_journal_written),
+]
+
+
 def check(c, root):
     b = Board(root, **c["board"])
     rc, out = b.run(*c["args"])
@@ -296,7 +401,17 @@ def main():
                 print("    output:\n" + "\n".join("      " + l for l in out.splitlines()))
             else:
                 print("ok:   %s" % c["name"])
-    print("%d of %d cases passed" % (len(CASES) - failed, len(CASES)))
+    for name, fn in FILE_CHECKS:
+        errors = fn()
+        if errors:
+            failed += 1
+            print("FAIL: %s" % name)
+            for e in errors:
+                print("    " + e)
+        else:
+            print("ok:   %s" % name)
+    total = len(CASES) + len(FILE_CHECKS)
+    print("%d of %d cases passed" % (total - failed, total))
     return 1 if failed else 0
 
 

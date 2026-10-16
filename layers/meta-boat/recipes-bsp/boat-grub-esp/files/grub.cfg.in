@@ -19,14 +19,24 @@
 # was written to grubenv first.
 #
 # There is no menu and no prompt: every path below ends in `boot` or
-# `reboot`. A GRUB that stopped at a prompt would sit there forever, and a
-# fallback to the other slot only ever happens on the NEXT boot.
+# `reboot`. A GRUB that stopped at a prompt would sit there forever. A
+# fallback to the other slot normally happens on the NEXT boot, from what
+# this one wrote to grubenv; only when nothing can be written does it happen
+# within this boot.
 
 set timeout=0
 set pager=0
 # A superuser that has no password: nobody can authenticate, so the console
 # can neither edit a kernel command line nor open GRUB's shell.
 set superusers="boat-locked"
+
+# The version of the boot files on the ESP - this file, the config built
+# into grubaa64.efi, GRUB and KERNEL_ARGS - passed to Linux as boat.esp=.
+# They change only with a USB reflash, never with an update. Bump this with
+# any change here, together with BOAT_ESP in boat-grubenv-guard; when a
+# release comes to depend on the change, raise BOAT_ESP_MIN there too, and
+# boards whose ESP is older then raise an alert.
+set boat_esp=1
 
 # The slots live on the drive GRUB itself was loaded from (the NVMe ESP), and
 # are addressed by GPT entry number - never by a label that a JetPack SD card
@@ -139,7 +149,7 @@ function boot_chosen {
     if [ "$committed" != 1 ]; then set args="$args boat.trial=1"; fi
     if [ "$BOAT_STAY" = 1 ]; then set args="$args boat.stay=1"; fi
     echo "boat: booting slot $chosen (${bootdisk},gpt${partnum}) $args"
-    linux (${bootdisk},gpt${partnum})/boot/Image $cbootargs @KERNEL_ARGS@ root=@DISK@p${partnum} rootwait rw rootfstype=ext4 rauc.slot=$chosen panic=10 $args
+    linux (${bootdisk},gpt${partnum})/boot/Image $cbootargs @KERNEL_ARGS@ root=@DISK@p${partnum} rootwait rw rootfstype=ext4 rauc.slot=$chosen panic=10 boat.esp=$boat_esp $args
     if [ "$?" = 0 ]; then
         initrd (${bootdisk},gpt${partnum})/boot/initrd
         if [ "$?" = 0 ]; then
@@ -149,17 +159,55 @@ function boot_chosen {
 }
 
 set extra=""
+set failed=""
+if [ -n "$chosen" ]; then
+    boot_chosen
+    # The kernel or initrd of the chosen slot did not load, or did not
+    # start. Mark it bad; the next boot then tries the other slot.
+    echo "boat: slot $chosen failed to load - marking it bad"
+    if [ "$chosen" = A ]; then set A_OK=0; else set B_OK=0; fi
+    set saved=0
+    if [ "$envok" = 1 ]; then
+        if save_env -f "$prefix/grubenv" A_OK B_OK; then set saved=1; fi
+    fi
+    if [ "$saved" = 1 ]; then
+        echo "boat: resetting"
+        sleep 5
+        reboot
+    fi
+    # The mark cannot be written (grubenv unreadable, or the ESP refuses
+    # writes), so after a reset this boot would choose the same slot again,
+    # and every reset uses up one of NVIDIA's 3 warm boots. Hand over now
+    # instead, uncounted: to a committed slot only, as with an unreadable
+    # grubenv. boat-grubenv-guard records the failed slot once Linux is up
+    # (boat.handover=1).
+    echo "boat: could not record that slot $chosen failed - handing over within this boot"
+    set failed="$chosen"
+    set envok=0
+    set skip="$chosen"
+    pick_slot
+    if [ -n "$chosen" ]; then
+        set extra="boat.handover=1"
+        boot_chosen
+        echo "boat: slot $chosen failed to load too - resetting"
+        sleep 5
+        reboot
+    fi
+fi
 if [ -z "$chosen" ]; then
     # Nothing qualifies. Booting something uncounted beats stopping on a boat
     # with nobody at the console. A slot that passed a trial (COMMITTED=1)
     # and only ran out of attempts comes first, in ORDER: the slot that had
     # failed or was half way through an install never is. Then any other
-    # slot, the flashed A first. Nothing is written: if none of them boots,
-    # NVIDIA's own counter ends this in its recovery state after 3 warm
-    # boots. boat-commit raises an alert on such a boot (boat.lastresort=1).
+    # slot, the flashed A first - but not one that already failed to load
+    # this boot. Nothing is written: if none of them boots, NVIDIA's own
+    # counter ends this in its recovery state after 3 warm boots.
+    # boat-commit raises an alert on such a boot (boat.lastresort=1).
     set candidates=""
     set seenA=0
     set seenB=0
+    if [ "$failed" = A ]; then set seenA=1; fi
+    if [ "$failed" = B ]; then set seenB=1; fi
     for SLOT in $ORDER; do
         if [ "$SLOT" = A -a "$seenA" = 0 -a "$A_COMMITTED" = 1 ]; then set candidates="$candidates A"; set seenA=1; fi
         if [ "$SLOT" = B -a "$seenB" = 0 -a "$B_COMMITTED" = 1 ]; then set candidates="$candidates B"; set seenB=1; fi
@@ -174,16 +222,7 @@ if [ -z "$chosen" ]; then
         boot_chosen
         echo "boat: last resort: slot $SLOT failed to load"
     done
-    echo "boat: no slot could be loaded - resetting"
-    sleep 5
-    reboot
 fi
-
-boot_chosen
-
-# The kernel or initrd of the chosen slot did not load, or did not start.
-echo "boat: slot $chosen failed to load - marking it bad and resetting"
-if [ "$chosen" = A ]; then set A_OK=0; else set B_OK=0; fi
-if [ "$envok" = 1 ]; then save_env -f "$prefix/grubenv" A_OK B_OK; fi
+echo "boat: no slot could be loaded - resetting"
 sleep 5
 reboot

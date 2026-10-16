@@ -40,6 +40,10 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG_IN = os.path.join(HERE, "..", "layers", "meta-boat", "recipes-bsp",
                       "boat-grub-esp", "files", "grub.cfg.in")
+# The guard in the slot that knows which ESP version (boat.esp=) the slot's
+# scripts expect.
+GUARD = os.path.join(HERE, "..", "layers", "meta-boat", "recipes-boat",
+                     "ab-boot", "files", "boat-grubenv-guard.sh")
 # The config built into grubaa64.efi, which runs grub.cfg.
 EMBEDDED_CFG = os.path.join(HERE, "..", "layers", "meta-boat", "recipes-bsp",
                             "grub", "files", "cfg")
@@ -255,10 +259,11 @@ def scenario(name, env, expect, env_after=None, grubenv="valid", bak=None,
                 loads=loads, embedded=embedded, grubcfg=grubcfg)
 
 
-# grub-emu leaves $cmdpath empty, so the built-in config's search.file finds
-# nothing and $root stays the one grub-emu was given: the ESP, as on the
-# board.
-NO_CMDPATH = r"error: no such device: \(\)/EFI/BOOT/grub\.cfg\."
+# grub-emu has no real $cmdpath - 2.12 leaves it empty, 2.06 (the board's
+# version) sets it to "(root)dir" - so the built-in config's search.file
+# finds nothing and $root stays the one grub-emu was given: the ESP, as on
+# the board.
+NO_CMDPATH = r"error: no such device: \((\([^)]*\)[^)]*)?\)/EFI/BOOT/grub\.cfg\."
 
 
 def flashed(**kw):
@@ -339,6 +344,60 @@ SCENARIOS = [
              env_after=dict(B_OK="0", B_TRY="1"),
              sim=dict(SIM_BOOT_RETURNS=1),
              says=[r"BOAT-BOOT-RETURNED"]),
+    # Every second update goes into A (running B): its trial, mirrored.
+    scenario("update in A: trial boot of A",
+             flashed(ORDER="A B", A_COMMITTED=0, B_OK=1, B_COMMITTED=1),
+             dict(result="boot", slot="A", flags=["boat.trial=1"]),
+             env_after=dict(A_TRY="1", B_TRY="0")),
+    scenario("ESP refuses writes, A on trial: A passed over, B boots",
+             flashed(ORDER="A B", A_COMMITTED=0, B_OK=1, B_COMMITTED=1),
+             dict(result="boot", slot="B", flags=[]),
+             read_only=True,
+             grub_errors=[r"error: "],
+             says=[r"could not record the attempt on trial slot A"]),
+    scenario("torn grubenv, backup has A on trial: A passed over, B boots",
+             None,
+             dict(result="boot", slot="B", flags=[]),
+             grubenv="torn",
+             bak=flashed(ORDER="A B", A_COMMITTED=0, B_OK=1, B_COMMITTED=1),
+             grub_errors=[r"invalid environment block"],
+             says=[r"slot A is on trial, but its attempt cannot be recorded"]),
+    scenario("A's kernel fails to load on its trial: A marked bad, reset",
+             flashed(ORDER="A B", A_COMMITTED=0, B_OK=1, B_COMMITTED=1),
+             dict(result="reboot", slot="A", flags=["boat.trial=1"]),
+             env_after=dict(A_OK="0", A_TRY="1"),
+             sim=dict(SIM_LINUX_FAIL_SLOT="A")),
+    # A load failure that cannot be written down: a reset would pick the
+    # same slot again, so GRUB hands over within the boot.
+    scenario("torn grubenv, the committed slot .bak picks fails to load: hands over to the other",
+             None,
+             dict(result="boot", slot="A", flags=["boat.handover=1"]),
+             grubenv="torn",
+             bak=flashed(ORDER="B A", B_OK=1, B_COMMITTED=1),
+             sim=dict(SIM_LINUX_FAIL_SLOT="B"),
+             grub_errors=[r"invalid environment block"],
+             says=[r"could not record that slot B failed - handing over"], loads=2),
+    scenario("ESP refuses writes, committed A fails to load: hands over to committed B",
+             flashed(B_OK=1, B_COMMITTED=1),
+             dict(result="boot", slot="B", flags=["boat.handover=1"]),
+             read_only=True,
+             sim=dict(SIM_LINUX_FAIL_SLOT="A"),
+             grub_errors=[r"error: "],
+             says=[r"could not record that slot A failed - handing over"], loads=2),
+    scenario("ESP refuses writes, A fails to load, B only on trial: last resort B",
+             flashed(B_OK=1, B_COMMITTED=0),
+             dict(result="boot", slot="B", flags=["boat.lastresort=1"]),
+             read_only=True,
+             sim=dict(SIM_LINUX_FAIL_SLOT="A"),
+             grub_errors=[r"error: "],
+             says=[r"(?m)last resort, uncounted, in this order: B$"], loads=2),
+    scenario("ESP refuses writes, neither slot loads: reset after one try each",
+             flashed(B_OK=1, B_COMMITTED=1),
+             dict(result="reboot", slot="B", flags=["boat.handover=1"]),
+             read_only=True,
+             sim=dict(SIM_LINUX_FAIL=1),
+             grub_errors=[r"error: "],
+             says=[r"slot B failed to load too"], loads=2),
     scenario("last resort prefers the committed slot: B, not a failed A",
              flashed(ORDER="B A", A_OK=0, A_COMMITTED=0, B_OK=1, B_TRY=2,
                      B_COMMITTED=1),
@@ -485,8 +544,8 @@ def check(sc, workdir):
         want = ["(hd0,gpt%d)/boot/Image" % PART[slot], CBOOTARGS] + \
             KERNEL_ARGS.split() + \
             ["root=%sp%d" % (DISK, PART[slot]), "rootwait", "rw",
-             "rootfstype=ext4", "rauc.slot=%s" % slot, "panic=10"] + \
-            exp["flags"]
+             "rootfstype=ext4", "rauc.slot=%s" % slot, "panic=10",
+             "boat.esp=%s" % esp_version()[0]] + exp["flags"]
         if args != want:
             errors.append("kernel command line\n      got:  %s\n      want: %s"
                           % (" ".join(args), " ".join(want)))
@@ -562,7 +621,11 @@ def cfg_commands(text):
 
 def check_modules():
     """Errors for grub.cfg commands the board's GRUB build would not have."""
-    libdirs = [d for d in ("/usr/lib/grub/x86_64-emu", "/usr/lib/grub/i386-emu")
+    # The lists of the grub-emu that runs the scenarios: next to it when it
+    # is a build tree (a GRUB 2.06 built to match the board), else the
+    # distribution's.
+    emu = os.path.dirname(os.path.realpath(shutil.which("grub-emu") or "/"))
+    libdirs = [d for d in (emu, "/usr/lib/grub/x86_64-emu", "/usr/lib/grub/i386-emu")
                if os.path.exists(os.path.join(d, "command.lst"))]
     if not libdirs:
         return ["grub-emu's command.lst/moddep.lst not found"]
@@ -572,6 +635,10 @@ def check_modules():
             return {k.lstrip("*"): v.split() for k, v in
                     (line.rstrip("\n").split(":", 1) for line in f if ":" in line)}
     cmd_mod = {k: v[0] for k, v in table("command.lst").items() if v}
+    # linux and initrd come from the linux module on arm64-efi. An emu
+    # GRUB has none before 2.12 ("enable = noemu"), so its lists cannot say.
+    cmd_mod.setdefault("linux", "linux")
+    cmd_mod.setdefault("initrd", "linux")
     deps = table("moddep.lst")
     with open(GRUB_BBAPPEND, encoding="utf-8") as f:
         m = re.search(r'^GRUB_BUILDIN:append\s*=\s*"([^"]*)"', f.read(), re.M)
@@ -593,6 +660,26 @@ def check_modules():
             errors.append("grub.cfg runs '%s' from module '%s', which is not in "
                           "GRUB_BUILDIN or its dependencies" % (cmd, cmd_mod[cmd]))
     return errors
+
+
+def esp_version():
+    """The ESP version grub.cfg.in passes to Linux (boat.esp=) and the one
+    boat-grubenv-guard expects, as strings (None where it is missing)."""
+    with open(CFG_IN, encoding="utf-8") as f:
+        cfg = re.search(r"^set boat_esp=(\d+)$", f.read(), re.M)
+    with open(GUARD, encoding="utf-8") as f:
+        guard = re.search(r"^BOAT_ESP=(\d+)$", f.read(), re.M)
+    return (cfg.group(1) if cfg else None, guard.group(1) if guard else None)
+
+
+def esp_version_errors():
+    cfg, guard = esp_version()
+    if cfg is None:
+        return ["grub.cfg.in sets no boat_esp version"]
+    if guard != cfg:
+        return ["grub.cfg.in passes boat.esp=%s, but boat-grubenv-guard expects "
+                "BOAT_ESP=%s - the two are bumped together" % (cfg, guard)]
+    return []
 
 
 def main():
@@ -622,6 +709,13 @@ def main():
     else:
         print("ok:   the built-in config is plain commands only, as GRUB's "
               "rescue parser needs")
+    errors = esp_version_errors()
+    for e in errors:
+        print("FAIL: " + e)
+    if errors:
+        failed += 1
+    else:
+        print("ok:   grub.cfg's boat.esp= is the version boat-grubenv-guard expects")
     with tempfile.TemporaryDirectory(prefix="grub-ab-") as workdir:
         # Readable by the unprivileged user the read-only scenarios run as.
         os.chmod(workdir, 0o755)
@@ -638,7 +732,7 @@ def main():
                     print(out)
             else:
                 print("ok:   %s" % sc["name"])
-    total = len(SCENARIOS) + 2
+    total = len(SCENARIOS) + 3
     print("%d of %d checks passed" % (total - failed, total))
     return 1 if failed else 0
 

@@ -45,11 +45,17 @@ alert() {
 # seconds - a writer that went on without it could undo the decision of
 # the one holding it (a commit over a deadline's verdict) - and the caller
 # then writes nothing: GRUB's own attempt count is the safe answer.
+# The lock file is root's alone (0600; boat-ab-boot's tmpfiles.d entry makes
+# it so at boot, and this keeps it so): flock(2) locks a file opened only
+# for reading as well, so any user who could open it could hold every
+# grubenv writer off - and fail every trial.
 BOAT_AB_LOCK_WAIT=60
 _ab_locked=0
 ab_lock() {
     [ "$_ab_locked" = 1 ] && return 0
     mkdir -p "$BOAT_AB_RUNDIR"
+    (umask 077; : >> "$BOAT_AB_RUNDIR/commit.lock") 2>/dev/null
+    chmod 0600 "$BOAT_AB_RUNDIR/commit.lock" 2>/dev/null || true
     exec 9>"$BOAT_AB_RUNDIR/commit.lock"
     if ! flock -w "$BOAT_AB_LOCK_WAIT" 9; then
         exec 9>&-
@@ -186,10 +192,9 @@ replace_file() {
     sync "$1" && mv "$1" "$2" && sync "$2" && sync "$(dirname "$2")"
 }
 
-# Set KEY=VALUE pairs in grubenv, on a copy that then replaces it, and bring
-# grubenv.bak - GRUB's fallback if grubenv is ever torn - up to date with it.
-# Fails, leaving grubenv as it was, if any step fails.
-grubenv_set() {
+# Set KEY=VALUE pairs in grubenv, on a copy that then replaces it. Fails,
+# leaving grubenv as it was, if any step fails.
+grubenv_replace() {
     rm -f "${BOAT_AB_GRUBENV}.new"
     if ! { cp "$BOAT_AB_GRUBENV" "${BOAT_AB_GRUBENV}.new" \
             && grub-editenv "${BOAT_AB_GRUBENV}.new" set "$@" \
@@ -197,7 +202,13 @@ grubenv_set() {
         rm -f "${BOAT_AB_GRUBENV}.new"
         return 1
     fi
-    grubenv_sync_bak
+}
+
+# The same, then bring grubenv.bak - GRUB's fallback if grubenv is ever
+# torn - up to date with it. Fails if either step fails: when only the .bak
+# copy did, grubenv has already changed (grubenv_replace tells the two apart).
+grubenv_set() {
+    grubenv_replace "$@" && grubenv_sync_bak
 }
 
 # Make grubenv.bak a copy of grubenv, if it is not one already.

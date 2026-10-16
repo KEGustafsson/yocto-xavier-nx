@@ -240,9 +240,15 @@ boot this kernel correctly.
 **Fallbacks below GRUB:**
 
 - If loading `grubaa64.efi` fails, L4TLauncher drops to DIRECT, which boots
-  extlinux on `APP` (slot A), then `boot.img`.
+  extlinux on `APP` (slot A), then `boot.img`. It does the same when it
+  cannot rewrite `boot.cfg` on the ESP. Slot A then runs whatever
+  `grubenv` says, so it may be the older or a rejected release. When
+  `L4TDefaultBootMode` already read 0, `boat-bootmode-guard` raises an
+  alert that GRUB did not load: rebooting comes back the same way, and the
+  fix is a reflash.
 - `UBOOT_EXTLINUX = "1"` is set because its recipe is also what puts
   `/boot/Image` and `/boot/initrd` into the rootfs for GRUB to read.
+  `boat-ab-boot` fails the parse of an A/B build without it.
 - `boot.img` is a last resort only. Its kernel is the flash-time one and
   will not match a newer slot's `/lib/modules`.
 - **GRUB *starting* and then failing does not fall back.** L4TLauncher only
@@ -286,7 +292,7 @@ This is NVIDIA's `flash_l4t_nvme_rootfs_ab.xml` with these changes:
 | 2 | `APP_b` | same | **no** | slot B. `B_OK=0` until the first update writes it. |
 | 12 | `esp` | as NVIDIA | yes | GRUB, `grub.cfg`, `grubenv` |
 | 17 | `SWAP` | 8 GiB | no | `mkswap` on first boot |
-| 18 | `DATA` | min 2 GiB, **fill-to-end** (`0x808`) | small ext4 seed image via `DATAFILE` (Phase 2) | online `resize2fs` on first boot |
+| 18 | `DATA` | min 2 GiB, **fill-to-end** (`0x808`) | small ext4 seed image via `DATAFILE` (Phase 2); its journal is written zeros, not a hole, so a flash that skips holes (`bmaptool`) cannot leave the last filesystem's journal under the same UUID | online `resize2fs` on first boot |
 
 Points that need care:
 
@@ -382,7 +388,12 @@ GRUB logic (derived from RAUC's `contrib/grub.conf`, with our counter added):
 4. **Every** load step is checked:
    `if ! linux …; then <slot>_OK=0; save_env; reboot; fi`. The same goes
    for `initrd`, and for a `boot` that returns. GRUB never stops at a
-   prompt.
+   prompt. When that mark cannot be saved (`grubenv` unreadable, or the ESP
+   refusing writes), a reset would bring the same slot back, each time
+   using one of NVIDIA's warm boots. So GRUB hands over within the same
+   boot instead, uncounted, to a committed slot (`boat.handover=1`), or to
+   the last resort without the slot that failed. `boat-grubenv-guard`
+   writes the mark from Linux and raises an alert.
 5. If no slot qualifies, the **last resort** boots without counting or
    writing anything, with `boat.lastresort=1`: first a slot that passed a
    trial and only ran out of attempts (`COMMITTED=1`, in `ORDER`), then any
@@ -396,7 +407,11 @@ GRUB logic (derived from RAUC's `contrib/grub.conf`, with our counter added):
 
 At build time, `grub.cfg` is generated from `KERNEL_ARGS` and checked with
 `grub-script-check`. The bundle recipe also fails if the rootfs lacks
-`/boot/Image` or `/boot/initrd`.
+`/boot/Image` or `/boot/initrd`. `grub.cfg` passes `boat.esp=N`, the version
+of the ESP's boot files (5.9); `boat-grubenv-guard` raises an alert when it
+is older than the running release needs, and only notes in the journal that
+it is older than the newest (a reflash empties `/data`, so it is never
+pressed on a board for an improvement alone).
 
 **Why committed slots get 2 attempts and trials get 1** (review M1):
 
@@ -435,14 +450,18 @@ At build time, `grub.cfg` is generated from `KERNEL_ARGS` and checked with
   advances. So **no writer edits `grubenv` in place**:
   - `boat-commit`, the guard, the RAUC handlers and `boat-update` write a
     copy, edit it, rename it over `grubenv`, flush, and copy it to
-    `grubenv.bak`, under one lock (`/run/boat-ab/commit.lock`). A writer
+    `grubenv.bak`, under one lock (`/run/boat-ab/commit.lock`, mode 0600
+    from a tmpfiles.d entry: `flock` works on a file opened read-only, so a
+    lock any user could open would let them hold every writer off). A writer
     that cannot have the lock within a minute writes nothing - one that went
     on without it could undo another's decision - and GRUB's attempt count
     decides instead;
   - RAUC's grub backend runs `grub-editenv` by name, and `rauc.service` has
     `/usr/lib/boat-ab/bin` first on its `PATH`: the `grub-editenv` there
     turns a `set` on `grubenv` into the same locked copy-and-rename, and
-    passes everything else to the real one.
+    passes everything else to the real one. It fails RAUC's call only when
+    `grubenv` itself was not written; a failed `grubenv.bak` copy after that
+    is an alert, and the guard copies it on the next boot.
 - `boat-grubenv-guard.service` runs early on every boot, after the ESP
   mount and before `boat-commit`. It validates the file and keeps a
   last-good copy, `grubenv.bak`. On a committed boot it also resets the
@@ -456,7 +475,12 @@ At build time, `grub.cfg` is generated from `KERNEL_ARGS` and checked with
   - on a committed boot, the booted slot becomes `OK=1, COMMITTED=1`, and
     the other `OK=0, COMMITTED=0`: the torn write may have been RAUC's own,
     half way through writing it, and `grubenv.bak` predates this boot. A
-    rollback is refused until the next update rewrites that slot.
+    rollback is refused until the next update rewrites that slot;
+  - on a last-resort boot (`boat.lastresort=1`), GRUB passes the same flags
+    whether or not the slot ever passed a trial, so the booted slot becomes
+    `OK=1, TRY=0, COMMITTED=0`: on trial from the next boot, with the health
+    gate, rather than committed unchecked. The other slot is `OK=0,
+    COMMITTED=0`, as on a committed boot.
 - `grub.cfg` falls back to `grubenv.bak` for *reading* if `grubenv` won't
   load.
 
@@ -476,9 +500,17 @@ never flip the OS back to an older slot.
   - critical units are active: `NetworkManager`, `sshd`/`sshd.socket`,
     `systemd-logind`, `dbus`, `boat-bootmode-guard`, and `docker` if `/data`
     is mounted;
+  - units the operator lists as needing `/data` (`BOAT_HEALTH_DATA_UNITS`,
+    e.g. `boat-compose`), only when `/data` is mounted;
   - no failed units in a configurable critical list;
-  - optional operator checks in `/data/boat-update/health.d/*`, each with a
-    timeout, **off by default**.
+  - optional operator checks in `/data/boat-update/health.d/*`, **off by
+    default**: run as root with no display, each with a timeout (`-k`: a
+    check that ignores SIGTERM is killed) that never reaches past
+    `boat-commit.service`'s own limit, their output in the gate's journal.
+  - A `*.socket` stopped by its trigger limit (a connection flood) is
+    started again, not held against the release; `sshd.socket` has no
+    trigger limit to trip (a drop-in), so a flood is refused per
+    connection.
 - **Never part of either tier:** anything external (internet, NTP, GNSS,
   registry pulls, NMEA).
 
@@ -491,17 +523,34 @@ a "multi-user reached" check would deadlock):
   `boat-commit.service`. It is `Type=oneshot` and
   `DefaultDependencies=no` (so no target orders after it), `After=` the
   critical units, `WantedBy=multi-user.target`, and retries checks for up to
-  `TimeoutStartSec=10min`. It is *not* ordered after Docker, which waits for
-  `/data` and its check: the checks retry for Docker instead, so nothing on
-  `/data` can hold up the verdict.
+  `TimeoutStartSec=10min`. It is *not* ordered after Docker or `data.mount`,
+  which wait for `/data`'s check (no time limit). Instead the script does
+  not decide a trial while DATA's check or mount is still running or
+  queued - its `/data` checks would be skipped, not passed - and waits,
+  within `BOAT_HEALTH_DEADLINE`; a DATA still pending then is a data
+  problem, and the trial is decided without it. So nothing on `/data` can
+  hold up, or fail, the verdict. It conflicts with `emergency`/`rescue`
+  (5.5).
+- `/proc/uptime` counts time asleep and the deadline timer does not: a
+  sleep during the retries (which 5.6 refuses) gives the checks that time
+  back rather than ending them.
 - On success: `<slot>_OK=1 TRY=0 COMMITTED=1` in **one atomic `grubenv`
   write** (copy, `grub-editenv`, rename), read back. Not `rauc status
   mark-good`: RAUC's grub backend rewrites `grubenv` in place, and a power
   cut that tears that write sends GRUB to `grubenv.bak`, where the passed
   trial still looks used up.
 - **Trial failure:** `<slot>_OK=0` the same way, record the reason in
-  `/data/boat-update/last-result` (best effort, and only if `/data` is the
-  `DATA` partition), then reboot. GRUB skips the slot.
+  `/data/boat-update/last-result` and append it to `history` (best effort,
+  and only if `/data` is the `DATA` partition), then reboot. GRUB skips the
+  slot. Every verdict - commit, failure, shutdown retry - goes into
+  `history` this way.
+- **A board fault fails the trial too.** A Tier 1 failure (the ESP, `grubenv`,
+  RAUC) or a commit the lock or the ESP refused can be the board's fault,
+  not the release's, but `boat-commit` cannot tell which - a release can
+  break each of them - so the trial still fails and the release is still
+  not offered over the air again. Its record says so, and that
+  `boat-update install <bundle file>` installs it again once the board is
+  fixed.
 - **Committed boot:** the attempt counter is reset *first*, before any
   check that may take a while - by `boat-grubenv-guard`, as soon as the ESP
   is mounted, and by `boat-commit` if it is still set. A reset the ESP
@@ -525,6 +574,11 @@ a "multi-user reached" check would deadlock):
   succeeded (`/run/boat-ab/committed`), not by `COMMITTED=1` in `grubenv`:
   a write that failed after its rename can show `COMMITTED=1` that was never
   flushed, or that `grubenv.bak` does not have.
+- `--deadline`, `--shutdown` and `--may-sleep` never read `health.conf`, so
+  an operator's mistake there cannot also take away the deadline, the retry
+  or the sleep hold. The gate reads it in a subshell first: one it cannot
+  read is an alert, and the defaults decide. If the deadline's own run fails
+  anyway, its unit reboots (`ExecStopPost`), and GRUB's count ends the trial.
 - **The sleep inhibitor** is held from install until the trial is committed,
   not just during the write. Shutdown is not held off: the skipper must be
   able to turn the computer off. Instead, a clean shutdown or reboot before
@@ -532,7 +586,16 @@ a "multi-user reached" check would deadlock):
   `ExecStop`, `boat-commit --shutdown`), so the release is tried again
   rather than failed and never offered again. Not after the verdict, not for
   a forced reboot (`systemctl --force` skips it), and a second one in the
-  same trial counts (`BOAT_RETRY`).
+  same trial counts (`BOAT_RETRY`). Nor when GRUB would boot the other slot
+  next - `boat-update rollback` off an undecided trial: that is a verdict,
+  so the slot is marked bad, the release recorded as failed, and it is not
+  offered again.
+- **Not checked, deliberately:** the helm display (Xorg, the XFCE session)
+  and the operator's compose stack. A board must pass a trial headless, and
+  apps are not the OS; `boat-update rollback` is the answer to a release
+  that breaks them, and `BOAT_HEALTH_DATA_UNITS`/`health.d` are there for
+  an operator who wants them gated. Nothing at the helm shows a trial or an
+  ALERT either: `boat-update status` is where the board reports (goal 6).
 - `nv_update_verifier.service` keeps running unconditionally. It only feeds
   NVIDIA's counter. Phase 1 confirms that it also resets that counter while
   booted from `APP_b` (≥4 warm reboots on B).
@@ -545,14 +608,14 @@ in a reset. The exception is a deliberate stay on a committed slot.
 | failure | what turns it into a reset | change needed |
 |---|---|---|
 | firmware fails before UEFI | not covered (single chain); firmware never changes in the field | none |
-| `grubaa64.efi` missing/unloadable | L4TLauncher falls back to DIRECT → extlinux on `APP` (A) → `boot.img` | none; `status` flags "booted outside GRUB" |
+| `grubaa64.efi` missing/unloadable | L4TLauncher falls back to DIRECT → extlinux on `APP` (A) → `boot.img` | none; `status` flags "booted outside GRUB", and `boat-bootmode-guard` alerts that GRUB did not load when `L4TDefaultBootMode` already read 0 (a reboot will not help: reflash). Slot A runs whatever `grubenv` says, and with no `panic=10`: a reset loop there would only reach NVIDIA's sticky state sooner, and a slot-aware DIRECT path needs its own design |
 | `grub.cfg` missing or truncated | the config built into `grubaa64.efi` runs it, and resets when it returns (5.1) | `grub-efi` bbappend: boat's `cfg` |
-| kernel / initrd load error, `boot` returns | guarded loads → mark slot, `reboot` (5.3) | grub.cfg design + build checks |
+| kernel / initrd load error, `boot` returns | guarded loads → mark slot, `reboot`; when the mark cannot be saved, a hand-over within the boot (5.3) | grub.cfg design + build checks |
 | GRUB itself hangs | **the UEFI watchdog, kept armed through GRUB** (300 s; 5.1). The Tegra hardware WDT is a second layer if Phase 0 shows it runs this early. | `grub-efi` bbappend: re-arm instead of cancel. **Phase 1 exit test.** If firmware ignores the re-arm, this row narrows to "power cycle to recover" and goal 4 says so. |
 | kernel panic | `panic=10` | cmdline |
 | kernel hard hang | Tegra WDT running from early kernel | Phase 0: armed before userspace? If not, enable it at probe |
 | initramfs can't mount root | today: **hangs forever** | `tegra-minimal-init` bbappend: only the two slot partitions, GPT name checked, bounded retries, then `reboot -f` (`boat.stay=1` keeps the shell) |
-| systemd emergency/rescue | today: waits forever | drop-ins: reboot after 60 s unless `boat.stay=1`. Shared mounts are `nofail`, so only slot-local faults get here. |
+| systemd emergency/rescue | today: waits forever | drop-ins: reboot after 60 s unless `boat.stay=1`. Shared mounts are `nofail`, so only slot-local faults get here. `boat-commit.service` conflicts with both modes: it has no default dependencies, so it would otherwise still run there and reset a committed slot's attempt count, and GRUB could never fall back from a slot that keeps ending in emergency mode. A `systemctl rescue` typed on purpose reboots too (docs/07 says how to keep it). |
 | PID 1 wedged | `RuntimeWatchdogSec=60s`, `RebootWatchdogSec=10min` | **decision D8**: one `/dev/watchdog` opener |
 | commit/health hangs on a trial | `boat-trial-deadline.timer` | add |
 | power cut during a trial | TRY already counted → next boot skips the trial slot | none (conservative) |
@@ -574,9 +637,13 @@ the source, the steps below are the same.
   rootfs.
 - It holds a sleep and shutdown inhibitor while it installs; after the
   reboot, `boat-trial-inhibit` holds off sleep until the commit (5.4).
-- `boat-sleep` refuses, `--force` or not, while an update is being
-  installed or is on trial. (Those inhibitors are root's, and logind never
-  holds root back with root's own locks, so it asks for the units by name.)
+- No suspend at all while an update is being installed or is on trial
+  (`boat.trial=1` and no commit recorded this boot): those inhibitors are
+  root's, and logind never holds root back with root's own locks, so
+  `boat-ab-boot` puts `boat-commit --may-sleep` in front of
+  `systemd-suspend` (and hibernate's kin), which fails the suspend job
+  whoever asked - root's own `systemctl suspend` too. `boat-sleep` refuses
+  as well, `--force` or not, and its `--status` and `--dry-run` say why.
 
 The order matches RAUC 1.13's `install.c`:
 
@@ -738,18 +805,28 @@ The order matches RAUC 1.13's `install.c`:
     always see the current values.
 - **Lives on `/data`:**
   - Docker and compose (already there);
-  - RAUC's `data-directory` (`/data/rauc`, with `RequiresMountsFor=/data`
-    on `rauc.service`);
+  - RAUC's `data-directory` (`/data/rauc`; `rauc.service` is
+    `Requisite=`/`After=data.mount`, so it waits for a mount under way but
+    does not restart a failed DATA check on every on-demand start);
   - `boat-update` history;
   - a size-capped persistent journal (`/data/log/journal`), so
-    `journalctl -b -1` after a fallback shows why the trial failed;
+    `journalctl -b -1` after a fallback shows why the trial failed
+    (`SystemKeepFree=512M`, well below what `boat-update` keeps free, so a
+    nearly full DATA does not stop it growing);
   - **the login users' homes** (D11): `/home/boat`, bind-mounted from
     `/data/home/boat` (`BOAT_AB_HOME_USERS`). This keeps `~boat/.ssh`, the
     XFCE settings and anything users keep in their home across updates. It
     is seeded from the image's copy on first boot. `root`'s home is
     `/home/root` on this distro and stays in the slot, so key-only SSH as
     `root` still works when `DATA` is what broke; its `.ssh` is carried
-    over instead (above).
+    over instead (above). The home mounts come before
+    `systemd-user-sessions`, so the helm desktop and non-root logins wait for
+    DATA's check, however long a repair takes - deliberately, rather than
+    log anyone into the slot's stale copy; the check says so on the console.
+  - Firefox, when `boat-install-firefox` installs it (`/data/opt/firefox`,
+    with a boot unit that puts its launcher and menu entry back into a new
+    slot): in a slot it would be lost at every update, and a rollback would
+    start an older Firefox on a profile a newer one wrote.
 - Documented consequence: local edits to any other `/etc` file do not
   survive an update. Put them in `meta-boat` or on `/data`.
 - `/data` is shared, so a newer Docker could migrate `/data/docker` in a way
@@ -762,7 +839,7 @@ The order matches RAUC 1.13's `install.c`:
 |---|---|---|
 | QSPI firmware (one usable chain) | section 3 | USB recovery (`05-flash-nvme.sh`) |
 | kernel DTB (`kernel-dtb`, read by UEFI) | option A trade-off | USB reflash. Phase 0 confirms GRUB passes UEFI's DTB through unchanged. |
-| ESP contents: L4TLauncher, GRUB, `grub.cfg` | single copy | USB reflash (`grubenv` and `boot.cfg` are runtime-written) |
+| ESP contents: L4TLauncher, GRUB, `grub.cfg` (with `KERNEL_ARGS`) | single copy | USB reflash (`grubenv` and `boot.cfg` are runtime-written). An update never changes them. `grub.cfg` passes their version as `boat.esp=N`; every change bumps it (with `BOAT_ESP` in `boat-grubenv-guard`); a release whose scripts come to need the change also raises `BOAT_ESP_MIN`, and the guard alerts on a board whose ESP is older than that. Nothing refuses such a bundle before it is installed yet. |
 | `kernel`/`kernel_b` (`boot.img`) | last-resort fallback only | flash time |
 
 A BSP bump (new L4T) is therefore always a **full USB reflash**. The
@@ -1419,9 +1496,11 @@ pieces also run off-target:
   `grubenv`. It asserts the slot picked, the kernel command line and the
   `grubenv` written back for every row of 5.3's table, plus a torn or
   missing `grubenv`, an ESP that refuses writes, a kernel, `initrd` or
-  `boot` that fails, every last-resort order, and - starting from the
+  `boot` that fails (also where that cannot be recorded), a trial in
+  either slot, every last-resort order, and - starting from the
   config built into `grubaa64.efi` - a missing or truncated `grub.cfg`. (`qemu-system-aarch64` + AAVMF was the first idea; `grub-emu` runs
-  the same script without a firmware image, and fits in CI.)
+  the same script without a firmware image, and fits in CI. It passes with
+  the board's GRUB 2.06 as well as the 2.12 CI installs.)
 - **Shell logic:** `boat-update`, the handlers, `boat-storage` and the
   boot-state scripts get host-side tests with `rauc`, `grub-editenv`,
   `blkid` and `nmcli` mocked. `scripts/test-ab-scripts.py` runs
@@ -1457,7 +1536,7 @@ All of them run from `lint.sh`, so they cover every PR.
 | 12 | committed slot broken (bench: corrupt its kernel) | A, A, then B; no NVIDIA sticky recovery |
 | 13 | trial: kernel panic | `panic=10` → old slot |
 | 14 | trial: rootfs won't mount | initramfs reboots → old slot |
-| 15 | trial: emergency mode | reboot after 60 s → old slot |
+| 15 | trial: emergency mode; and a committed slot whose `local-fs.target` fails (a `Required` mount that fails) | reboot after 60 s → old slot; the committed slot's attempt count is not reset in emergency mode, so after two such boots GRUB falls back |
 | 16 | trial: Tier 2 failure (`NetworkManager` masked) | mark-bad + reboot → old slot, reason recorded |
 | 17 | trial: hard hang | WDT reset → old slot |
 | 18 | trial: commit unit hangs | deadline timer → old slot |
@@ -1465,11 +1544,11 @@ All of them run from `lint.sh`, so they cover every PR.
 | 20 | committed slot, `/data` missing | stays up (Tier 1 ok); Docker degraded; alert |
 | 21 | ESP `grubenv` corrupted | boots by defaults; the guard rebuilds the file and alerts; next install works |
 | 22 | `L4TDefaultBootMode` reset to 1 (UEFI defaults) | the guard restores it; that boot is flagged "outside GRUB"; install refused until rebooted via GRUB |
-| 23 | `grubaa64.efi` missing | DIRECT boots A; flagged |
+| 23 | `grubaa64.efi` missing | DIRECT boots A; flagged, with an alert that GRUB did not load |
 | 24 | a JetPack SD card in the module slot, and a UEFI-bootable USB stick (JetPack-flashed: `APP`/`esp` labels and its own L4TLauncher), inserted before a reboot | ignored: UEFI boots the NVMe first (5.1), and root, ESP and RAUC slots resolve to NVMe partition numbers whose GPT names are checked |
 | 25 | unprivileged user, and a container running as a non-root user with the system bus mounted, call RAUC `Install`/`Mark` | denied |
 | 26 | `boat-update rollback` after commit | other slot boots and commits |
-| 27 | `boat-sleep` (and the UDP sleep listener) during install and during a trial | refused |
+| 27 | `boat-sleep` (and the UDP sleep listener), and root's own `systemctl suspend`, during install and during a trial | refused (`boat-sleep --status` says why) |
 | 28 | both slots broken | A, A, B, then UEFI stop (sticky recovery) is the documented end state; the USB reflash recovers it, and so does the UEFI-menu path once Phase 0 has found it and docs/06 describes it (open until then) |
 | 29 | carry-over | SSH host key, `/root/.ssh`, `/home`, Wi-Fi, BT pairing, hostname, `boat-sleep.key`, passwords (D5) are unchanged after update and after rollback |
 | 30 | SC7 + WoL on both slots | works |

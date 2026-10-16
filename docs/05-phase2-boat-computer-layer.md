@@ -398,7 +398,11 @@ Re-run it later to upgrade; `--remove` uninstalls and leaves `~/.mozilla`
 profiles alone. It is not run at build or first boot on purpose — `do_rootfs`
 has no business reaching the internet, and a first-boot unit would block on
 DNS on a boat that may have no uplink for weeks. **So the browser is not in
-the flashed image; run the command once when there is a connection.**
+the flashed image; run the command once when there is a connection.** On
+the A/B layout it installs to `/data/opt/firefox` instead, so both slots
+share it and updates keep it (a boot unit puts the menu entry back into
+each new slot); anything else installed into a slot is lost at the next
+update.
 
 This needs no extra packages. Every shared library Mozilla's binaries link
 against — gtk3/gdk, pango, cairo, atk, gdk-pixbuf, fontconfig, freetype,

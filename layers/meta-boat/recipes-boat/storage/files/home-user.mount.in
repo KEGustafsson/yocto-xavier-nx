@@ -1,7 +1,10 @@
 # A/B layout: /home/@USER@ lives on DATA, so it is the same home in both
 # slots and survives every update. If DATA is missing or broken this mount
 # fails and the image's own /home/@USER@ is used instead: logins still work.
-# Ordered before user sessions so nobody logs into the wrong copy.
+# Ordered before user sessions so nobody logs into the wrong copy - which
+# means the helm desktop and non-root logins wait for DATA's check, however
+# long a repair takes (deliberately: no time limit that would hand out the
+# stale copy instead). Root's SSH works meanwhile.
 [Unit]
 Description=/home/@USER@ on the shared data partition
 Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md

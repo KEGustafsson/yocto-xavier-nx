@@ -23,6 +23,7 @@ Exit status: 0 = all passed, 1 = a case failed, 77 = grub-editenv missing
 (scripts/lint.sh reports that as a skip).
 """
 import fcntl
+import hashlib
 import os
 import shutil
 import subprocess
@@ -74,13 +75,14 @@ class Board:
                  late=(), editenv_fails=False, committed_mark=False,
                  failed_mark=False, system_state="running", efivars=None,
                  efi_readonly=(), manifest=None, sysconf=None, expect=None,
-                 boat_update=None):
+                 boat_update=None, setup=None):
         """efivars: {name: bytes} in the fake efivarfs (attributes added).
         efi_readonly: variables efivar fails to write. manifest/sysconf:
         the bundle's [update] and system.conf's [system] keys. expect:
         (release, pid) in boat-update's /run/boat-update/expect.
         boat_update: "ok" or "broken" - a boat-update that starts, or not
-        (None: there is none)."""
+        (None: there is none). setup: called with the board once it is
+        laid out, to add to it."""
         self.root = root
         for d in ("bin", "proc", "run", "etc", "data", "boot/efi/EFI/BOOT",
                   "efivars", "bundle", "etc/rauc"):
@@ -150,6 +152,8 @@ class Board:
             self.make_env(self.grubenv + ".bak", bak)
         self.stubs()
         self.install_scripts()
+        if setup:
+            setup(self)
 
     def write(self, rel, text):
         with open(os.path.join(self.root, rel), "w") as f:
@@ -176,13 +180,15 @@ grep -qx "$last" %s/mountpoints
         self.write("bin/docker", "#!/bin/sh\necho 'Docker version 24.0.5, build x'\n")
         self.write("bin/systemctl", """#!/bin/sh
 echo "systemctl $*" >> %(r)s/log
+# A case's own answers, if it has any (it exits when it answers).
+[ -e %(r)s/systemctl-hook ] && . %(r)s/systemctl-hook
 case "$1" in
     is-active)
         if grep -qx "$3" %(r)s/late && [ ! -e "%(r)s/asked-$3" ]; then
             : > "%(r)s/asked-$3"
             exit 3
         fi
-        grep -qx "$3" %(r)s/active ;;
+        grep -qx "$3" %(r)s/active || exit 3 ;;
     is-failed) grep -qx "$3" %(r)s/failed ;;
     is-system-running) cat %(r)s/system-state ;;
     cat) [ "$2" = docker.service ] ;;
@@ -274,6 +280,14 @@ esac
                            capture_output=True, text=True, env=env)
         return p.returncode, p.stdout + p.stderr
 
+    def edit_script(self, name, old, new):
+        """Change one line of a script in the fake root, as a later release would."""
+        path = os.path.join(self.root, name)
+        text = slurp(path)
+        assert old in text, "%s has no %r" % (name, old)
+        with open(path, "w") as f:
+            f.write(text.replace(old, new))
+
     def read(self, rel):
         path = os.path.join(self.root, rel)
         return slurp(path) if os.path.exists(path) else ""
@@ -330,7 +344,7 @@ RAUC_TARGET_B = {"RAUC_BUNDLE_MOUNT_POINT": "@ROOT@/bundle",
 def case(name, script, board, expect_rc, want_env=None, want_bak_equal=None,
          says=(), unchanged=False, extra_env=None, args=(), log=(), not_log=(),
          files=None, absent=(), want_efi=None, lock=None, replaced=False,
-         not_says=()):
+         not_says=(), check=None):
     """log/not_log: entries that must / must not be in the stubs' command
     log. files: {path under the fake root: a regex its contents must
     match}. absent: paths under the fake root that must not exist.
@@ -338,13 +352,14 @@ def case(name, script, board, expect_rc, want_env=None, want_bak_equal=None,
     change) - the lock is held that long by another writer, which makes
     that change meanwhile (seconds None: held throughout). replaced:
     grubenv must be a new file (written by rename), not rewritten in
-    place. not_says: regexes the output must not match."""
+    place. not_says: regexes the output must not match. check: called
+    with the board afterwards, returns a list of problems."""
     return dict(name=name, script=script, board=board, expect_rc=expect_rc,
                 want_env=want_env, want_bak_equal=want_bak_equal, says=says,
                 unchanged=unchanged, extra_env=extra_env, args=args, log=log,
                 not_log=not_log, files=files or {}, absent=absent,
                 want_efi=want_efi or {}, lock=lock, replaced=replaced,
-                not_says=not_says)
+                not_says=not_says, check=check)
 
 
 CASES = [
@@ -809,10 +824,844 @@ CASES = [
 ]
 
 
+# --- what GRUB cannot write down itself, and the ESP's own faults ---------
+
+def bak_copy_fails(board):
+    """An ESP that takes grubenv's write, then fails grubenv.bak's copy."""
+    board.write("bin/cp", """#!/bin/sh
+for last; do :; done
+case "$last" in *.bak.new) exit 1 ;; esac
+exec %s "$@"
+""" % shutil.which("cp"))
+    os.chmod(os.path.join(board.root, "bin", "cp"), 0o755)
+
+
+CASES += [
+    case("guard: torn grubenv on a last-resort boot - put on trial, never made committed",
+         "boat-grubenv-guard.sh",
+         dict(cmdline="rauc.slot=B boat.lastresort=1 boat.esp=1", torn=True,
+              bak=env_with(A_OK=0, A_TRY=2, B_OK=0, B_COMMITTED=0)),
+         0, want_env=dict(ORDER="B A", B_OK="1", B_TRY="0", B_COMMITTED="0",
+                          A_OK="0", A_TRY="0", A_COMMITTED="0", BOAT_STAY="0"),
+         want_bak_equal=True, says=["last resort: on trial from the next boot"]),
+    case("guard: hand-over boot - the failed slot GRUB could not mark is marked, with an alert",
+         "boat-grubenv-guard.sh",
+         dict(cmdline="rauc.slot=B boat.handover=1 boat.esp=1", env=env_with(B_TRY=1)),
+         0, want_env=env_with(A_OK=0, B_TRY=0), want_bak_equal=True,
+         says=["slot A failed to load in GRUB: it is marked unusable"],
+         files={"run/boat-ab/health-alert": "GRUB could not load slot A"}),
+    case("guard: hand-over boot over a torn grubenv - booted slot committed, the failed one unusable",
+         "boat-grubenv-guard.sh",
+         dict(cmdline="rauc.slot=A boat.handover=1 boat.esp=1", torn=True,
+              bak=env_with(ORDER="B A")),
+         0, want_env=dict(ORDER="A B", A_OK="1", A_TRY="0", A_COMMITTED="1",
+                          B_OK="0", B_TRY="0", B_COMMITTED="0", BOAT_STAY="0"),
+         want_bak_equal=True,
+         files={"run/boat-ab/health-alert": "GRUB could not load slot B"}),
+    case("guard: a hand-over mark the ESP refuses is an alert",
+         "boat-grubenv-guard.sh",
+         dict(cmdline="rauc.slot=B boat.handover=1 boat.esp=1", env=env_with(B_TRY=0),
+              editenv_fails=True),
+         0, want_env=env_with(B_TRY=0),
+         files={"run/boat-ab/health-alert": "could not mark slot A unusable"}),
+    case("guard: an ESP older than the newest, but enough for this release - noted, no alert",
+         "boat-grubenv-guard.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(A_TRY=0)),
+         0, want_env=env_with(A_TRY=0), absent=["run/boat-ab/health-alert"],
+         says=["the boot files on the ESP are version 0; the newest is 1"]),
+    dict(case("guard: an ESP older than this release needs is an alert",
+              "boat-grubenv-guard.sh",
+              dict(cmdline="rauc.slot=A", env=env_with(A_TRY=0)),
+              0, want_env=env_with(A_TRY=0),
+              files={"run/boat-ab/health-alert": "boot files on the ESP are version 0, and this release needs 1"}),
+         setup=lambda b: b.edit_script("boat-grubenv-guard.sh", "BOAT_ESP_MIN=0", "BOAT_ESP_MIN=1")),
+    case("guard: the ESP this release expects - no alert",
+         "boat-grubenv-guard.sh",
+         dict(cmdline="rauc.slot=A boat.esp=1", env=env_with(A_TRY=0)),
+         0, want_env=env_with(A_TRY=0), absent=["run/boat-ab/health-alert"]),
+    dict(case("editenv wrapper: grubenv written but its .bak copy fails - RAUC is told it worked, and an alert",
+              "grub-editenv-wrapper.sh",
+              dict(cmdline="rauc.slot=A", env=env_with(), bak=env_with()),
+              0, want_env=env_with(B_OK=0),
+              args=["@ROOT@/boot/efi/EFI/BOOT/grubenv", "set", "B_OK=0"],
+              files={"run/boat-ab/health-alert": "could not copy grubenv to grubenv.bak",
+                     "boot/efi/EFI/BOOT/grubenv.bak": "^B_OK=1$"}),
+         setup=bak_copy_fails),
+    case("bootmode-guard: outside GRUB with L4TDefaultBootMode already 0 - GRUB did not load: an alert",
+         "boat-bootmode-guard.sh",
+         dict(cmdline="root=/dev/nvme0n1p1", env=env_with(),
+              efivars={"L4TDefaultBootMode": b"\x00\x00\x00\x00", "NewDeviceHierarchy": b"\x00"}),
+         0, not_log=["efivar"], files={"run/boat-ab/boot-path": "^outside-grub$",
+                                       "run/boat-ab/health-alert": "GRUB itself did not load.*reflash"}),
+    case("bootmode-guard: outside GRUB after a UEFI reset - the setting is fixed, no ESP alert",
+         "boat-bootmode-guard.sh",
+         dict(cmdline="root=/dev/nvme0n1p1", env=env_with(),
+              efivars={"L4TDefaultBootMode": b"\x01\x00\x00\x00", "NewDeviceHierarchy": b"\x00"}),
+         0, want_efi={"L4TDefaultBootMode": b"\x00\x00\x00\x00"},
+         absent=["run/boat-ab/health-alert"]),
+]
+
+
+# --- the health gate, trials, sleep and the wiring around them -------------
+POWER_FILES = os.path.join(LAYER, "recipes-boat", "power", "files")
+FIREFOX_FILES = os.path.join(LAYER, "recipes-boat", "firefox", "files")
+AB_RECIPE = os.path.join(LAYER, "recipes-boat", "ab-boot", "boat-ab-boot.bb")
+RAUC_CORE = os.path.join(LAYER, "external", "rauc", "recipes-core", "rauc")
+
+# A trial of slot B, booted from ORDER="B A".
+ON_TRIAL = env_with(ORDER="B A", B_TRY=1, B_COMMITTED=0)
+TRIAL_PASSED = env_with(ORDER="B A", B_TRY=0, B_COMMITTED=1, BOAT_RETRY="")
+TRIAL_FAILED = env_with(ORDER="B A", B_OK=0, B_TRY=0, B_COMMITTED=0)
+# RAUC installing into slot A, from a board running slot B.
+RAUC_TARGET_A = dict(RAUC_TARGET_B, RAUC_TARGET_SLOTS="1")
+
+
+def executable(path, text):
+    with open(path, "w") as f:
+        f.write(text)
+    os.chmod(path, 0o755)
+
+
+def both(*setups):
+    def setup(b):
+        for s in setups:
+            s(b)
+    return setup
+
+
+def add_conf(text):
+    """setup: lines added to health.conf (@ROOT@: the fake root)."""
+    def setup(b):
+        with open(os.path.join(b.root, "etc/boat-update/health.conf"), "a") as f:
+            f.write(text.replace("@ROOT@", b.root))
+    return setup
+
+
+def health_d(checks, conf=""):
+    """setup: health.d turned on, holding {name: shell script body}."""
+    def setup(b):
+        d = os.path.join(b.root, "data/boat-update/health.d")
+        os.makedirs(d)
+        for name, body in checks.items():
+            executable(os.path.join(d, name), "#!/bin/sh\n" + body.replace("@ROOT@", b.root))
+        add_conf("BOAT_HEALTH_CHECKS_D=1\nBOAT_HEALTH_CHECKS_DIR=@ROOT@/data/boat-update/health.d\n"
+                 + conf)(b)
+    return setup
+
+
+def hook(text):
+    """setup: the systemctl stub runs this first; it answers by exiting."""
+    def setup(b):
+        b.write("systemctl-hook", text.replace("@ROOT@", b.root))
+    return setup
+
+
+def put(rel, text, mode=0o644):
+    def setup(b):
+        path = os.path.join(b.root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+        os.chmod(path, mode)
+    return setup
+
+
+def asleep_once(b):
+    """setup: the first `sleep` the gate runs lasts 1000 s of /proc/uptime -
+    the board suspended in between."""
+    executable(os.path.join(b.root, "bin/sleep"), """#!/bin/sh
+if [ ! -e %(r)s/slept ]; then
+    : > %(r)s/slept
+    echo "1105.00 1105.00" > %(r)s/proc/uptime
+fi
+""" % dict(r=b.root))
+
+
+def mode_is(rel, want):
+    def check(b):
+        got = os.stat(os.path.join(b.root, rel)).st_mode & 0o777
+        return [] if got == want else ["%s is mode %o, expected %o" % (rel, got, want)]
+    return check
+
+
+def lines_in(rel, *patterns):
+    """check: each regex matches a line of the file, in this order."""
+    def check(b):
+        import re
+        lines = b.read(rel).splitlines()
+        i = 0
+        for p in patterns:
+            while i < len(lines) and not re.search(p, lines[i]):
+                i += 1
+            if i == len(lines):
+                return ["%s has no line matching %r after the ones before: %r" % (rel, p, lines)]
+            i += 1
+        return []
+    return check
+
+
+def install_sleep(b, inhibitors="a(ssssuu) 0"):
+    """boat-sleep, with /sys, its config and boat-wol-arm moved into the
+    fake root, and stubs for id, ethtool and busctl."""
+    r = b.root
+    for d in ("sys/power", "sys/class/net/eth0", "etc/default"):
+        os.makedirs(os.path.join(r, d), exist_ok=True)
+    b.write("sys/power/state", "freeze mem\n")
+    b.write("sys/power/mem_sleep", "s2idle [deep]\n")
+    b.write("sys/class/net/eth0/address", "00:04:4b:00:00:01\n")
+    b.write("inhibitors", inhibitors + "\n")
+    executable(os.path.join(r, "bin/id"), "#!/bin/sh\necho 0\n")
+    executable(os.path.join(r, "bin/ethtool"), "#!/bin/sh\nprintf '\\tWake-on: g\\n'\n")
+    executable(os.path.join(r, "bin/boat-wol-arm"), "#!/bin/sh\nexit 0\n")
+    executable(os.path.join(r, "bin/busctl"), """#!/bin/sh
+echo "busctl $*" >> %(r)s/log
+case "$*" in
+    *ListInhibitors*) cat %(r)s/inhibitors ;;
+esac
+""" % dict(r=r))
+    text = slurp(os.path.join(POWER_FILES, "boat-sleep.sh"))
+    for old, new in (("/etc/default/boat-power", r + "/etc/default/boat-power"),
+                     ("/sys/power/", r + "/sys/power/"),
+                     ("/sys/class/net/", r + "/sys/class/net/"),
+                     ("/usr/bin/boat-wol-arm", r + "/bin/boat-wol-arm"),
+                     ("/proc/cmdline", r + "/proc/cmdline"),
+                     ("/run/boat-ab/committed", r + "/run/boat-ab/committed")):
+        text = text.replace(old, new)
+    b.write("boat-sleep.sh", text)
+
+
+def sleep_with(inhibitors):
+    return lambda b: install_sleep(b, inhibitors)
+
+
+LOCK_HELD = 'a(ssssuu) 1 "sleep" "xfce4-power-manager" "user activity" "block" 2000 1234'
+
+
+def install_firefox(installed=True, data=True):
+    """boat-install-firefox on an A/B board (its lib.sh is there), with
+    /data, /opt and the launcher's paths moved into the fake root. curl
+    names 150.0 as the latest; installed: Firefox 150.0 is on /data. data:
+    /data is mounted."""
+    def setup(b):
+        r = b.root
+        executable(os.path.join(r, "bin/id"), "#!/bin/sh\necho 0\n")
+        executable(os.path.join(r, "bin/curl"), "#!/bin/sh\necho 'https://download-installer.cdn.mozilla.net"
+                   "/pub/firefox/releases/150.0/linux-aarch64/en-US/firefox-150.0.tar.xz'\n")
+        if installed:
+            os.makedirs(os.path.join(r, "data/opt/firefox"))
+            executable(os.path.join(r, "data/opt/firefox/firefox"), "#!/bin/sh\n")
+            b.write("data/opt/firefox/application.ini", "[App]\nVersion=150.0\n")
+        mounts = ["%sp2 / ext4 rw 0 0" % DISK]
+        if data:
+            mounts.append("%sp18 %s/data ext4 rw 0 0" % (DISK, r))
+        b.write("proc/mounts", "".join(m + "\n" for m in mounts))
+        text = slurp(os.path.join(FIREFOX_FILES, "boat-install-firefox.sh"))
+        for old, new in (("AB_LIB=/usr/lib/boat-ab/lib.sh", "AB_LIB=%s/lib.sh" % r),
+                         ("AB_DATA=/data", "AB_DATA=%s/data" % r),
+                         ("PREFIX=/opt/firefox", "PREFIX=%s/opt/firefox" % r),
+                         ("BINLINK=/usr/local/bin/firefox", "BINLINK=%s/usr/local/bin/firefox" % r),
+                         ("DESKTOP=/usr/share/applications/firefox.desktop",
+                          "DESKTOP=%s/usr/share/applications/firefox.desktop" % r),
+                         ("/proc/mounts", r + "/proc/mounts")):
+            text = text.replace(old, new)
+        b.write("boat-install-firefox.sh", text)
+    return setup
+
+
+def firefox_upgrade(fail_swap=False, fail_download=False, stale_old=False):
+    """install_firefox(), with 149.0 on /data and a real 150.0 tarball the
+    curl stub serves, checksum and all. fail_swap: the move of the new tree
+    into place fails. fail_download: the download fails. stale_old: an
+    earlier run left <prefix>.old behind."""
+    base = install_firefox()
+
+    def setup(b):
+        base(b)
+        r = b.root
+        b.write("data/opt/firefox/application.ini", "[App]\nVersion=149.0\n")
+        src = os.path.join(r, "tarsrc")
+        os.makedirs(os.path.join(src, "firefox"))
+        executable(os.path.join(src, "firefox", "firefox"), "#!/bin/sh\n")
+        with open(os.path.join(src, "firefox", "application.ini"), "w") as f:
+            f.write("[App]\nVersion=150.0\n")
+        tarball = os.path.join(r, "firefox-150.0.tar.xz")
+        subprocess.run(["tar", "-C", src, "-cJf", tarball, "firefox"], check=True)
+        with open(tarball, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        executable(os.path.join(r, "bin/curl"), """#!/bin/sh
+out=""; url=""
+while [ $# -gt 0 ]; do
+    case "$1" in -o) out="$2"; shift ;; http*) url="$1" ;; esac
+    shift
+done
+case "$url" in
+    *SHA256SUMS) echo "%s  linux-aarch64/en-US/firefox-150.0.tar.xz" ;;
+    *.tar.xz) [ %d = 1 ] && exit 22; cp %s "$out" ;;
+    *) echo 'https://download-installer.cdn.mozilla.net/pub/firefox/releases/150.0/linux-aarch64/en-US/firefox-150.0.tar.xz' ;;
+esac
+""" % (digest, int(fail_download), tarball))
+        if fail_swap:
+            executable(os.path.join(r, "bin/mv"), """#!/bin/sh
+for last; do :; done
+case "$last" in */data/opt/firefox) case "$1" in */.boat-firefox.*) exit 1 ;; esac ;; esac
+exec %s "$@"
+""" % shutil.which("mv"))
+        if stale_old:
+            os.makedirs(os.path.join(r, "data/opt/firefox.old"))
+            b.write("data/opt/firefox.old/application.ini", "[App]\nVersion=148.0\n")
+    return setup
+
+
+def firefox_version(want):
+    def check(b):
+        got = b.read("data/opt/firefox/application.ini")
+        errors = [] if "Version=%s" % want in got else [
+            "/data/opt/firefox holds %r, expected Firefox %s" % (got, want)]
+        leftovers = [n for n in os.listdir(os.path.join(b.root, "data/opt"))
+                     if n.startswith(".boat-firefox.")]
+        if leftovers:
+            errors.append("working copies left behind: %s" % leftovers)
+        return errors
+    return check
+
+
+def firefox_linked(b):
+    r = b.root
+    errors = []
+    link = os.path.join(r, "usr/local/bin/firefox")
+    if not os.path.islink(link) or os.readlink(link) != r + "/data/opt/firefox/firefox":
+        errors.append("the launcher does not point at the Firefox on /data")
+    desktop = b.read("usr/share/applications/firefox.desktop")
+    if "Exec=%s/data/opt/firefox/firefox %%u" % r not in desktop:
+        errors.append("the menu entry does not start the Firefox on /data: %r" % desktop)
+    return errors
+
+
+TRIAL_CASES = [
+    # --- the A/B lock: root's alone ---------------------------------------
+    case("lock: the A/B lock file is root's alone (0600) - nobody else can hold it",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(A_TRY=1)),
+         0, want_env=env_with(A_TRY=0), check=mode_is("run/boat-ab/commit.lock", 0o600)),
+    case("lock: a lock file other users could open is closed up before it is used",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(A_TRY=1),
+              setup=put("run/boat-ab/commit.lock", "", 0o644)),
+         0, want_env=env_with(A_TRY=0), check=mode_is("run/boat-ab/commit.lock", 0o600)),
+    # --- verdicts in history, not only in last-result ---------------------
+    case("history: a commit is appended to history, after what was there",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              setup=put("data/boat-update/history", "2026-01-01T00:00:00Z installed 1.1.0 into slot(s) B, from slot A\n")),
+         0, want_env=TRIAL_PASSED,
+         check=lines_in("data/boat-update/history", "installed 1.1.0", r"^\S+ committed slot B \(1\.1\.0\)$")),
+    case("history: a failed trial is appended to history, with the check that failed",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              active=["systemd-logind.service", "dbus.service", "sshd.socket",
+                      "boat-bootmode-guard.service", "docker.service"]),
+         1, files={"data/boat-update/history": r"FAILED: NetworkManager\.service is not active$"}),
+    case("history: a shutdown retry is appended to history",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", system_state="stopping", env=ON_TRIAL),
+         0, args=["--shutdown"], files={"data/boat-update/history": "retried on the next boot"}),
+    # --- a failure the board can cause too says how to try again -----------
+    case("commit: a commit the ESP will not take leaves why, for the deadline",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL, editenv_fails=True),
+         1, unchanged=True, files={"run/boat-ab/commit-failed": "could not write grubenv"}),
+    case("commit: a commit grubenv.bak will not take is not a commit - and the record says it was the copy",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL, bak=ON_TRIAL, setup=bak_copy_fails),
+         1, absent=["run/boat-ab/committed"],
+         files={"run/boat-ab/commit-failed": "could not copy the commit to grubenv.bak"}),
+    case("deadline: a trial that passed but could not commit is failed - as a possible board fault",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              setup=put("run/boat-ab/commit-failed", "could not write grubenv\n")),
+         1, want_env=TRIAL_FAILED, args=["--deadline"], log=["systemctl reboot"],
+         files={"data/boat-update/last-result":
+                r"its commit was not written \(could not write grubenv\).*boat-update install <bundle file>",
+                "data/boat-update/failed-versions": "1.1.0"}),
+    case("commit: a Tier 1 failure's record says how to install the release again",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              mounts=["%sp12 /boot/efi vfat rw 0 0" % DISK, "%sp2 / ext4 ro 0 0" % DISK,
+                      "%sp18 /data ext4 rw 0 0" % DISK]),
+         1, files={"data/boat-update/last-result": "not read-write - if the board, not the release"}),
+    # --- a rollback during a trial is a verdict ---------------------------
+    case("shutdown: a rollback off an undecided trial marks it bad - no attempt back, not offered again",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", system_state="stopping",
+              env=env_with(ORDER="A B", B_TRY=1, B_COMMITTED=0)),
+         0, want_env=env_with(ORDER="A B", B_OK=0, B_TRY=0, B_COMMITTED=0),
+         want_bak_equal=True, args=["--shutdown"], not_says=["tries it again"],
+         files={"data/boat-update/failed-versions": "^1.1.0$",
+                "data/boat-update/history": "ended by a rollback to slot A",
+                "run/boat-ab/trial-failed": ""}),
+    case("shutdown: a slot first in ORDER that cannot boot is no rollback - the trial still gets its retry",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", system_state="stopping",
+              env=env_with(ORDER="A B", A_OK=0, B_TRY=1, B_COMMITTED=0)),
+         0, want_env=env_with(ORDER="A B", A_OK=0, B_TRY=0, B_COMMITTED=0, BOAT_RETRY="B"),
+         args=["--shutdown"], says=["tries it again \\(once\\)"]),
+    # --- health.conf cannot take the deadline, the retry or the gate down ---
+    case("deadline: a health.conf that cannot be read does not stop the deadline",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              setup=add_conf('BOAT_HEALTH_FAILED_UNITS="${BOAT_NO_SUCH_SETTING}"\n')),
+         1, want_env=TRIAL_FAILED, args=["--deadline"], log=["systemctl reboot"]),
+    case("shutdown: a health.conf that cannot be read does not stop the retry",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", system_state="stopping", env=ON_TRIAL,
+              setup=add_conf('BOAT_HEALTH_FAILED_UNITS="${BOAT_NO_SUCH_SETTING}"\n')),
+         0, want_env=env_with(ORDER="B A", B_TRY=0, B_COMMITTED=0, BOAT_RETRY="B"), args=["--shutdown"]),
+    case("commit: a health.conf that cannot be read is an alert, and the gate decides on its defaults",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              setup=add_conf('BOAT_HEALTH_FAILED_UNITS="${BOAT_NO_SUCH_SETTING}"\n')),
+         0, want_env=TRIAL_PASSED,
+         files={"run/boat-ab/health-alert": "health.conf cannot be read"}),
+    case("commit: a health.conf with a syntax error is an alert, and the gate decides on its defaults",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              setup=add_conf('if [ -x /x ]; then\n')),
+         0, want_env=TRIAL_PASSED,
+         files={"run/boat-ab/health-alert": "health.conf cannot be read"}),
+    case("commit: a health.conf whose last line is a false test is read, not replaced by the defaults",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              setup=add_conf('[ -x /no/such/tool ] && BOAT_HEALTH_UNITS="$BOAT_HEALTH_UNITS no-such.service"\n')),
+         0, want_env=TRIAL_PASSED, absent=["run/boat-ab/health-alert"]),
+    # --- health.d -----------------------------------------------------------
+    case("health.d: a check that passes lets the trial commit; its output reaches the journal",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              setup=health_d({"10-ok": "echo 'hello from the check'\n"})),
+         0, want_env=TRIAL_PASSED, says=["hello from the check"]),
+    case("health.d: a check that fails fails the trial, and says how",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              setup=health_d({"10-bad": "echo 'the plotter is not there' >&2\nexit 3\n"})),
+         1, want_env=TRIAL_FAILED, log=["systemctl reboot"],
+         says=["the plotter is not there", "10-bad failed, exit 3"]),
+    case("health.d: a check that ignores SIGTERM is killed, not waited for",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              setup=health_d({"10-stuck": "trap '' TERM\nsleep 20 </dev/null >/dev/null 2>&1\n"
+                                          "echo finished > @ROOT@/check-finished\n"},
+                             conf="BOAT_HEALTH_CHECK_TIMEOUT=1\n")),
+         1, says=["did not finish within 1 s"], absent=["check-finished"]),
+    case("health.d: the checks never run past boat-commit.service's own time limit",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              setup=health_d({"10-first": "echo '683.00 683.00' > @ROOT@/proc/uptime\n",
+                              "20-slow": "sleep 30 </dev/null >/dev/null 2>&1\n"})),
+         1, want_env=TRIAL_FAILED, says=["20-slow did not finish within 2 s"]),
+    case("health: a unit listed as needing /data is required when /data is mounted",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              setup=add_conf('BOAT_HEALTH_DATA_UNITS="boat-compose.service"\n')),
+         1, says=["boat-compose.service is not active \\(/data is mounted\\)"]),
+    case("health: ... and not when /data is not mounted",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              mounts=["%sp12 /boot/efi vfat rw 0 0" % DISK, "%sp2 / ext4 rw 0 0" % DISK],
+              setup=add_conf('BOAT_HEALTH_DATA_UNITS="boat-compose.service"\n')),
+         0, want_env=TRIAL_PASSED),
+    # --- DATA that is still on its way is waited for ------------------------
+    case("commit: a trial waits for a DATA that is still being checked, then asks RAUC",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL, health_deadline=6,
+              mounts=["%sp12 /boot/efi vfat rw 0 0" % DISK, "%sp2 / ext4 rw 0 0" % DISK],
+              setup=hook("""case "$*" in
+    "show -p ActiveState --value data.mount")
+        # Still mounting when first asked; mounted after that.
+        if [ ! -e @ROOT@/data-asked ]; then
+            : > @ROOT@/data-asked
+            echo "%sp18 /data ext4 rw 0 0" >> @ROOT@/proc/mounts
+            echo activating
+        else
+            echo active
+        fi
+        exit 0 ;;
+esac
+""" % DISK)),
+         0, want_env=TRIAL_PASSED, log=["rauc status"], says=["waiting for DATA"]),
+    case("commit: a DATA still not mounted at the deadline is a data problem - the trial is decided without it",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL, rauc="broken",
+              mounts=["%sp12 /boot/efi vfat rw 0 0" % DISK, "%sp2 / ext4 rw 0 0" % DISK],
+              setup=hook("""case "$*" in
+    "show -p ActiveState --value boat-data-check.service") echo activating; exit 0 ;;
+esac
+""")),
+         0, want_env=TRIAL_PASSED, not_log=["rauc status"], says=["deciding without"]),
+    # --- a board that slept --------------------------------------------------
+    case("commit: time the board spent asleep is given back to the checks",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL, health_deadline=6,
+              setup=both(asleep_once, hook("""if [ "$1" = is-active ] && [ "$3" = NetworkManager.service ]; then
+    n=$(cat @ROOT@/nm-asked 2>/dev/null || echo 0)
+    echo $((n + 1)) > @ROOT@/nm-asked
+    [ "$n" -ge 2 ] || exit 3
+fi
+"""))),
+         0, want_env=TRIAL_PASSED, says=["asleep for about 1000 s"]),
+    # --- a connection flood is not the release's fault -----------------------
+    case("commit: sshd.socket stopped by a connection flood is started again, not held against the release",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              active=["NetworkManager.service", "systemd-logind.service", "dbus.service",
+                      "boat-bootmode-guard.service", "docker.service"],
+              setup=hook("""case "$*" in
+    "show -p Result --value sshd.socket") echo trigger-limit-hit; exit 0 ;;
+    "start sshd.socket") echo sshd.socket >> @ROOT@/active; exit 0 ;;
+esac
+""")),
+         0, want_env=TRIAL_PASSED,
+         log=["systemctl reset-failed sshd.socket", "systemctl start sshd.socket"]),
+    case("commit: sshd.socket down for any other reason still fails the trial",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL,
+              active=["NetworkManager.service", "systemd-logind.service", "dbus.service",
+                      "boat-bootmode-guard.service", "docker.service"]),
+         1, want_env=TRIAL_FAILED, says=["sshd.socket is not active"],
+         not_log=["systemctl start sshd.socket"]),
+    # --- boat-commit --may-sleep (before every suspend) ---------------------
+    case("may-sleep: refused on a trial not committed yet",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL),
+         1, unchanged=True, args=["--may-sleep"], says=["on trial, not committed yet"]),
+    case("may-sleep: allowed once this boot's trial has committed",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=TRIAL_PASSED, committed_mark=True),
+         0, unchanged=True, args=["--may-sleep"]),
+    case("may-sleep: refused while an install runs",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(),
+              active=["boat-update-install.service"]),
+         1, args=["--may-sleep"], says=["being installed"]),
+    case("may-sleep: refused when systemd cannot say whether an install runs",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(),
+              setup=hook('[ "$1" = is-active ] && exit 1\n')),
+         1, args=["--may-sleep"], says=["cannot tell"]),
+    case("may-sleep: allowed on a committed boot with nothing going on",
+         "boat-commit.sh",
+         dict(cmdline="rauc.slot=A", env=env_with()),
+         0, unchanged=True, args=["--may-sleep"]),
+    # --- boat-sleep: the diagnostics ask what the real run asks -------------
+    case("boat-sleep: --dry-run refuses on an undecided trial, boat-trial-inhibit running or not",
+         "boat-sleep.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL, active=[], setup=install_sleep),
+         1, args=["--dry-run", "--delay", "0"], says=["on trial and not committed yet"],
+         not_says=["checks done"]),
+    case("boat-sleep: --status says a sleep now would be refused on an undecided trial",
+         "boat-sleep.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL, active=[], setup=install_sleep),
+         0, args=["--status"], says=["refused now:  an A/B update is on trial"],
+         not_says=["suspend now"]),
+    case("boat-sleep: a real run, even --force, never suspends an undecided trial",
+         "boat-sleep.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=ON_TRIAL, active=[], setup=install_sleep),
+         1, args=["--force", "--delay", "0"], says=["on trial"],
+         not_log=["SuspendWithFlags", "systemctl suspend"]),
+    case("boat-sleep: once this boot's trial has committed, it sleeps",
+         "boat-sleep.sh",
+         dict(cmdline="rauc.slot=B boat.trial=1", env=TRIAL_PASSED, committed_mark=True,
+              active=[], setup=install_sleep),
+         0, args=["--delay", "0"], log=["SuspendWithFlags"]),
+    case("boat-sleep: --dry-run refuses while an install runs",
+         "boat-sleep.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), active=["boat-update-install.service"],
+              setup=install_sleep),
+         1, args=["--dry-run", "--delay", "0"], says=["being installed"]),
+    case("boat-sleep: --status names a sleep inhibitor lock that would refuse",
+         "boat-sleep.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), active=[], setup=sleep_with(LOCK_HELD)),
+         0, args=["--status"],
+         says=["refused now:  a sleep inhibitor lock is held", r"xfce4-power-manager \(uid 2000\)"]),
+    case("boat-sleep: --dry-run refuses on a held lock",
+         "boat-sleep.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), active=[], setup=sleep_with(LOCK_HELD)),
+         1, args=["--dry-run", "--delay", "0"], says=["a sleep inhibitor lock is held"]),
+    case("boat-sleep: --dry-run --force goes past a lock",
+         "boat-sleep.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), active=[], setup=sleep_with(LOCK_HELD)),
+         0, args=["--dry-run", "--force", "--delay", "0"], says=["checks done"]),
+    case("boat-sleep: nothing in the way - --status says how to suspend",
+         "boat-sleep.sh",
+         dict(cmdline="rauc.slot=A", env=env_with(), active=[], setup=install_sleep),
+         0, args=["--status"], says=["suspend now:  boat-sleep"], not_says=["refused now"]),
+    # --- RAUC's handlers installing into slot A -----------------------------
+    case("pre-install: into slot A, from slot B - A is marked not committed, in both copies",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(ORDER="B A")),
+         0, want_env=env_with(ORDER="B A", A_COMMITTED=0, BOAT_RETRY=""),
+         want_bak_equal=True, says=["installing 1.1.0 into slot\\(s\\) A"],
+         extra_env=RAUC_TARGET_A),
+    case("pre-install: refuses a slot A that RAUC would write elsewhere",
+         "boat-rauc-pre-install.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(ORDER="B A")),
+         1, unchanged=True, says=["slot A is configured as %sp2, expected %sp1" % (DISK, DISK)],
+         extra_env=dict(RAUC_TARGET_A, RAUC_SLOT_DEVICE_1=DISK + "p2")),
+    case("post-install: activating slot A - grubenv.bak follows; history names it",
+         "boat-rauc-post-install.sh",
+         dict(cmdline="rauc.slot=B",
+              env=env_with(ORDER="A B", A_OK=1, A_TRY=0, A_COMMITTED=0),
+              bak=env_with(ORDER="B A", A_COMMITTED=0)),
+         0, want_env=env_with(ORDER="A B", A_OK=1, A_TRY=0, A_COMMITTED=0),
+         want_bak_equal=True, extra_env=RAUC_TARGET_A,
+         files={"data/boat-update/history": r"^\S+ installed 1\.1\.0 into slot\(s\) A, from slot B$"}),
+    # --- Firefox on the A/B layout lives on /data ---------------------------
+    case("firefox: on the A/B layout it is looked for on /data",
+         "boat-install-firefox.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(), setup=install_firefox()),
+         0, says=["installed: 150.0", "up to date"]),
+    case("firefox: --link points a new slot's launcher and menu entry at the Firefox on /data",
+         "boat-install-firefox.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(), setup=install_firefox()),
+         0, args=["--link"], check=firefox_linked),
+    case("firefox: --link with nothing installed does nothing",
+         "boat-install-firefox.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(), setup=install_firefox(installed=False)),
+         0, args=["--link"], absent=["usr/local/bin/firefox", "usr/share/applications/firefox.desktop"]),
+    case("firefox: --install refuses while /data is not mounted - the slot would lose it at the next update",
+         "boat-install-firefox.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(), setup=install_firefox(installed=False, data=False)),
+         1, args=["--install"], says=["is not mounted - on the A/B layout Firefox is installed there"]),
+    case("firefox: --remove refuses while /data is not mounted - only the launcher would go",
+         "boat-install-firefox.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(), setup=install_firefox(installed=False, data=False)),
+         1, args=["--remove"], says=["is not mounted - on the A/B layout Firefox is installed there, so it cannot be removed"]),
+    case("firefox: an upgrade on /data swaps the new tree in, and leaves no working copy",
+         "boat-install-firefox.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(), setup=firefox_upgrade()),
+         0, args=["--install"], check=firefox_version("150.0")),
+    case("firefox: a swap that fails puts the previous Firefox back",
+         "boat-install-firefox.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(), setup=firefox_upgrade(fail_swap=True)),
+         1, args=["--install"], says=["restored the previous Firefox"], check=firefox_version("149.0")),
+    case("firefox: a failed download leaves the installed Firefox alone, whatever an earlier run left",
+         "boat-install-firefox.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(), setup=firefox_upgrade(fail_download=True, stale_old=True)),
+         1, args=["--install"], not_says=["restored the previous Firefox"], check=firefox_version("149.0")),
+]
+CASES += TRIAL_CASES
+
+
+def unit_values(path, key):
+    """Every value of KEY= in a unit file (or drop-in)."""
+    out = []
+    for line in slurp(path).splitlines():
+        line = line.strip()
+        if line.startswith(key + "="):
+            out.append(line[len(key) + 1:])
+    return out
+
+
+# What the recipes' install paths expand to on the board.
+RECIPE_DIRS = {"${D}": "", "${sbindir}": "/usr/sbin", "${bindir}": "/usr/bin",
+               "${libdir}": "/usr/lib", "${nonarch_libdir}": "/usr/lib",
+               "${systemd_system_unitdir}": "/lib/systemd/system"}
+
+
+def installed_as(recipe, source):
+    """Where RECIPE's do_install puts ${WORKDIR}/SOURCE on the board."""
+    import re
+    m = re.search(r"install -m \d+ \$\{WORKDIR\}/%s\s+(?:\\\n\s*)?(\S+)" % re.escape(source), slurp(recipe))
+    if not m:
+        return None
+    path = m.group(1)
+    for var, value in RECIPE_DIRS.items():
+        path = path.replace(var, value)
+    return path
+
+
+def wiring_shutdown_retry():
+    errors = []
+    stop = unit_values(os.path.join(AB_FILES, "boat-trial-inhibit.service"), "ExecStop")
+    commit = installed_as(AB_RECIPE, "boat-commit.sh")
+    if stop != ["%s --shutdown" % commit]:
+        errors.append("boat-trial-inhibit.service ExecStop=%r, expected '%s --shutdown'" % (stop, commit))
+    start = unit_values(os.path.join(AB_FILES, "boat-trial-deadline.service"), "ExecStart")
+    if start != ["%s --deadline" % commit]:
+        errors.append("boat-trial-deadline.service ExecStart=%r, expected '%s --deadline'" % (start, commit))
+    post = unit_values(os.path.join(AB_FILES, "boat-trial-deadline.service"), "ExecStopPost")
+    if not post or "systemctl reboot" not in post[0] or "SERVICE_RESULT" not in post[0]:
+        errors.append("boat-trial-deadline.service does not reboot when its own run fails: %r" % post)
+    return errors
+
+
+def wiring_rauc_editenv():
+    errors = []
+    dropin = os.path.join(RAUC_CORE, "files", "10-boat-ab-rauc.conf")
+    wrapper = installed_as(AB_RECIPE, "grub-editenv-wrapper.sh")
+    env = [v for v in unit_values(dropin, "Environment") if v.startswith("PATH=")]
+    first = env[0][len("PATH="):].split(":")[0] if env else None
+    if wrapper is None or first != os.path.dirname(wrapper) or os.path.basename(wrapper) != "grub-editenv":
+        errors.append("rauc.service's PATH starts with %r, but boat-ab-boot installs the wrapper as %r"
+                      % (first, wrapper))
+    append = slurp(os.path.join(RAUC_CORE, "rauc_%.bbappend"))
+    if "file://10-boat-ab-rauc.conf" not in append or \
+            "${D}${systemd_system_unitdir}/rauc.service.d/10-boat-ab-rauc.conf" not in append:
+        errors.append("rauc_%.bbappend does not install 10-boat-ab-rauc.conf as a rauc.service drop-in")
+    # RAUC is started on demand: a Requires= on data.mount (RequiresMountsFor)
+    # would rerun DATA's check on every `rauc status` once it has failed.
+    if unit_values(dropin, "RequiresMountsFor"):
+        errors.append("rauc.service still has RequiresMountsFor= (it would restart DATA's check)")
+    if unit_values(dropin, "Requisite") != ["data.mount"] or unit_values(dropin, "After") != ["data.mount"]:
+        errors.append("rauc.service is not Requisite= and After= data.mount")
+    return errors
+
+
+def wiring_gate_unit():
+    errors = []
+    unit = os.path.join(AB_FILES, "boat-commit.service")
+    conflicts = " ".join(unit_values(unit, "Conflicts")).split()
+    for want in ("emergency.service", "emergency.target", "rescue.service", "rescue.target"):
+        if want not in conflicts:
+            errors.append("boat-commit.service does not conflict with %s" % want)
+    for key in ("ConditionPathExists", "ConditionPathIsDirectory", "ConditionFileNotEmpty"):
+        if unit_values(unit, key):
+            errors.append("boat-commit.service has %s= - a switch the trial deadline does not share" % key)
+    return errors
+
+
+def wiring_sleep():
+    import re
+    errors = []
+    commit = installed_as(AB_RECIPE, "boat-commit.sh")
+    pre = unit_values(os.path.join(AB_FILES, "10-boat-ab-sleep.conf"), "ExecStartPre")
+    if pre != ["%s --may-sleep" % commit]:
+        errors.append("10-boat-ab-sleep.conf ExecStartPre=%r" % pre)
+    m = re.search(r"for u in ([^;]*); do\s+install -d \$\{D\}\$\{systemd_system_unitdir\}/\$u\.service\.d\s+"
+                  r"install -m 0644 \$\{WORKDIR\}/10-boat-ab-sleep\.conf", slurp(AB_RECIPE))
+    units = set(m.group(1).replace("\\", " ").split()) if m else set()
+    for want in ("systemd-suspend", "systemd-hibernate", "systemd-hybrid-sleep",
+                 "systemd-suspend-then-hibernate"):
+        if want not in units:
+            errors.append("boat-ab-boot.bb does not install the sleep drop-in for %s.service" % want)
+    return errors
+
+
+def wiring_sshd():
+    errors = []
+    dropin = os.path.join(AB_FILES, "10-boat-ab-sshd.conf")
+    if unit_values(dropin, "TriggerLimitIntervalSec") != ["0"]:
+        errors.append("sshd.socket keeps a trigger limit a connection flood can trip")
+    if installed_as(AB_RECIPE, "10-boat-ab-sshd.conf") != "/lib/systemd/system/sshd.socket.d/10-boat-ab-sshd.conf":
+        errors.append("boat-ab-boot.bb does not install 10-boat-ab-sshd.conf as an sshd.socket drop-in")
+    return errors
+
+
+def wiring_lock_files():
+    errors = []
+    lines = [l.split() for l in slurp(os.path.join(AB_FILES, "boat-ab-tmpfiles.conf")).splitlines()
+             if l.strip() and not l.startswith("#")]
+    for path in ("/run/boat-ab/commit.lock", "/run/boat-update.lock"):
+        if ["f", path, "0600", "root", "root", "-"] not in lines:
+            errors.append("tmpfiles.d does not make %s root's alone" % path)
+    if installed_as(AB_RECIPE, "boat-ab-tmpfiles.conf") != "/usr/lib/tmpfiles.d/boat-ab.conf":
+        errors.append("boat-ab-boot.bb does not install boat-ab-tmpfiles.conf into tmpfiles.d")
+    return errors
+
+
+# The Condition*=/Assert*= keys systemd v250 knows. An unknown one is only a
+# warning in the journal, and the unit then runs with no condition at all.
+SYSTEMD_CONDITIONS = set("""Architecture Firmware Virtualization Host KernelCommandLine
+KernelVersion Environment Security Capability ACPower NeedsUpdate FirstBoot PathExists
+PathExistsGlob PathIsDirectory PathIsSymbolicLink PathIsMountPoint PathIsReadWrite
+PathIsEncrypted DirectoryNotEmpty FileNotEmpty FileIsExecutable User Group
+ControlGroupController Memory CPUs CPUFeature OSRelease MemoryPressure CPUPressure
+IOPressure""".split())
+
+
+def wiring_unit_conditions():
+    import re
+    errors = []
+    for top, _, names in os.walk(LAYER):
+        for name in names:
+            if not re.search(r"\.(service|timer|socket|mount|path|target)(\.in)?$|\.conf$", name):
+                continue
+            path = os.path.join(top, name)
+            text = slurp(path)
+            if not re.search(r"^\[(Unit|Service|Timer|Socket|Mount|Install)\]", text, re.M):
+                continue
+            for key in re.findall(r"^\s*(?:Condition|Assert)(\w+)\s*=", text, re.M):
+                if key not in SYSTEMD_CONDITIONS:
+                    errors.append("%s: systemd has no Condition/Assert %s=" % (os.path.relpath(path, LAYER), key))
+    return errors
+
+
+def recipe_parse_checks():
+    """Run boat-ab-boot.bb's anonymous python against a few configurations."""
+    import re
+    m = re.search(r"^python \(\) \{\n(.*?)^\}", slurp(AB_RECIPE), re.M | re.S)
+    if not m:
+        return ["boat-ab-boot.bb has no anonymous python"]
+
+    class Fatal(Exception):
+        pass
+
+    class BB:
+        @staticmethod
+        def fatal(msg):
+            raise Fatal(msg)
+
+    class D:
+        def __init__(self, values):
+            self.values = values
+
+        def getVar(self, name):
+            return self.values.get(name)
+
+    scope = {}
+    exec("def anon(d, bb):\n" + m.group(1), scope)
+    base = dict(BOAT_AB_DISK="/dev/nvme0n1", BOAT_AB_LAYOUT="1",
+                BBFILE_COLLECTIONS="core tegra rauc meta-boat", UBOOT_EXTLINUX="1")
+    errors = []
+    for change, want in ((dict(), None),
+                         (dict(UBOOT_EXTLINUX=""), "UBOOT_EXTLINUX"),
+                         (dict(BBFILE_COLLECTIONS="core tegra meta-boat"), "meta-rauc"),
+                         (dict(BOAT_AB_LAYOUT="0", UBOOT_EXTLINUX="",
+                               BBFILE_COLLECTIONS="core tegra meta-boat"), None)):
+        try:
+            scope["anon"](D(dict(base, **change)), BB)
+            got = None
+        except Fatal as e:
+            got = str(e)
+        if want is None and got is not None:
+            errors.append("%r: unexpected bb.fatal: %s" % (change, got))
+        elif want is not None and (got is None or want not in got):
+            errors.append("%r: expected a bb.fatal naming %s, got %r" % (change, want, got))
+    return errors
+
+
+WIRING = [
+    ("wiring: boat-trial-inhibit's stop runs boat-commit --shutdown; the deadline runs --deadline, and reboots if that fails",
+     wiring_shutdown_retry),
+    ("wiring: RAUC finds the grub-editenv wrapper first on its PATH, and waits for /data without restarting its check",
+     wiring_rauc_editenv),
+    ("wiring: boat-commit.service stops for emergency and rescue mode, and has no switch the deadline lacks",
+     wiring_gate_unit),
+    ("wiring: every kind of suspend asks boat-commit --may-sleep first", wiring_sleep),
+    ("wiring: sshd.socket has no trigger limit a connection flood could trip", wiring_sshd),
+    ("wiring: the lock files are root's alone from the start of the boot", wiring_lock_files),
+    ("recipe: BOAT_AB_LAYOUT=1 without UBOOT_EXTLINUX=1, or without meta-rauc, fails the parse",
+     recipe_parse_checks),
+    ("wiring: every unit's conditions are ones systemd knows - an unknown one is ignored, and the unit runs",
+     wiring_unit_conditions),
+]
+
+
 def check(c, root):
     import re
     board = Board(root, **c["board"])
-    before = board.raw() if os.path.exists(board.grubenv) else None
+    # A case built as dict(case(...), setup=f) changes the board first.
+    c.get("setup", lambda b: None)(board)
+    before =board.raw() if os.path.exists(board.grubenv) else None
     inode = os.stat(board.grubenv).st_ino if os.path.exists(board.grubenv) else None
     bak_path = board.grubenv + ".bak"
     bak_before = board.raw(bak_path) if os.path.exists(bak_path) else None
@@ -875,6 +1724,8 @@ def check(c, root):
                  if f not in ("grubenv", "grubenv.bak")]
     if leftovers:
         errors.append("temporary files left on the ESP: %s" % leftovers)
+    if c["check"]:
+        errors.extend(c["check"](board))
     return errors, out
 
 
@@ -896,7 +1747,21 @@ def main():
                 print("    output:\n" + "\n".join("      " + l for l in out.splitlines()))
             else:
                 print("ok:   %s" % c["name"])
-    print("%d of %d cases passed" % (len(CASES) - failed, len(CASES)))
+    # The wiring the scripts depend on: units, drop-ins, install paths.
+    for name, fn in WIRING:
+        try:
+            errors = fn()
+        except (OSError, AttributeError) as e:
+            errors = ["%s: %s" % (type(e).__name__, e)]
+        if errors:
+            failed += 1
+            print("FAIL: %s" % name)
+            for e in errors:
+                print("    " + e)
+        else:
+            print("ok:   %s" % name)
+    total = len(CASES) + len(WIRING)
+    print("%d of %d cases passed" % (total - failed, total))
     return 1 if failed else 0
 
 

@@ -43,10 +43,12 @@ Usage: boat-sleep [options]
 Suspend the boat computer to SC7 (Tegra deep sleep), leaving it wakeable
 with a Wake-on-LAN magic packet. Run it over SSH as root.
 
-  -s, --status     report SC7/Wake-on-LAN readiness and exit, changing nothing
+  -s, --status     report SC7/Wake-on-LAN readiness, and whether a sleep now
+                   would be refused and why, and exit, changing nothing
                    (runs unprivileged, but reading the WoL flag needs root -
                    without it the report says UNKNOWN rather than guessing)
-  -n, --dry-run    arm Wake-on-LAN and run every check, but do not suspend
+  -n, --dry-run    arm Wake-on-LAN and run every check, but do not suspend;
+                   exits 1 where a real run would refuse
   -f, --force      suspend anyway: without Wake-on-LAN armed, into a
                    non-deep sleep state, and past any inhibitor lock -
                    but never while an A/B update is installing or on trial
@@ -177,79 +179,40 @@ if [ "$wol_ok" = "1" ]; then
     macs="${macs# }"
 fi
 
-if [ "$STATUS_ONLY" = "1" ]; then
-    say "sleep state:  $sleep_state"
-    if [ "$STATUS_UNPRIV" = "1" ]; then
-        say "wake-on-lan:  UNKNOWN - reading the flag needs root (ethtool's WoL"
-        say "              query is gated on CAP_NET_ADMIN). Re-run as"
-        say "              'sudo boat-sleep --status' or over 'ssh root@<boat>'."
-        say "suspend now:  sudo boat-sleep"
-        exit 0
-    fi
-    if [ "$wol_ok" = "1" ]; then
-        say "wake-on-lan:  armed on ${macs:-(unknown MAC)}"
-        say "wake with:    wakeonlan ${macs%% *}   (or scripts/wake-boat.sh in the yocto-xavier-nx checkout)"
-    else
-        say "wake-on-lan:  NOT armed - the boat-wol lines above say why; 'journalctl -u boat-wol' has the boot-time attempt"
-    fi
-    say "suspend now:  boat-sleep"
-    exit 0
-fi
-
-if [ "$wol_ok" != "1" ]; then
-    if [ "$FORCE" != "1" ] && [ "$BOAT_SLEEP_REQUIRE_WOL" = "1" ]; then
-        die "no interface is armed for magic-packet wake - refusing to suspend, because nothing on the network could wake this board again. Fix it (see the boat-wol messages above), or accept it with 'boat-sleep --force', or set BOAT_SLEEP_REQUIRE_WOL=0 in $CONF."
-    fi
-    say "WARNING: suspending WITHOUT Wake-on-LAN - only a local button press or a power cycle will bring this board back"
-fi
-
-# --- Go ---------------------------------------------------------------------
-if [ -n "$macs" ]; then
-    say "wake it with: wakeonlan ${macs%% *}"
-fi
-
-if [ "$DRY_RUN" = "1" ]; then
-    say "--dry-run: checks done, not suspending"
-    exit 0
-fi
-
-say "entering SC7 (${sleep_state}) in ${BOAT_SLEEP_DELAY}s"
-say "the SSH connection will drop when the board suspends - that is the sleep, not a failure"
-
-command -v systemctl >/dev/null 2>&1 || die "systemctl not found"
-
-# Let logind run the suspend rather than writing 'mem' to /sys/power/state
-# directly: that way inhibitors are honoured and the systemd system-sleep
-# hooks (which re-arm WoL on resume, and optionally park the watchdog) run
-# on both sides of it.
-if [ "$BOAT_SLEEP_DELAY" -gt 0 ]; then
-    sleep "$BOAT_SLEEP_DELAY"
-fi
+# --- What would refuse a sleep now ------------------------------------------
+# The same checks for --status, --dry-run and the real run, so the
+# diagnostics answer the question the real run asks.
 
 # An A/B update on trial must not sleep until it is committed, --force or
 # not: its attempt is already counted, and a battery that dies overnight
 # would cost the update (docs/plans/ab-os-updates.md 5.4). Nor while one is
 # being installed: a streamed install would lose its connection half way
-# through the write. Both units exist only on an A/B image. They are asked
-# about by name because their inhibitor locks are root's, like this
-# script, and logind never holds root back with root's own locks.
-if systemctl is-active --quiet boat-trial-inhibit.service 2>/dev/null; then
-    die "an A/B update is on trial and not committed yet - refusing to sleep until it is (see 'boat-update status'; it takes a minute or two)"
-fi
-if systemctl is-active --quiet boat-update-install.service 2>/dev/null; then
-    die "an A/B update is being installed - refusing to sleep until it finishes (see 'journalctl -u boat-update-install')"
-fi
-
-if [ "$FORCE" = "1" ]; then
-    exec systemctl suspend -i
-fi
+# through the write. "On trial" is read the way boat-update and RAUC's
+# handlers read it - boat.trial=1 on the kernel command line and no commit
+# recorded by boat-commit - not only from boat-trial-inhibit, which is not
+# running yet early in a trial boot, nor after it failed. The install unit
+# is asked about by name because its inhibitor lock is root's, like this
+# script, and logind never holds root back with root's own locks. Prints
+# one reason per line; nothing when neither applies (a single-slot image
+# has neither).
+ab_refusals() {
+    if { grep -qw 'boat\.trial=1' /proc/cmdline 2>/dev/null && [ ! -e /run/boat-ab/committed ]; } \
+            || systemctl is-active --quiet boat-trial-inhibit.service 2>/dev/null; then
+        echo "an A/B update is on trial and not committed yet - refusing to sleep until it is (see 'boat-update status'; it takes a minute or two)"
+    fi
+    if systemctl is-active --quiet boat-update-install.service 2>/dev/null; then
+        echo "an A/B update is being installed - refusing to sleep until it finishes (see 'journalctl -u boat-update-install')"
+    fi
+}
 
 # Every sleep inhibitor lock in block mode, "WHO (uid N): WHY" per line, from
 # logind's own list. busctl prints the reply as: a(ssssuu) COUNT, then for
 # each lock "what" "who" "why" "mode" uid pid - strings quoted, C-escaped.
+# Fails when logind cannot be asked.
 sleep_blockers() {
-    busctl call org.freedesktop.login1 /org/freedesktop/login1 \
-        org.freedesktop.login1.Manager ListInhibitors 2>/dev/null | awk '
+    _reply="$(busctl call org.freedesktop.login1 /org/freedesktop/login1 \
+        org.freedesktop.login1.Manager ListInhibitors 2>/dev/null)" || return 1
+    printf '%s\n' "$_reply" | awk '
     {
         s = $0; n = 0; i = 1; len = length(s)
         while (i <= len) {
@@ -276,16 +239,96 @@ sleep_blockers() {
     }'
 }
 
-# A sleep inhibitor lock - the XFCE power manager's on the helm display,
-# say - makes this refuse; --force goes past every lock. The list is read
-# here because logind never holds root back with root's own locks, and this
-# runs as root. The request then asks logind's own check too
-# (SD_LOGIND_ROOT_CHECK_INHIBITORS, 1) - unlike `systemctl suspend
+# Die with the reason a real run refuses for, if there is one. A sleep
+# inhibitor lock - the XFCE power manager's on the helm display, say - makes
+# this refuse; --force goes past every lock, but never past an A/B update.
+# The list is read here because logind never holds root back with root's
+# own locks, and this runs as root. The request then asks logind's own
+# check too (SD_LOGIND_ROOT_CHECK_INHIBITORS, 1) - unlike `systemctl suspend
 # --check-inhibitors=yes`, neither refuses because the helm user is logged in.
-blockers="$(sleep_blockers)"
-if [ -n "$blockers" ]; then
-    printf '%s\n' "$blockers" | sed 's/^/  /' >&2
-    die "a sleep inhibitor lock is held (listed above) - 'boat-sleep --force' goes past it"
+check_may_sleep() {
+    _why="$(ab_refusals)"
+    [ -z "$_why" ] || die "$(printf '%s\n' "$_why" | head -n 1)"
+    [ "$FORCE" = "1" ] && return 0
+    _locks="$(sleep_blockers)" || _locks=""
+    if [ -n "$_locks" ]; then
+        printf '%s\n' "$_locks" | sed 's/^/  /' >&2
+        die "a sleep inhibitor lock is held (listed above) - 'boat-sleep --force' goes past it"
+    fi
+}
+
+# --status's last word: what a sleep now would meet. $1: the command to run.
+status_refusals() {
+    _why="$(ab_refusals)"
+    if [ -n "$_why" ]; then
+        printf '%s\n' "$_why" | while IFS= read -r _line; do say "refused now:  $_line"; done
+        return 0
+    fi
+    if _locks="$(sleep_blockers)"; then
+        if [ -n "$_locks" ]; then
+            say "refused now:  a sleep inhibitor lock is held - 'boat-sleep --force' goes past it:"
+            printf '%s\n' "$_locks" | sed 's/^/                /'
+            return 0
+        fi
+    else
+        say "locks:        UNKNOWN - logind's list of inhibitor locks could not be read"
+    fi
+    say "suspend now:  $1"
+}
+
+if [ "$STATUS_ONLY" = "1" ]; then
+    say "sleep state:  $sleep_state"
+    if [ "$STATUS_UNPRIV" = "1" ]; then
+        say "wake-on-lan:  UNKNOWN - reading the flag needs root (ethtool's WoL"
+        say "              query is gated on CAP_NET_ADMIN). Re-run as"
+        say "              'sudo boat-sleep --status' or over 'ssh root@<boat>'."
+        status_refusals "sudo boat-sleep"
+        exit 0
+    fi
+    if [ "$wol_ok" = "1" ]; then
+        say "wake-on-lan:  armed on ${macs:-(unknown MAC)}"
+        say "wake with:    wakeonlan ${macs%% *}   (or scripts/wake-boat.sh in the yocto-xavier-nx checkout)"
+    else
+        say "wake-on-lan:  NOT armed - the boat-wol lines above say why; 'journalctl -u boat-wol' has the boot-time attempt"
+    fi
+    status_refusals "boat-sleep"
+    exit 0
+fi
+
+if [ "$wol_ok" != "1" ]; then
+    if [ "$FORCE" != "1" ] && [ "$BOAT_SLEEP_REQUIRE_WOL" = "1" ]; then
+        die "no interface is armed for magic-packet wake - refusing to suspend, because nothing on the network could wake this board again. Fix it (see the boat-wol messages above), or accept it with 'boat-sleep --force', or set BOAT_SLEEP_REQUIRE_WOL=0 in $CONF."
+    fi
+    say "WARNING: suspending WITHOUT Wake-on-LAN - only a local button press or a power cycle will bring this board back"
+fi
+
+# --- Go ---------------------------------------------------------------------
+if [ -n "$macs" ]; then
+    say "wake it with: wakeonlan ${macs%% *}"
+fi
+
+if [ "$DRY_RUN" = "1" ]; then
+    check_may_sleep
+    say "--dry-run: checks done, not suspending"
+    exit 0
+fi
+
+say "entering SC7 (${sleep_state}) in ${BOAT_SLEEP_DELAY}s"
+say "the SSH connection will drop when the board suspends - that is the sleep, not a failure"
+
+command -v systemctl >/dev/null 2>&1 || die "systemctl not found"
+
+# Let logind run the suspend rather than writing 'mem' to /sys/power/state
+# directly: that way inhibitors are honoured and the systemd system-sleep
+# hooks (which re-arm WoL on resume, and optionally park the watchdog) run
+# on both sides of it.
+if [ "$BOAT_SLEEP_DELAY" -gt 0 ]; then
+    sleep "$BOAT_SLEEP_DELAY"
+fi
+
+check_may_sleep
+if [ "$FORCE" = "1" ]; then
+    exec systemctl suspend -i
 fi
 if ! busctl call org.freedesktop.login1 /org/freedesktop/login1 \
         org.freedesktop.login1.Manager SuspendWithFlags t 1; then
