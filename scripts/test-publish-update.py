@@ -111,7 +111,8 @@ if ":" not in src + dst:
     sys.exit("rsync stub: neither end is a host:path")
 src, dst = local(src), local(dst)
 if not os.path.lexists(src):
-    sys.exit("rsync: link_stat %s failed: No such file or directory (23)" % src)
+    print('rsync: link_stat "%s" failed: No such file or directory (2)' % src, file=sys.stderr)
+    sys.exit(23)
 if os.path.islink(src):
     print('skipping non-regular file "%s"' % src, file=sys.stderr)
     sys.exit(0)
@@ -529,6 +530,26 @@ def main():
                   "%d %s %s %s %s" % (rc, before, after, got, out))
         env["BOAT_PUBLISH_DEST"] = d
 
+        # The channel's index cannot be read back (the host unreachable): no
+        # publish, rather than one below the boards' serial or past a device
+        # tree change. A channel with no index yet still publishes (above).
+        d = dest()
+        env["BOAT_PUBLISH_DEST"] = "buildhost:" + d
+        publish(env, "stable", good)
+        before = index(d, "stable", os.path.join(fleet, "ca.cert.pem"))
+        unreachable = ("#!/bin/sh\nfor a; do case \"$a\" in *:*index.p7) "
+                       "echo 'ssh: connect to host buildhost port 22: Connection refused' >&2; exit 255 ;; esac; done\n"
+                       "exec %s/stub-rsync \"$@\"\n" % work)
+        with open(os.path.join(work, "stub-rsync"), "w") as f:
+            f.write(RSYNC)
+        os.chmod(os.path.join(work, "stub-rsync"), 0o755)
+        rc, out = publish(env, "stable", newer, stubs={"rsync": unreachable})
+        after = index(d, "stable", os.path.join(fleet, "ca.cert.pem"))
+        check("an index that cannot be read back stops the publish, and the channel keeps its index",
+              rc != 0 and "could not read back" in out and isinstance(before, dict) and after == before,
+              "%d %s" % (rc, out))
+        env["BOAT_PUBLISH_DEST"] = d
+
         # Two publishes at once must not share a serial: the second waits.
         d = dest()
         with open(os.path.join(fleet, "index-serial.lock"), "a") as lock:
@@ -623,11 +644,18 @@ def main():
 
         board = fake_board(work, "board-no-reboot")
         os.makedirs(os.path.join(board, "data/boat-update/incoming"))
-        with open(os.path.join(board, "data/boat-update/incoming/old-1.1.0.raucb"), "w") as f:
+        old = os.path.join(board, "data/boat-update/incoming/old-1.1.0.raucb")
+        with open(old, "w") as f:
             f.write("a copy an earlier run left")
+        day_ago = time.time() - 2 * 86400
+        os.utime(old, (day_ago, day_ago))
+        with open(os.path.join(board, "data/boat-update/incoming/other-1.2.0.raucb.part"), "w") as f:
+            f.write("another push, copying now")
         rc, out = push(board, pb, args=["--no-reboot"])
-        check("push-update --no-reboot installs and leaves no bundle on /data (nor an older one)",
-              rc == 0 and installed(board) == pb_sha and incoming(board) == [], "%s %s %s" % (rc, incoming(board), out))
+        check("push-update --no-reboot installs and leaves no bundle of its own on /data, nor one an "
+              "earlier run left a day ago - but another push's copy in progress stays",
+              rc == 0 and installed(board) == pb_sha and incoming(board) == ["other-1.2.0.raucb.part"],
+              "%s %s %s" % (rc, incoming(board), out))
 
         board = fake_board(work, "board-refuses")
         with open(os.path.join(board, "refuse"), "w"):

@@ -158,7 +158,15 @@ PUBLISHED_FIRMWARE=""
 PUBLISHED_VERSION=""
 if [[ "${BOAT_PUBLISH_DEST}" == *:* ]]; then
   need rsync
-  rsync -q "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7" "${WORK}/published.p7" 2>/dev/null || true
+  # A channel with no index yet (its first publish) is the only failure to
+  # read it back that may go on: anything else - the host unreachable, no
+  # permission - would publish below the boards' serial, or past a device
+  # tree change, with nothing said.
+  if ! rsync -q "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7" "${WORK}/published.p7" 2> "${WORK}/fetch.err"; then
+    grep -q "No such file or directory" "${WORK}/fetch.err" \
+      || die "could not read back ${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7 to check the serial and device tree against it - nothing published. rsync said: $(head -c 2000 "${WORK}/fetch.err" | tr '\n' ' ')"
+    rm -f "${WORK}/published.p7"
+  fi
 elif [[ -f "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7" ]]; then
   cp "${BOAT_PUBLISH_DEST}/${CHANNEL}/index.p7" "${WORK}/published.p7"
 fi

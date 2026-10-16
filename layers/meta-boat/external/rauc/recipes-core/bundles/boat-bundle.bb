@@ -63,7 +63,8 @@ python () {
 # Their contents, not just their paths, belong in the signature: a renewed
 # signing certificate at the same path must produce a newly signed bundle.
 # A key on a token is not a file: its URI is in the signature as text.
-do_bundle[file-checksums] += "${@'' if d.getVar('RAUC_KEY_FILE').startswith('pkcs11:') else d.getVar('RAUC_KEY_FILE') + ':True'} ${RAUC_CERT_FILE}:True ${RAUC_KEYRING_FILE}:True"
+# An unset key adds nothing here: boat_check_bundle_keys says what is missing.
+do_bundle[file-checksums] += "${@'' if (d.getVar('RAUC_KEY_FILE') or 'pkcs11:').startswith('pkcs11:') else d.getVar('RAUC_KEY_FILE') + ':True'} ${RAUC_CERT_FILE}:True ${RAUC_KEYRING_FILE}:True"
 
 DEPENDS += "e2fsprogs-native"
 

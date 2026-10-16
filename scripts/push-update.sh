@@ -76,15 +76,19 @@ NAME="$(basename "${BUNDLE}")"
 REMOTE="/data/boat-update/incoming/${NAME}"
 # A bundle is several GB on /data, which Docker and the journal share and
 # boat-update's downloads need room on: it goes again once installed, or
-# when anything fails - as do copies earlier runs left.
-remove_copy() { ssh_b "${SUDO}rm -f /data/boat-update/incoming/*.raucb /data/boat-update/incoming/*.raucb.part" || true; }
+# when anything fails. Only this push's own files: another push may be
+# copying or installing its bundle beside it.
+remove_copy() { ssh_b "${SUDO}rm -f '${REMOTE}' '${REMOTE}.part'" || true; }
 log "copying $(basename "${BUNDLE}") ($(( $(stat -c %s "${BUNDLE}") >> 20 )) MiB) ..."
 trap remove_copy EXIT
 # Over ssh rather than scp: BOAT_SSH_OPTS is written for ssh (-p, not scp's
 # -P; -l is a login there, a bandwidth limit for scp). A copy cut off half
 # way is never taken for a whole bundle: it is renamed only once complete.
+# Copies an earlier run left (a cut connection, a power cut) go too - only
+# ones untouched for a day, never a push still in progress.
 ssh_b "${SUDO}mkdir -p /data/boat-update/incoming \
-       && ${SUDO}rm -f /data/boat-update/incoming/*.raucb /data/boat-update/incoming/*.raucb.part \
+       && ${SUDO}find /data/boat-update/incoming -maxdepth 1 -type f \( -name '*.raucb' -o -name '*.raucb.part' \) -mmin +1440 -delete \
+       && ${SUDO}rm -f '${REMOTE}' '${REMOTE}.part' \
        && ${SUDO}sh -c \"cat > '${REMOTE}.part'\" \
        && ${SUDO}mv '${REMOTE}.part' '${REMOTE}'" < "${BUNDLE}" \
   || die "could not copy the bundle to ${TARGET}:${REMOTE}"
