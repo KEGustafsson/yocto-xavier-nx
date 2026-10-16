@@ -324,6 +324,31 @@ test('listen(): a throwing logger cannot kill the process either', async () => {
   }
 });
 
+test('listen(): a port another socket holds is refused, never shared', async () => {
+  // boat-sleep-listener.socket on the boat: systemd sets SO_REUSEADDR on it.
+  // A listener that set it too would bind beside it and take its packets.
+  const holder = createSocket({ type: 'udp4', reuseAddr: true });
+  await new Promise<void>((done) => holder.bind(0, '127.0.0.1', () => done()));
+  try {
+    let error: NodeJS.ErrnoException | undefined;
+    try {
+      const shared = await listen({
+        key: 'cd'.repeat(32),
+        port: holder.address().port,
+        address: '127.0.0.1',
+        onSleep: () => {},
+        logger: () => {},
+      });
+      await shared.close();
+    } catch (err) {
+      error = err as NodeJS.ErrnoException;
+    }
+    assert.equal(error?.code, 'EADDRINUSE', 'bound beside the socket that holds the port');
+  } finally {
+    await new Promise<void>((done) => holder.close(() => done()));
+  }
+});
+
 test('listen(): a rejecting async onSleep is logged, not fatal', async () => {
   // Distinct from a synchronous throw: an async handler returns a rejected
   // promise instead, which try/catch around the call does not see.
