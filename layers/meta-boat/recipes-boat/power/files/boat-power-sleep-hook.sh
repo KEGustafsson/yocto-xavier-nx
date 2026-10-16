@@ -11,6 +11,10 @@
 #   post  re-arm Wake-on-LAN, because a driver that re-probes the MAC on
 #         resume comes back with wol=d, and restart anything parked above
 #
+# (On an A/B image none of them sleeps while an update is on trial or being
+# installed: boat-ab-boot's drop-in on systemd-suspend.service refuses it,
+# root's own request included.)
+#
 # Output goes to the journal (systemd-sleep captures it); the exit status is
 # ignored by systemd, so nothing here can block or fail a suspend.
 set -eu

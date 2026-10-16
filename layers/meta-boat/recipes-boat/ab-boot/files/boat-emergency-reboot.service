@@ -3,6 +3,9 @@
 # never gets the reboot that lets GRUB count it and fall back. This reboots
 # 60 seconds in. Shared mounts (ESP, /data, swap) are nofail, so only a
 # fault in the slot itself gets here. boat.stay=1 keeps the shell.
+# A `systemctl rescue` typed on purpose reboots too: turn on
+# `boat-update debug-hold` and reboot first, or run
+# `systemctl stop boat-emergency-reboot` within the minute (docs/07).
 [Unit]
 Description=Reboot out of emergency/rescue mode (A/B fallback)
 Documentation=https://github.com/KEGustafsson/yocto-xavier-nx/blob/main/docs/plans/ab-os-updates.md

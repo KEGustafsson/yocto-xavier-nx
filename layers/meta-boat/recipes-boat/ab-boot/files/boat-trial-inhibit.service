@@ -1,6 +1,13 @@
 # No sleep while a slot is on trial: the trial deadline counts real time,
 # and a board that sleeps half way through a trial would come back with its
 # health checks long since timed out. boat-commit stops this on commit.
+# The lock is root's, and logind never holds root back with root's own
+# locks: boat-commit --may-sleep, before every suspend, is what refuses
+# root (10-boat-ab-sleep.conf).
+#
+# Before the verdict, a reboot that leaves this trial for the other slot (a
+# `boat-update rollback`) is the verdict: boat-commit --shutdown marks the
+# slot bad rather than giving its attempt back.
 #
 # Shutdown and reboot are not held off - the skipper must always be able to
 # turn the computer off. Instead, stopping this unit during a shutdown,

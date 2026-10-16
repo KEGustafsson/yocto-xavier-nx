@@ -1,0 +1,15 @@
+# A/B layout: Firefox lives on /data (boat-install-firefox), so both slots
+# share one copy and an update does not lose it. Its launcher and menu entry
+# are in the slot: this puts them back into a slot an update has just
+# written. Nothing to do until someone has installed Firefox.
+[Unit]
+Description=Launcher and menu entry for the Firefox kept on /data
+After=data.mount
+ConditionPathIsExecutable=/data/opt/firefox/firefox
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/boat-install-firefox --link
+
+[Install]
+WantedBy=multi-user.target

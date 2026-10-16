@@ -91,7 +91,11 @@ cmd_check_data() {
         die "$dev holds ${type:-no filesystem}${label:+ labelled '$label'}, not the ext4 '$DATA_LABEL' the flash puts there - not mounting it. 'boat-storage status' shows more; 'boat-storage format-data' makes a new, empty one."
     fi
     # Preen: repair what is safe to repair unattended, and refuse the rest
-    # rather than mount a damaged filesystem every slot shares.
+    # rather than mount a damaged filesystem every slot shares. Usually a
+    # second; a repair after a crash can take many minutes, and the helm
+    # desktop and non-root logins wait for it (boat-data-check.service puts
+    # this on the console too).
+    say "checking $dev (DATA) before mounting it - the desktop and non-root logins wait for this"
     rc=0
     e2fsck -p "$dev" || rc=$?
     case "$rc" in

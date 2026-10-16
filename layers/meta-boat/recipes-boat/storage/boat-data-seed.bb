@@ -15,7 +15,8 @@ DEPENDS = "e2fsprogs-native"
 S = "${WORKDIR}"
 
 BOAT_DATA_SEED = "boat-data-seed.ext4"
-# Small, because only these bytes cross the flasher's USB link.
+# Small, because only these bytes (and the journal's 64 MiB of zeros, see
+# below) cross the flasher's USB link.
 BOAT_DATA_SEED_MB ?= "512"
 
 do_configure[noexec] = "1"
@@ -30,12 +31,31 @@ do_configure[noexec] = "1"
 #                     8 TiB (2^31 4 KiB blocks), beyond any SSD this board takes
 #   -E root_owner     root-owned, without running mke2fs as root
 #   -m 1              keep 1%, not 5%, back for root on a data disk
+#
+# Then the journal is written out as real zeros. mke2fs "zeroes" it in a
+# file by punching a hole, and the flash (bmaptool, when the flashing host
+# has it) writes only the blocks that hold data - so a reflash would leave
+# the previous life's journal on DATA, under the same filesystem UUID, for
+# a crash early in the new life to replay. Every block after the journal's
+# own superblock (logical block 0) is overwritten.
 do_compile() {
     rm -f ${B}/${BOAT_DATA_SEED}
     dd if=/dev/zero of=${B}/${BOAT_DATA_SEED} bs=1M count=0 seek=${BOAT_DATA_SEED_MB} status=none
     E2FSPROGS_FAKE_TIME="${SOURCE_DATE_EPOCH}" \
         mkfs.ext4 -F -q -b 4096 -i 16384 -J size=64 -m 1 -L boat-data \
             -E root_owner=0:0,resize=2147483648 ${B}/${BOAT_DATA_SEED}
+    # The journal's (inode 8) extents: logical start, physical start, length.
+    extents="$(debugfs -R 'ex <8>' ${B}/${BOAT_DATA_SEED} 2>/dev/null \
+        | awk 'NF >= 11 && $6 == "-" && $9 == "-" { print $5, $8, $11 }')"
+    [ -n "$extents" ] || bbfatal "could not find the journal's blocks in ${BOAT_DATA_SEED} (debugfs 'ex <8>')"
+    echo "$extents" | while read logical physical length; do
+        if [ "$logical" = 0 ]; then
+            physical=$((physical + 1))
+            length=$((length - 1))
+        fi
+        dd if=/dev/zero of=${B}/${BOAT_DATA_SEED} bs=4096 seek=$physical count=$length \
+            conv=notrunc status=none || exit 1
+    done
 }
 
 do_deploy() {

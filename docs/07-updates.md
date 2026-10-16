@@ -46,7 +46,8 @@ UEFI -> L4TLauncher -> GRUB (NVMe ESP) -> kernel + initrd of slot A or B
 - Every other way of failing also ends in a reset:
   - a kernel panic;
   - an initramfs that cannot find its root;
-  - systemd's emergency mode;
+  - systemd's emergency or rescue mode (after 60 s - also a
+    `systemctl rescue` you type yourself; see "When something goes wrong");
   - a wedged PID 1 (the hardware watchdog);
   - a trial still not committed after 15 minutes;
   - a GRUB that hangs (the UEFI watchdog), or a `grub.cfg` that is missing
@@ -160,13 +161,20 @@ offer - so `download && install --reboot` stops there. A command you type
 does not wait on the background check or download: it stops it (the
 download carries on from where it was at its next run) and goes ahead.
 `rollback` sets GRUB's state itself, so it works even when `/data`, and so
-RAUC, is what the new release broke.
+RAUC, is what the new release broke. A `rollback` from a slot still on
+trial is a verdict: that slot is marked bad, and the release is recorded as
+failed and not offered again.
 
 `install` runs as its own systemd unit, so losing the SSH session half way
-does not stop it; it still exits non-zero if the install fails. After the reboot the new slot is **on trial**. `boat-update
-status` says so, and sleep is held off until `boat-commit` has decided.
-That takes a minute or two. `boat-sleep` refuses meanwhile, and while an
-install runs, even with `--force`.
+does not stop it; it still exits non-zero if the install fails. While it
+writes the other slot, shutdown is held off too: the power key and XFCE's
+Shut Down do nothing until it finishes (cutting the power is safe - the old
+slot stays the one that boots - but the install has to be run again).
+After the reboot the new slot is **on trial**. `boat-update status` says
+so, and sleep is held off until `boat-commit` has decided. That takes a
+minute or two. Every suspend is refused meanwhile, and while an install
+runs: `boat-sleep` (even with `--force`; `boat-sleep --status` says why),
+the helm's menu, even root's own `systemctl suspend`.
 
 Turning the computer off, or rebooting it, before the verdict does not fail
 the release: the next boot tries it again. That happens **once** per
@@ -190,6 +198,10 @@ stick instead, and then neither slot runs.
   - That version is never offered to this board again - also when the
     trial ended before `boat-commit` could say so (a kernel panic, a power
     cut): `boat-update` notices the uncommitted slot it installed into.
+    A failure the board itself can cause (the ESP, `grubenv`, RAUC, a
+    commit that could not be written) is recorded as such; once that is
+    fixed, installing the bundle file by name (`sudo boat-update install
+    <file>`, or `scripts/push-update.sh`) tries the release again.
 
 **Without internet**, from a laptop on the boat's network:
 
@@ -430,6 +442,8 @@ then-install is the fallback.
 - Docker (`/data/docker`) and the compose files;
 - `/home/boat`;
 - the persistent journal (capped at 256 MiB);
+- Firefox, if you installed it with `boat-install-firefox` (in
+  `/data/opt/firefox`; each new slot gets its menu entry back at boot);
 - RAUC's state and `boat-update`'s state.
 
 `root`'s home stays in the slot, so its SSH keys still work if DATA is what
@@ -458,9 +472,16 @@ stays deleted. (An image built before this rule carries them all, once.)
 **Any other edit under `/etc` does not survive an update.** Put it in
 `meta-boat`, or on `/data`.
 
+**Anything else installed into the slot** - outside `/data` and
+`/home/boat` - **is gone after the next update.**
+
 `boat-storage status` shows the partitions. If `/data` will not mount, the
 boat still boots without it — the shared mounts are all optional — and
-`journalctl -b -u boat-data-check` says why. `sudo boat-storage format-data`
+`journalctl -b -u boat-data-check` says why. While DATA is being checked -
+a second normally, many minutes for a repair after a crash - the helm
+desktop and every login but `root`'s wait for it, so nobody logs into the
+slot's stale copy of a home; the console says so, and `ssh root@` works
+meanwhile. `sudo boat-storage format-data`
 makes a new, empty DATA filesystem. It asks first, and only you can run it:
 nothing formats DATA on its own.
 
@@ -487,6 +508,19 @@ whole SSD.
   - A health check that fails for reasons outside the OS — an app that
     needs the internet, say — belongs out of
     `BOAT_HEALTH_UNITS`/`health.d`.
+  - The gate does not look at the helm display or your compose stack. If
+    a release breaks them, `sudo boat-update rollback`. To gate a unit
+    that lives on `/data` (`boat-compose.service`, say), list it in
+    `BOAT_HEALTH_DATA_UNITS` in `/etc/boat-update/health.conf`, not in
+    `BOAT_HEALTH_UNITS`: it is then required only when `/data` is mounted.
+    For anything else, set `BOAT_HEALTH_CHECKS_D=1` and put executables in
+    `/data/boat-update/health.d`. They run on trial boots only, once
+    `/data` is mounted, as root and with no display; each must exit 0
+    within `BOAT_HEALTH_CHECK_TIMEOUT` seconds, and its output is in
+    `journalctl -b -u boat-commit`. One that fails fails the trial, and
+    that release is not offered again.
+  - A `health.conf` the shell cannot read is an ALERT in `status`, and the
+    gate uses its defaults until it is fixed.
   - On the bench, `sudo boat-update debug-hold on` keeps a failing slot up
     for inspection. It lasts until a boot that carried it comes up
     healthy, then turns itself off; `debug-hold off` ends it sooner.
@@ -494,6 +528,10 @@ whole SSD.
   slots used up their attempts. The ALERT says whether the running slot was
   made usable again (it had passed a trial) or not (a failed release, or an
   install that was cut off - install a release, or reflash).
+- **Rescue or emergency mode reboots after 60 s**, even a `systemctl
+  rescue` you typed. To keep the shell, `sudo boat-update debug-hold on`
+  and reboot first, or run `systemctl stop boat-emergency-reboot` within
+  the minute.
 - **"could not reset slot X's attempt count"**, or **"boat-grubenv-guard
   failed"**. The ESP will not take writes - usually a damaged filesystem.
   While this lasts every reboot counts against the slot, and two of them

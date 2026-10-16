@@ -29,6 +29,9 @@ SRC_URI = "\
     file://health.conf \
     file://10-boat-ab-esp.conf \
     file://10-boat-ab-watchdog.conf \
+    file://10-boat-ab-sshd.conf \
+    file://10-boat-ab-sleep.conf \
+    file://boat-ab-tmpfiles.conf \
 "
 
 S = "${WORKDIR}"
@@ -50,6 +53,14 @@ python () {
             'rauc' not in (d.getVar('BBFILE_COLLECTIONS') or '').split():
         bb.fatal("BOAT_AB_LAYOUT = \"1\" needs meta-rauc in bblayers.conf "
                  "(scripts/02-configure-build.sh with AB_LAYOUT=1, or kas/ab-updates.yml, adds it)")
+    # GRUB loads /boot/Image and /boot/initrd from the slot, and only
+    # meta-tegra's l4t-launcher-extlinux puts them there - which it adds
+    # only with UBOOT_EXTLINUX = "1". Without it the image builds and
+    # flashes, and then neither slot ever boots.
+    if d.getVar('BOAT_AB_LAYOUT') == '1' and d.getVar('UBOOT_EXTLINUX') != '1':
+        bb.fatal("BOAT_AB_LAYOUT = \"1\" needs UBOOT_EXTLINUX = \"1\": it puts /boot/Image and "
+                 "/boot/initrd into each slot for GRUB (scripts/02-configure-build.sh with "
+                 "AB_LAYOUT=1, or kas/ab-updates.yml, sets it)")
 }
 
 do_install() {
@@ -78,6 +89,23 @@ do_install() {
              boat-emergency-reboot.service; do
         install -m 0644 ${WORKDIR}/$u ${D}${systemd_system_unitdir}/
     done
+
+    # No suspend during a trial or an install, whoever asks (boat-commit
+    # --may-sleep); no connection flood can fail sshd.socket, which the
+    # health gate requires.
+    for u in systemd-suspend systemd-hibernate systemd-hybrid-sleep \
+             systemd-suspend-then-hibernate; do
+        install -d ${D}${systemd_system_unitdir}/$u.service.d
+        install -m 0644 ${WORKDIR}/10-boat-ab-sleep.conf \
+            ${D}${systemd_system_unitdir}/$u.service.d/10-boat-ab-sleep.conf
+    done
+    install -d ${D}${systemd_system_unitdir}/sshd.socket.d
+    install -m 0644 ${WORKDIR}/10-boat-ab-sshd.conf \
+        ${D}${systemd_system_unitdir}/sshd.socket.d/10-boat-ab-sshd.conf
+
+    # The A/B lock (and boat-update's) root-only from the start of the boot.
+    install -d ${D}${nonarch_libdir}/tmpfiles.d
+    install -m 0644 ${WORKDIR}/boat-ab-tmpfiles.conf ${D}${nonarch_libdir}/tmpfiles.d/boat-ab.conf
 
     install -d ${D}${sysconfdir}/boat-update
     install -m 0644 ${WORKDIR}/health.conf ${D}${sysconfdir}/boat-update/health.conf
@@ -123,6 +151,7 @@ FILES:${PN} = "\
     ${systemd_system_unitdir} \
     ${systemd_unitdir}/system.conf.d \
     ${sysconfdir}/boat-update/health.conf \
+    ${nonarch_libdir}/tmpfiles.d/boat-ab.conf \
 "
 
 # The health gate's settings are the operator's to tune.

@@ -45,11 +45,17 @@ alert() {
 # seconds - a writer that went on without it could undo the decision of
 # the one holding it (a commit over a deadline's verdict) - and the caller
 # then writes nothing: GRUB's own attempt count is the safe answer.
+# The lock file is root's alone (0600; boat-ab-boot's tmpfiles.d entry makes
+# it so at boot, and this keeps it so): flock(2) locks a file opened only
+# for reading as well, so any user who could open it could hold every
+# grubenv writer off - and fail every trial.
 BOAT_AB_LOCK_WAIT=60
 _ab_locked=0
 ab_lock() {
     [ "$_ab_locked" = 1 ] && return 0
     mkdir -p "$BOAT_AB_RUNDIR"
+    (umask 077; : >> "$BOAT_AB_RUNDIR/commit.lock") 2>/dev/null
+    chmod 0600 "$BOAT_AB_RUNDIR/commit.lock" 2>/dev/null || true
     exec 9>"$BOAT_AB_RUNDIR/commit.lock"
     if ! flock -w "$BOAT_AB_LOCK_WAIT" 9; then
         exec 9>&-

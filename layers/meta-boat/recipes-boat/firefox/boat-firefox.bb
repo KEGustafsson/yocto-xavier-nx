@@ -9,19 +9,33 @@ docs/05-phase2-boat-computer-layer.md 'A browser on the boat's own screen'."
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
-SRC_URI = "file://boat-install-firefox.sh"
+SRC_URI = "file://boat-install-firefox.sh \
+           file://boat-firefox-link.service \
+"
 
 S = "${WORKDIR}"
 
-inherit allarch
+# On the A/B layout the script installs Firefox on /data, so that updates
+# keep it and both slots share it (and so one profile version); this unit
+# puts its launcher and menu entry back into each new slot at boot. A
+# single-slot image keeps /opt/firefox and gets no unit.
+BOAT_FIREFOX_AB_UNIT = "${@'boat-firefox-link.service' if d.getVar('BOAT_AB_LAYOUT') == '1' else ''}"
+
+inherit allarch ${@'systemd' if d.getVar('BOAT_AB_LAYOUT') == '1' else ''}
 
 do_install() {
     install -d ${D}${bindir}
     install -m 0755 ${WORKDIR}/boat-install-firefox.sh \
         ${D}${bindir}/boat-install-firefox
+    for u in ${BOAT_FIREFOX_AB_UNIT}; do
+        install -d ${D}${systemd_system_unitdir}
+        install -m 0644 ${WORKDIR}/$u ${D}${systemd_system_unitdir}/$u
+    done
 }
 
-FILES:${PN} = "${bindir}/boat-install-firefox"
+SYSTEMD_SERVICE:${PN} = "${BOAT_FIREFOX_AB_UNIT}"
+
+FILES:${PN} = "${bindir}/boat-install-firefox ${systemd_system_unitdir}"
 
 # Deliberately not run at build or first boot. do_rootfs has no business
 # reaching out to the internet - it would make the image non-reproducible and
@@ -31,6 +45,7 @@ FILES:${PN} = "${bindir}/boat-install-firefox"
 #
 # NOTE this means the browser is NOT in the flashed image: `boat-install-firefox
 # --install` has to be run on the device before there is a Firefox to launch.
+# On the A/B layout that is once for both slots and every later update.
 #
 # What the script actually calls. curl/tar/xz/sha256sum are all present in any
 # image built from packagegroup-boat (curl via -nettools, the rest from
