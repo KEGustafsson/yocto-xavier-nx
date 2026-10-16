@@ -1075,11 +1075,24 @@ esac
 
         @contextlib.contextmanager
         def as_root():
+            # boat-update as root, for the checks that need it. The harness's
+            # files belong to whoever runs it, which on the board is root: the
+            # client key's owner check goes by the real uid (CI is not root).
             euid, os.geteuid = os.geteuid, lambda: 0
+            key_problem = bu.client_key_problem
+
+            def real_owner(conf):
+                fake, os.geteuid = os.geteuid, euid
+                try:
+                    return key_problem(conf)
+                finally:
+                    os.geteuid = fake
+            bu.client_key_problem = real_owner
             try:
                 yield
             finally:
                 os.geteuid = euid
+                bu.client_key_problem = key_problem
 
         mark = board + "/run/boat-ab/committed"
 
@@ -1737,7 +1750,11 @@ esac
         check("a flashed slot's release is read without mounting it (a mount left behind blocks RAUC)",
               got == "0.9.0" and "debugfs -R cat /etc/boat-release %sp1" % DISK in log
               and not re.search(r"^u?mount ", log, re.M), "%s\n%s" % (got, log))
+        # chronyc that cannot answer (chronyd not running, or not installed:
+        # a stub that fails, so a host with chrony - CI's runner - cannot
+        # answer for the board), and timedatectl decides.
         os.rename(binp + "/chronyc", board + "/chronyc.away")
+        write(binp + "/chronyc", "#!/bin/sh\necho '506 Cannot talk to daemon' >&2\nexit 1\n", 0o755)
         try:
             write(board + "/ntp", "yes\n")
             synced_yes = bu.clock_synced()
