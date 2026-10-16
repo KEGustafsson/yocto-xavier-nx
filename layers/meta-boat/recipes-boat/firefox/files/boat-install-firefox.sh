@@ -199,6 +199,11 @@ launcher)
     ;;
 remove)
     [ "$(id -u)" -eq 0 ] || die "must run as root (try: sudo ${SELF} --remove)"
+    # Without /data, only the slot's launcher would go, and the link service
+    # would put it back once /data mounts.
+    if [ -n "$OLD_PREFIX" ] && ! data_mounted; then
+        die "${AB_DATA} is not mounted - on the A/B layout Firefox is installed there, so it cannot be removed now"
+    fi
     [ -n "$CURRENT" ] || say "nothing installed at ${PREFIX}"
     rm -rf "$PREFIX" "$BINLINK" "$DESKTOP"
     # A copy this script put in the slot before Firefox moved to /data.

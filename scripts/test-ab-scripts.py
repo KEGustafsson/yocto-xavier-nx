@@ -1431,6 +1431,10 @@ esac
          "boat-install-firefox.sh",
          dict(cmdline="rauc.slot=B", env=env_with(), setup=install_firefox(installed=False, data=False)),
          1, args=["--install"], says=["is not mounted - on the A/B layout Firefox is installed there"]),
+    case("firefox: --remove refuses while /data is not mounted - only the launcher would go",
+         "boat-install-firefox.sh",
+         dict(cmdline="rauc.slot=B", env=env_with(), setup=install_firefox(installed=False, data=False)),
+         1, args=["--remove"], says=["is not mounted - on the A/B layout Firefox is installed there, so it cannot be removed"]),
     case("firefox: an upgrade on /data swaps the new tree in, and leaves no working copy",
          "boat-install-firefox.sh",
          dict(cmdline="rauc.slot=B", env=env_with(), setup=firefox_upgrade()),
@@ -1564,6 +1568,33 @@ def wiring_lock_files():
     return errors
 
 
+# The Condition*=/Assert*= keys systemd v250 knows. An unknown one is only a
+# warning in the journal, and the unit then runs with no condition at all.
+SYSTEMD_CONDITIONS = set("""Architecture Firmware Virtualization Host KernelCommandLine
+KernelVersion Environment Security Capability ACPower NeedsUpdate FirstBoot PathExists
+PathExistsGlob PathIsDirectory PathIsSymbolicLink PathIsMountPoint PathIsReadWrite
+PathIsEncrypted DirectoryNotEmpty FileNotEmpty FileIsExecutable User Group
+ControlGroupController Memory CPUs CPUFeature OSRelease MemoryPressure CPUPressure
+IOPressure""".split())
+
+
+def wiring_unit_conditions():
+    import re
+    errors = []
+    for top, _, names in os.walk(LAYER):
+        for name in names:
+            if not re.search(r"\.(service|timer|socket|mount|path|target)(\.in)?$|\.conf$", name):
+                continue
+            path = os.path.join(top, name)
+            text = slurp(path)
+            if not re.search(r"^\[(Unit|Service|Timer|Socket|Mount|Install)\]", text, re.M):
+                continue
+            for key in re.findall(r"^\s*(?:Condition|Assert)(\w+)\s*=", text, re.M):
+                if key not in SYSTEMD_CONDITIONS:
+                    errors.append("%s: systemd has no Condition/Assert %s=" % (os.path.relpath(path, LAYER), key))
+    return errors
+
+
 def recipe_parse_checks():
     """Run boat-ab-boot.bb's anonymous python against a few configurations."""
     import re
@@ -1620,6 +1651,8 @@ WIRING = [
     ("wiring: the lock files are root's alone from the start of the boot", wiring_lock_files),
     ("recipe: BOAT_AB_LAYOUT=1 without UBOOT_EXTLINUX=1, or without meta-rauc, fails the parse",
      recipe_parse_checks),
+    ("wiring: every unit's conditions are ones systemd knows - an unknown one is ignored, and the unit runs",
+     wiring_unit_conditions),
 ]
 
 
